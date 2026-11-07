@@ -29,7 +29,7 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 
 - **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
 
-- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents) and FAT `.X` / `.SX` binaries.
+- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents), relocation-aware module patching (`SXKERNEL.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the detailed Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification.
 
 ### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
 For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
