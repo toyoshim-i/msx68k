@@ -214,17 +214,77 @@ impl Opm {
 }
 
 /// Zilog Z8530 Serial Communications Controller (`$E98001`–`$E98007` odd addresses).
+///
+/// Channel B (`$E98001` Control, `$E98003` Data) interfaces the X68000 3-byte serial mouse
+/// (`[status, dx, dy]`) at Interrupt Priority Level 5 (`Vector $54` / `$55`).
 #[derive(Debug, Default, Clone)]
 pub struct Scc {
     reg_ptr_a: u8,
     reg_ptr_b: u8,
     regs_a: [u8; 16],
     regs_b: [u8; 16],
+    rx_queue_b: [u8; 3],
+    rx_head_b: usize,
+    rx_len_b: usize,
+    ius_b: bool,
+    accum_dx: i32,
+    accum_dy: i32,
+    left_button: bool,
+    right_button: bool,
 }
 
 impl Scc {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Resets SCC registers while preserving host mouse button state.
+    pub fn reset(&mut self) {
+        self.reg_ptr_a = 0;
+        self.reg_ptr_b = 0;
+        self.regs_a = [0; 16];
+        self.regs_b = [0; 16];
+        self.rx_head_b = 0;
+        self.rx_len_b = 0;
+        self.ius_b = false;
+    }
+
+    /// Accumulates relative mouse movement (`+dx` right, `+dy` down) to be reported on the next
+    /// SCC Channel B `RTS` (`WR5` bit 1) polling edge.
+    pub fn add_mouse_delta(&mut self, dx: i32, dy: i32) {
+        self.accum_dx = self.accum_dx.saturating_add(dx);
+        self.accum_dy = self.accum_dy.saturating_add(dy);
+    }
+
+    /// Updates left and right mouse button state.
+    pub fn set_mouse_buttons(&mut self, left: bool, right: bool) {
+        self.left_button = left;
+        self.right_button = right;
+    }
+
+    /// Returns `true` if SCC Channel B has a pending Level 5 Receive interrupt.
+    #[inline]
+    pub const fn has_pending_interrupt(&self) -> bool {
+        let mie = ((self.regs_b[9] | self.regs_a[9]) & 0x08) != 0;
+        let rx_int_en = (self.regs_b[1] & 0x18) != 0;
+        mie && rx_int_en && !self.ius_b && self.rx_len_b > 0
+    }
+
+    /// Acknowledges the Level 5 SCC interrupt and returns the status-modified vector
+    /// (`(WR2 & 0xF0) | 0x04` = `0x54` for Channel B Receive Character Available).
+    pub fn acknowledge_interrupt(&mut self) -> Option<u8> {
+        if !self.has_pending_interrupt() {
+            return None;
+        }
+        self.ius_b = true;
+        let base = if self.regs_b[2] != 0 {
+            self.regs_b[2]
+        } else if self.regs_a[2] != 0 {
+            self.regs_a[2]
+        } else {
+            0x50
+        };
+        Some((base & 0xF0) | 0x04)
     }
 
     pub fn read_u8(&mut self, addr: u32) -> Result<u8, BusFault> {
@@ -241,15 +301,37 @@ impl Scc {
                 let r = (self.reg_ptr_b & 0x0F) as usize;
                 self.reg_ptr_b = 0;
                 if r == 0 {
-                    // RR0: Bit 2 = Tx Buffer Empty (0x04), Bit 5 = CTS (0x20)
-                    Ok(0x24)
+                    // RR0: Bit 0 = Rx Char Available (0x01), Bit 2 = Tx Buffer Empty (0x04), Bit 5 = CTS (0x20)
+                    let rx_avail = u8::from(self.rx_len_b > 0);
+                    Ok(0x24 | rx_avail)
                 } else if r == 1 {
                     Ok(0x01) // All Sent
+                } else if r == 2 {
+                    let base = if self.regs_b[2] != 0 {
+                        self.regs_b[2]
+                    } else {
+                        self.regs_a[2]
+                    };
+                    if self.rx_len_b > 0 {
+                        Ok((base & 0xF0) | 0x04)
+                    } else {
+                        Ok((base & 0xF0) | 0x06)
+                    }
                 } else {
                     Ok(self.regs_b[r])
                 }
             }
-            0x03 => Ok(0x00), // Channel B data
+            0x03 => {
+                // Channel B data (Mouse 3-byte packet stream)
+                if self.rx_len_b > 0 {
+                    let b = self.rx_queue_b[self.rx_head_b];
+                    self.rx_head_b += 1;
+                    self.rx_len_b -= 1;
+                    Ok(b)
+                } else {
+                    Ok(0x00)
+                }
+            }
             0x05 => {
                 // Channel A control
                 let r = (self.reg_ptr_a & 0x0F) as usize;
@@ -278,16 +360,41 @@ impl Scc {
         match a & 0x07 {
             0x01 => {
                 if self.reg_ptr_b == 0 {
-                    self.reg_ptr_b = val & 0x0F;
+                    let cmd = (val >> 3) & 0x07;
+                    if cmd == 0x07 || cmd == 0x05 || cmd == 0x06 {
+                        // Reset Highest IUS (0x38) / Reset Tx Int (0x28) / Error Reset (0x30)
+                        self.ius_b = false;
+                    }
+                    let high = if cmd == 0x01 { 8 } else { 0 };
+                    self.reg_ptr_b = (val & 0x07) | high;
                 } else {
                     let r = (self.reg_ptr_b & 0x0F) as usize;
+                    let old = self.regs_b[r];
                     self.regs_b[r] = val;
                     self.reg_ptr_b = 0;
+                    if r == 5 && (old & 0x02) == 0 && (val & 0x02) != 0 {
+                        // RTS (bit 1) 0 -> 1 edge triggers 3-byte mouse packet [status, dx, dy]
+                        let dx = self.accum_dx.clamp(-127, 127);
+                        let dy = self.accum_dy.clamp(-127, 127);
+                        self.accum_dx -= dx;
+                        self.accum_dy -= dy;
+                        let status = (if self.right_button { 0x02 } else { 0x00 })
+                            | (if self.left_button { 0x01 } else { 0x00 });
+                        self.rx_queue_b = [status, (dx as i8) as u8, (dy as i8) as u8];
+                        self.rx_head_b = 0;
+                        self.rx_len_b = 3;
+                        self.ius_b = false;
+                    }
                 }
             }
             0x05 => {
                 if self.reg_ptr_a == 0 {
-                    self.reg_ptr_a = val & 0x0F;
+                    let cmd = (val >> 3) & 0x07;
+                    if cmd == 0x07 {
+                        self.ius_b = false;
+                    }
+                    let high = if cmd == 0x01 { 8 } else { 0 };
+                    self.reg_ptr_a = (val & 0x07) | high;
                 } else {
                     let r = (self.reg_ptr_a & 0x0F) as usize;
                     self.regs_a[r] = val;

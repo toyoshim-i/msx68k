@@ -115,8 +115,19 @@ impl X68kBus {
     pub fn new(ram_size_bytes: usize, timing: BusTimingConfig) -> Self {
         let ram_bytes = ram_size_bytes.min(MAX_MAIN_RAM_BYTES);
         let mut sram = vec![0u8; 16 * 1024];
-        // Populate standard X68000 SRAM header ("X68000W" at $ED0000) and configured RAM size at $ED0008
-        sram[0..8].copy_from_slice(b"\x00X68000W");
+        // Populate standard X68000 SRAM factory defaults ("Ｘ68000W" = $82 $77 "68000W" at $ED0000,
+        // boot vectors, contrast, key repeat, and default Text Palette at $ED002E..$ED003B)
+        // and write the configured Main RAM size at $ED0008 so IPLROM preserves it.
+        const DEFAULT_SRAM_HEADER: [u8; 0x5A] = [
+            0x82, 0x77, 0x36, 0x38, 0x30, 0x30, 0x30, 0x57, 0x00, 0x10, 0x00, 0x00, 0x00, 0xBF,
+            0xFF, 0xFC, 0x00, 0xED, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x4E, 0x07,
+            0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x07, 0x00, 0x0E, 0x00,
+            0x0D, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x3E, 0xFF, 0xC0, 0xFF, 0xFE, 0xDE, 0x6C,
+            0x40, 0x22, 0x03, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0xFF, 0xDC, 0x00, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x20,
+            0x00, 0x09, 0xF9, 0x01, 0x00, 0x00,
+        ];
+        sram[0..DEFAULT_SRAM_HEADER.len()].copy_from_slice(&DEFAULT_SRAM_HEADER);
         let ram_end = (ram_bytes as u32).to_be_bytes();
         sram[8..12].copy_from_slice(&ram_end);
 
@@ -207,6 +218,12 @@ impl X68kBus {
         self.gvram.as_deref()
     }
 
+    /// Direct slice access to Sprite/PCG/BG RAM (`64 KB`, `$EB0000`–`$EBFFFF`) if allocated.
+    #[inline]
+    pub fn sprite_bg(&self) -> Option<&[u8]> {
+        self.sprite_bg.as_deref()
+    }
+
     /// Direct slice access to the 1 MB ROM window (`$F00000`–`$FFFFFF`).
     #[inline]
     pub fn rom(&self) -> &[u8] {
@@ -293,12 +310,15 @@ impl X68kBus {
 
     /// Returns the highest pending hardware interrupt priority level (`0..=7`) across all peripherals:
     /// - Level 6: MFP (`MC68901`)
+    /// - Level 5: SCC (`Z8530` Mouse / RS-232C)
     /// - Level 3: DMAC (`HD63450`)
     /// - Level 1: I/O Interrupt Controller (`FDC`, `FDD`, `HDC`, `PRN`)
     #[inline]
     pub fn highest_pending_ipl(&self) -> u8 {
         if self.mfp.has_pending_interrupt() {
             6
+        } else if self.scc.has_pending_interrupt() {
+            5
         } else if self.dmac.has_pending_interrupt() {
             3
         } else if self.ioi.has_pending_interrupt() {
@@ -356,12 +376,14 @@ impl Bus for X68kBus {
         self.dmac.reset();
         self.mfp.reset();
         self.opm.reset();
+        self.scc.reset();
         self.fdc.reset(&mut self.ioi);
     }
 
     fn acknowledge_interrupt(&mut self, level: u8) -> Option<u8> {
         match level {
             6 => self.mfp.acknowledge_interrupt(),
+            5 => self.scc.acknowledge_interrupt(),
             3 => self.dmac.acknowledge_interrupt(),
             1 => self.ioi.acknowledge_interrupt(),
             _ => None,

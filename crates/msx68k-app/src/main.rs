@@ -22,7 +22,7 @@ use msx68k_bus::{CpuSpeedMode, VmConfig, X68kVm};
 use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -30,6 +30,80 @@ use winit::window::{Window, WindowId};
 const DEFAULT_IPL_PATH: &str = "roms/IPLROM.DAT";
 const DEFAULT_CGROM_PATH: &str = "roms/CGROM.DAT";
 const DEFAULT_FD0_PATH: &str = "disks/HUMAN302.XDF";
+
+/// Maps a host `winit::keyboard::KeyCode` to a 7-bit X68000 hardware scan code (`0x01`..=`0x7F`).
+fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
+    let sc = match code {
+        KeyCode::Escape => 0x01,
+        KeyCode::Digit1 => 0x02,
+        KeyCode::Digit2 => 0x03,
+        KeyCode::Digit3 => 0x04,
+        KeyCode::Digit4 => 0x05,
+        KeyCode::Digit5 => 0x06,
+        KeyCode::Digit6 => 0x07,
+        KeyCode::Digit7 => 0x08,
+        KeyCode::Digit8 => 0x09,
+        KeyCode::Digit9 => 0x0A,
+        KeyCode::Digit0 => 0x0B,
+        KeyCode::Minus => 0x0C,
+        KeyCode::Equal => 0x0D,
+        KeyCode::IntlYen => 0x0E,
+        KeyCode::Backspace => 0x0F,
+        KeyCode::Tab => 0x10,
+        KeyCode::KeyQ => 0x11,
+        KeyCode::KeyW => 0x12,
+        KeyCode::KeyE => 0x13,
+        KeyCode::KeyR => 0x14,
+        KeyCode::KeyT => 0x15,
+        KeyCode::KeyY => 0x16,
+        KeyCode::KeyU => 0x17,
+        KeyCode::KeyI => 0x18,
+        KeyCode::KeyO => 0x19,
+        KeyCode::KeyP => 0x1A,
+        KeyCode::BracketLeft => 0x1B,
+        KeyCode::BracketRight => 0x1C,
+        KeyCode::Enter | KeyCode::NumpadEnter => 0x1D,
+        KeyCode::KeyA => 0x1E,
+        KeyCode::KeyS => 0x1F,
+        KeyCode::KeyD => 0x20,
+        KeyCode::KeyF => 0x21,
+        KeyCode::KeyG => 0x22,
+        KeyCode::KeyH => 0x23,
+        KeyCode::KeyJ => 0x24,
+        KeyCode::KeyK => 0x25,
+        KeyCode::KeyL => 0x26,
+        KeyCode::Semicolon => 0x27,
+        KeyCode::Quote => 0x28,
+        KeyCode::Backslash => 0x29,
+        KeyCode::KeyZ => 0x2A,
+        KeyCode::KeyX => 0x2B,
+        KeyCode::KeyC => 0x2C,
+        KeyCode::KeyV => 0x2D,
+        KeyCode::KeyB => 0x2E,
+        KeyCode::KeyN => 0x2F,
+        KeyCode::KeyM => 0x30,
+        KeyCode::Comma => 0x31,
+        KeyCode::Period => 0x32,
+        KeyCode::Slash => 0x33,
+        KeyCode::IntlRo => 0x34,
+        KeyCode::Space => 0x35,
+        KeyCode::Home => 0x36,
+        KeyCode::Delete => 0x37,
+        KeyCode::PageUp => 0x38,
+        KeyCode::PageDown => 0x39,
+        KeyCode::End => 0x3A,
+        KeyCode::ArrowLeft => 0x3B,
+        KeyCode::ArrowUp => 0x3C,
+        KeyCode::ArrowRight => 0x3D,
+        KeyCode::ArrowDown => 0x3E,
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => 0x70,
+        KeyCode::ControlLeft | KeyCode::ControlRight => 0x71,
+        KeyCode::AltLeft => 0x55,
+        KeyCode::AltRight => 0x56,
+        _ => return None,
+    };
+    Some(sc)
+}
 
 #[derive(Debug, Clone)]
 struct AppArgs {
@@ -63,7 +137,7 @@ impl Default for AppArgs {
             fd0_path,
             fd1_path,
             speed_mode: CpuSpeedMode::Mhz10,
-            ram_mb: 2,
+            ram_mb: 4,
             scale: 1,
         }
     }
@@ -128,7 +202,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
-                           --ram-mb <1..12>     Main RAM size in MB (default: 2)\n  \
+                           --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n\n\
                          Hotkeys:\n  \
                            F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F12: Reset"
@@ -157,6 +231,9 @@ struct Msx68kApp {
     last_title_update: Instant,
     next_frame_deadline: Instant,
     rendered_frames: u64,
+    last_cursor_pos: Option<(f64, f64)>,
+    mouse_left: bool,
+    mouse_right: bool,
 }
 
 impl Msx68kApp {
@@ -222,6 +299,9 @@ impl Msx68kApp {
             last_title_update: now,
             next_frame_deadline: now,
             rendered_frames: 0,
+            last_cursor_pos: None,
+            mouse_left: false,
+            mouse_right: false,
         }
     }
 
@@ -345,31 +425,84 @@ impl ApplicationHandler for Msx68kApp {
                     }
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                let (scale_x, scale_y) = if let Some(gpu) = &self.gpu {
+                    let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
+                    (
+                        (gpu.surface_config.width as f64 / res_w.max(1) as f64).max(0.25),
+                        (gpu.surface_config.height as f64 / res_h.max(1) as f64).max(0.25),
+                    )
+                } else {
+                    (1.0, 1.0)
+                };
+                let x = position.x / scale_x;
+                let y = position.y / scale_y;
+                if let Some((lx, ly)) = self.last_cursor_pos {
+                    let dx = (x - lx).round() as i32;
+                    let dy = (y - ly).round() as i32;
+                    if dx != 0 || dy != 0 {
+                        self.vm.bus.scc.add_mouse_delta(dx, dy);
+                        self.last_cursor_pos = Some((lx + dx as f64, ly + dy as f64));
+                    }
+                } else {
+                    self.last_cursor_pos = Some((x, y));
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.last_cursor_pos = None;
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => self.mouse_left = pressed,
+                    MouseButton::Right => self.mouse_right = pressed,
+                    _ => {}
+                }
+                self.vm
+                    .bus
+                    .scc
+                    .set_mouse_buttons(self.mouse_left, self.mouse_right);
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if let PhysicalKey::Code(code) = event.physical_key {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if event.state == ElementState::Pressed {
                         match code {
                             KeyCode::F1 => {
                                 self.vm.set_speed_mode(CpuSpeedMode::Mhz10);
                                 println!("Switched CPU speed to 10MHz (Bus 10MHz)");
+                                return;
                             }
                             KeyCode::F2 => {
                                 self.vm.set_speed_mode(CpuSpeedMode::Mhz16);
                                 println!("Switched CPU speed to 16MHz (XVI, Bus 16MHz)");
+                                return;
                             }
                             KeyCode::F3 => {
                                 self.vm.set_speed_mode(CpuSpeedMode::Mhz24);
                                 println!("Switched CPU speed to 24MHz (RedZone, Bus 16MHz)");
+                                return;
                             }
                             KeyCode::F4 => {
                                 self.vm.set_speed_mode(CpuSpeedMode::Burst);
                                 println!("Switched CPU speed to Burst (0 wait)");
+                                return;
                             }
                             KeyCode::F12 => {
                                 let _ = self.vm.reset();
                                 println!("Reset X68000 VM");
+                                return;
                             }
                             _ => {}
+                        }
+                    }
+                    if !event.repeat {
+                        if let Some(sc) = map_keycode_to_x68k_scancode(code) {
+                            let byte = if event.state == ElementState::Pressed {
+                                sc
+                            } else {
+                                sc | 0x80
+                            };
+                            self.vm.bus.mfp.push_keyboard_byte(byte);
                         }
                     }
                 }
