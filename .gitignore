@@ -8,6 +8,8 @@
 /docs/ref/
 
 # Local ROMs, disk images, and system media
+/roms/
+/disks/
 *.rom
 *.ROM
 *.dat

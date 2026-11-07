@@ -176,19 +176,30 @@ impl X68kVm {
         }
     }
 
-    /// Executes a single instruction using the monomorphized policy matching the active speed mode.
+    /// Executes a single instruction using the monomorphized policy matching the active speed mode,
+    /// advancing motherboard peripherals (CRTC, MFP, OPM) and routing pending interrupts.
     #[inline]
     pub fn step_with_trap<T: TrapHandler>(&mut self, trap_handler: &mut T) -> StepOutcome {
+        let bus_ipl = self.bus.highest_pending_ipl();
+        self.cpu_state.set_ipl(bus_ipl);
+
         let state = std::mem::take(&mut self.cpu_state);
         if self.is_running_burst() {
             let mut core = CpuCore::<BurstPolicy>::from_state(state);
             let outcome = core.step(&mut self.bus, trap_handler);
             self.cpu_state = core.into_state();
+            let virtual_ticks = if outcome.stopped { 64 } else { 8 };
+            self.bus.advance_peripherals(virtual_ticks);
+            self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
             outcome
         } else {
             let mut core = CpuCore::<TrackedPolicy>::from_state(state);
             let outcome = core.step(&mut self.bus, trap_handler);
             self.cpu_state = core.into_state();
+            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
+            let ticks_10mhz = (outcome.cycles.saturating_mul(10) / cpu_mhz).max(1);
+            self.bus.advance_peripherals(ticks_10mhz);
+            self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
             outcome
         }
     }
@@ -210,26 +221,35 @@ impl X68kVm {
         if self.is_running_burst() {
             let mut core = CpuCore::<BurstPolicy>::from_state(state);
             for _ in 0..max_instructions {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
                 let out = core.step(&mut self.bus, trap_handler);
-                if out.stopped {
-                    break;
-                }
+                let virtual_ticks = if out.stopped { 64 } else { 8 };
+                self.bus.advance_peripherals(virtual_ticks);
             }
+            core.state.set_ipl(self.bus.highest_pending_ipl());
             self.cpu_state = core.into_state();
             0
         } else {
             let mut core = CpuCore::<TrackedPolicy>::from_state(state);
+            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
             let mut elapsed = 0u64;
             for _ in 0..max_instructions {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
                 let out = core.step(&mut self.bus, trap_handler);
                 elapsed += out.cycles as u64;
-                if out.stopped {
-                    break;
-                }
+                let ticks_10mhz = (out.cycles.saturating_mul(10) / cpu_mhz).max(1);
+                self.bus.advance_peripherals(ticks_10mhz);
             }
+            core.state.set_ipl(self.bus.highest_pending_ipl());
             self.cpu_state = core.into_state();
             elapsed
         }
+    }
+
+    /// Executes up to `max_instructions` instructions with the default [`NoopTrapHandler`].
+    pub fn run_steps(&mut self, max_instructions: usize) -> u64 {
+        let mut noop = NoopTrapHandler;
+        self.run_steps_with_trap(max_instructions, &mut noop)
     }
 
     /// Executes until at least `target_cycles` CPU clock cycles have elapsed (for cycle-tracked modes).
@@ -243,23 +263,26 @@ impl X68kVm {
         if self.is_running_burst() {
             let mut core = CpuCore::<BurstPolicy>::from_state(state);
             for _ in 0..target_cycles {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
                 let out = core.step(&mut self.bus, trap_handler);
-                if out.stopped {
-                    break;
-                }
+                let virtual_ticks = if out.stopped { 64 } else { 8 };
+                self.bus.advance_peripherals(virtual_ticks);
             }
+            core.state.set_ipl(self.bus.highest_pending_ipl());
             self.cpu_state = core.into_state();
             0
         } else {
             let mut core = CpuCore::<TrackedPolicy>::from_state(state);
+            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
             let mut elapsed = 0u32;
             while elapsed < target_cycles {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
                 let out = core.step(&mut self.bus, trap_handler);
                 elapsed = elapsed.saturating_add(out.cycles);
-                if out.stopped {
-                    break;
-                }
+                let ticks_10mhz = (out.cycles.saturating_mul(10) / cpu_mhz).max(1);
+                self.bus.advance_peripherals(ticks_10mhz);
             }
+            core.state.set_ipl(self.bus.highest_pending_ipl());
             self.cpu_state = core.into_state();
             elapsed
         }

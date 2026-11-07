@@ -1,17 +1,30 @@
 //! X68000 24-bit system bus, region-aware memory wait-state model, and VM runner (`msx68k-bus`).
 
 pub mod bus;
+pub mod crtc;
+pub mod dmac;
+pub mod fdc;
+pub mod mfp;
+pub mod peripherals;
 pub mod timing;
+pub mod vicon;
 pub mod vm;
 
+pub use msx68k_cpu::{Bus, BusFault};
 pub use bus::{
     HardwareAccessFlags, X68kBus, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
     ROM_WINDOW_BYTES, SPRITE_WINDOW_BYTES, TVRAM_BYTES,
 };
+pub use crtc::{Crtc, CrtcSyncEvents, RASTER_BLOCK_BYTES, TVRAM_PLANE_BYTES};
+pub use dmac::{DmaChannel, Dmac};
+pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};
+pub use mfp::Mfp;
+pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use timing::{
     BusTimingConfig, CpuSpeedMode, MemoryRegion, RegionTimingSpec, VmRole, WaitStateTable,
     PAGE_COUNT_4K, PAGE_SHIFT_4K,
 };
+pub use vicon::{grbi_to_rgba8, Vicon};
 pub use vm::{VmConfig, X68kVm};
 
 #[cfg(test)]
