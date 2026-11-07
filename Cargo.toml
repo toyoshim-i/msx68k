@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/msx68k-cpu",
     "crates/msx68k-bus",
+    "crates/msx68k-vicon",
 ]
 
 [workspace.package]

@@ -32,9 +32,9 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 - **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents) and FAT `.X` / `.SX` binaries.
 
 ### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
-For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline:
-- GVRAM (512 KB), TVRAM (512 KB), Sprite/PCG/BG RAM (32 KB), and a 512-line per-scanline register snapshot array (capturing H-Blank raster scroll, palette, and priority mutations) are uploaded to the GPU each frame (~1 MB total).
-- The WGSL fragment/compute pipeline composites Text, 4-plane/16-bit GVRAM, dual BG layers, 128 sprites, special priority, and translucent blending in parallel on the GPU.
+For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
+- GVRAM (512 KB), TVRAM (512 KB), Sprite/PCG/BG RAM (32 KB), and CRTC/VICON/Palette registers are uploaded to the GPU each frame (~1 MB total).
+- The WGSL compute pipeline composites 4-plane TVRAM, GVRAM, and `GGGGGRRRRRBBBBBI` palettes in parallel on the GPU. See [docs/FD_BOOT_AND_VICON.md](docs/FD_BOOT_AND_VICON.md) for the FDC/DMAC/MFP floppy boot subsystem, CRTC/TVRAM hardware acceleration, and `wgpu` VICON pipeline details.
 
 ### 1.5 Lazy I/O Instantiation & 3-Tier Straight Storage Bridge
 - **Zero-Device Fast VM Spawn**: VMs boot in microseconds via a custom IPL with all peripheral slots initialized to `None`. Chips (CRTC, OPM, ADPCM, MFP, SCC, DMAC, Sprite) and their cycle timers are instantiated only when their memory-mapped I/O ports (`$E80000`–`$EFFFFF`) are first accessed.
