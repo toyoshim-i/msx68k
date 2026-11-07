@@ -27,7 +27,7 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 | `68000_24mhz` | 24 MHz | 16 MHz | **X68000 XVI RedZone**. 24 MHz CPU coupled to a 16 MHz system bus (+2 CPU wait states per 16-bit system bus transaction, plus scaled peripheral/VRAM wait states). |
 | `burst` | Uncapped | Zero Delay | **Master SX-Window VM Default**. Zero wait-state/cycle accounting overhead (`TRACK_CYCLES = false`). Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
 
-- **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs).
+- **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
 
 - **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents) and FAT `.X` / `.SX` binaries.
 
