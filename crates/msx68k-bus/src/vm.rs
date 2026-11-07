@@ -287,4 +287,10 @@ impl X68kVm {
             elapsed
         }
     }
+
+    /// Executes until at least `target_cycles` CPU clock cycles have elapsed with the default [`NoopTrapHandler`].
+    pub fn run_cycles(&mut self, target_cycles: u32) -> u32 {
+        let mut noop = NoopTrapHandler;
+        self.run_cycles_with_trap(target_cycles, &mut noop)
+    }
 }

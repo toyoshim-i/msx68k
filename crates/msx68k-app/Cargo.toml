@@ -1,0 +1,18 @@
+[package]
+name = "msx68k-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Interactive winit + wgpu desktop window runner for msx68k"
+
+[[bin]]
+name = "msx68k"
+path = "src/main.rs"
+
+[dependencies]
+msx68k-bus = { path = "../msx68k-bus" }
+msx68k-vicon = { path = "../msx68k-vicon" }
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"

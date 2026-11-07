@@ -74,6 +74,12 @@ impl RenderedFrame {
     }
 }
 
+/// GPU render pipeline that presents the composited VICON framebuffer onto a window `wgpu::Surface`.
+pub struct ViconSurfacePresenter {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+}
+
 /// Hardware-accelerated `wgpu` VICON compositor.
 pub struct ViconGpuCompositor {
     device: wgpu::Device,
@@ -128,6 +134,16 @@ impl ViconGpuCompositor {
             .await
             .ok()?;
 
+        Some(Self::from_device(device, queue, adapter_info))
+    }
+
+    /// Creates a [`ViconGpuCompositor`] using an existing `wgpu::Device` and `wgpu::Queue`
+    /// (for example, one initialized alongside a `winit` window `wgpu::Surface`).
+    pub fn from_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_info: wgpu::AdapterInfo,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("msx68k_vicon_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -275,7 +291,7 @@ impl ViconGpuCompositor {
             ],
         });
 
-        Some(Self {
+        Self {
             device,
             queue,
             pipeline,
@@ -287,7 +303,216 @@ impl ViconGpuCompositor {
             output_buf,
             staging_buf,
             adapter_info,
-        })
+        }
+    }
+
+    /// Returns a reference to the underlying `wgpu::Device`.
+    #[inline]
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Returns a reference to the underlying `wgpu::Queue`.
+    #[inline]
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Creates a [`ViconSurfacePresenter`] that blits the composited VICON framebuffer directly
+    /// onto a window `wgpu::Surface` of the given `surface_format` without CPU readback.
+    pub fn create_surface_presenter(
+        &self,
+        surface_format: wgpu::TextureFormat,
+    ) -> ViconSurfacePresenter {
+        let present_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("msx68k_vicon_present_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("present.wgsl").into()),
+            });
+
+        let layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("vicon_present_bind_group_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let pipeline_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("vicon_present_pipeline_layout"),
+                    bind_group_layouts: &[&layout],
+                    push_constant_ranges: &[],
+                });
+
+        let pipeline =
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("vicon_present_pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &present_shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &present_shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: surface_format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vicon_present_bind_group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.output_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        ViconSurfacePresenter {
+            pipeline,
+            bind_group,
+        }
+    }
+
+    fn upload_bus_buffers(&mut self, bus: &X68kBus) -> ViconUniforms {
+        let uniforms = ViconUniforms::from_bus(bus);
+        self.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+
+        if let Some(tvram) = bus.tvram() {
+            self.queue.write_buffer(&self.tvram_buf, 0, tvram);
+        }
+
+        if let Some(gvram) = bus.gvram() {
+            self.queue.write_buffer(&self.gvram_buf, 0, gvram);
+        }
+
+        let mut palettes = [0u32; 512];
+        for (i, &c) in bus.vicon.text_palette().iter().enumerate() {
+            palettes[i] = c as u32;
+        }
+        for (i, &c) in bus.vicon.graphic_palette().iter().enumerate() {
+            palettes[256 + i] = c as u32;
+        }
+        self.queue
+            .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
+
+        uniforms
+    }
+
+    /// Composites `bus` video memory on the GPU and blits the result directly into `target_view`
+    /// (with aspect-ratio-preserving letterboxing for window dimensions `surface_width × surface_height`).
+    pub fn render_bus_to_surface_view(
+        &mut self,
+        bus: &X68kBus,
+        presenter: &ViconSurfacePresenter,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        let uniforms = self.upload_bus_buffers(bus);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vicon_surface_render_encoder"),
+            });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vicon_compute_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pipeline);
+            cpass.set_bind_group(0, &self.bind_group, &[]);
+            cpass.dispatch_workgroups(
+                uniforms.width.div_ceil(16),
+                uniforms.height.div_ceil(16),
+                1,
+            );
+        }
+
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vicon_present_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Compute aspect-ratio-preserving letterbox/pillarbox viewport
+            let sw = surface_width.max(1) as f32;
+            let sh = surface_height.max(1) as f32;
+            let target_aspect = (uniforms.width.max(1) as f32) / (uniforms.height.max(1) as f32);
+            let window_aspect = sw / sh;
+
+            let (vp_x, vp_y, vp_w, vp_h) = if window_aspect > target_aspect {
+                let w = sh * target_aspect;
+                ((sw - w) * 0.5, 0.0, w, sh)
+            } else {
+                let h = sw / target_aspect;
+                (0.0, (sh - h) * 0.5, sw, h)
+            };
+
+            rpass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
+            rpass.set_pipeline(&presenter.pipeline);
+            rpass.set_bind_group(0, &presenter.bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Returns information about the active `wgpu` adapter.

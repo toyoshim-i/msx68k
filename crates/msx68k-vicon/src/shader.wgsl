@@ -1,10 +1,10 @@
-// X68000 VICON GPU Compositor Shader (WGSL)
+// X68000 VICON GPU Compositor & Surface Presentation Shader (WGSL)
 //
-// Composites:
-// - 4-plane TVRAM ($E00000-$E7FFFF, 1024x1024x4bpp bitplanes with R10/R11 scroll)
-// - GVRAM ($C00000-$DFFFFF, 512KB with R12..R19 scroll)
-// - Text & Graphics Palettes ($E82000-$E823FF, 16-bit GGGGGRRRRRBBBBBI)
-// - VICON R0/R1/R2 layer enable and priority rules
+// Stage 1 (@compute main):
+//   Composites 4-plane TVRAM ($E00000-$E7FFFF), GVRAM ($C00000-$DFFFFF), and
+//   16-bit GGGGGRRRRRBBBBBI Text/Graphics Palettes ($E82000-$E823FF) into `output_rgba`.
+// Stage 2 (@vertex vs_present / @fragment fs_present):
+//   Blits `output_rgba` directly onto the window surface texture on the GPU.
 
 struct ViconUniforms {
     width: u32,
