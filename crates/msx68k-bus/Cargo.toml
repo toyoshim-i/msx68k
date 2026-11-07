@@ -1,0 +1,10 @@
+[package]
+name = "msx68k-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "X68000 24-bit system bus, memory region wait-state model (10/16/24/Burst), and VM runner"
+
+[dependencies]
+msx68k-cpu = { path = "../msx68k-cpu" }

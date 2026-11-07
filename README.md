@@ -17,15 +17,17 @@ Original SX-Window renders its entire GUI into the 512 KB Text VRAM (`$E00000`, 
 - Higher-level SX-Window managers (Window Manager, Menu Manager, and application `RastPort` / `BitMap` APIs) already operate on signed 16-bit coordinates (`-32768` to `+32767`).
 - By hooking the low-level Drawing Manager (DM) primitives via A-Line/F-Line traps and redirecting rendering to native `wgpu` surfaces, **msx68k** removes the 1024×1024 / 16-color hardware ceiling, enabling Full HD (1920×1080) and 4K (3840×2160) TrueColor SX-Window desktops.
 
-### 1.3 Monomorphized 4-Mode CPU Core & Mixed Mode Bridge
-The 68000/68030 CPU engine uses Rust trait monomorphization (`CpuPolicy`) so cycle-accounting overhead completely vanishes in `burst` mode:
+### 1.3 Monomorphized 4-Mode MC68000 Core, Bus Timing & Mixed Mode Bridge
+The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a region-aware system bus timing model so cycle-accounting and wait-state overhead completely vanish in `burst` mode:
 
-| Mode | Target CPU | Characteristics |
-| :--- | :--- | :--- |
-| `68000_10mhz` | MC68000 @ 10 MHz | Full cycle accuracy including VICON VRAM bus contention and I/O wait states. |
-| `68000_16mhz` | MC68000 @ 16 MHz | X68000 XVI compatible asymmetric wait states (16 MHz RAM with 10 MHz I/O & VRAM bus synchronization). |
-| `68030_25mhz` | MC68EC030 @ 25 MHz | 68030 instructions, 256 B instruction/data cache hit/miss timing, and pipeline behavior. |
-| `burst` | 68000 / 68030 (Uncapped) | Zero wait-state/cycle accounting overhead for the Master SX-Window desktop and build tools. Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
+| Mode | CPU Clock | System Bus Clock | Target Profile & Characteristics |
+| :--- | :--- | :--- | :--- |
+| `68000_10mhz` | 10 MHz | 10 MHz | **Original X68000 / ACE / PRO / SUPER (Default for App VMs)**. Full cycle accuracy with 10 MHz system bus, per-region device wait states (GVRAM, TVRAM, Palette, MFP, SCC, DMAC, OPM, ROM/SRAM), and VICON display contention. |
+| `68000_16mhz` | 16 MHz | 16 MHz | **X68000 XVI**. 0-wait 16 MHz Main RAM and 16 MHz system bus with asymmetric synchronization waits when accessing 10 MHz video/peripheral domains. |
+| `68000_24mhz` | 24 MHz | 16 MHz | **X68000 XVI RedZone**. 24 MHz CPU coupled to a 16 MHz system bus (+2 CPU wait states per 16-bit system bus transaction, plus scaled peripheral/VRAM wait states). |
+| `burst` | Uncapped | Zero Delay | **Master SX-Window VM Default**. Zero wait-state/cycle accounting overhead (`TRACK_CYCLES = false`). Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
+
+- **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs).
 
 - **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents) and FAT `.X` / `.SX` binaries.
 

@@ -1,0 +1,7 @@
+[package]
+name = "msx68k-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Monomorphized Motorola 68000 CPU core with cycle-accurate and burst policies"
