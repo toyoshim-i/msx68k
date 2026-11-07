@@ -287,13 +287,13 @@ impl<P: CpuPolicy> CpuCore<P> {
 
         let rw_bit = if is_write { 0 } else { 1 << 4 };
         let fc = if (saved_sr & SR_S) != 0 { 5u16 } else { 1u16 };
-        let status_word = rw_bit | fc;
+        let status_word = (self.state.ir & 0xFFE0) | rw_bit | fc;
 
         // Ensure SP is even before pushing the Group 0 frame so we do not double-fault.
         self.state.a[7] &= !1;
         let _ = self.push_u32(bus, self.state.pc);
         let _ = self.push_u16(bus, saved_sr);
-        let _ = self.push_u16(bus, 0);
+        let _ = self.push_u16(bus, self.state.ir);
         let _ = self.push_u32(bus, fault_addr);
         let _ = self.push_u16(bus, status_word);
         if let Ok(target) = self.bus_read_u32(bus, (vec_no as u32) * 4) {
@@ -347,7 +347,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             };
         }
 
-        let trace_before = self.state.flag(SR_T);
+        let trace_before = self.state.trace_enabled && self.state.flag(SR_T);
         self.state.ir_pc = self.state.pc;
 
         if let Err(fault) = self.execute_one(bus, trap_handler) {
@@ -539,6 +539,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         trap_handler: &mut T,
     ) -> Result<(), BusFault> {
         let op = self.fetch_u16(bus)?;
+        self.state.ir = op;
 
         match (op >> 12) & 0xF {
             0x0 => self.exec_group_0(bus, op),
@@ -1181,16 +1182,8 @@ impl<P: CpuPolicy> CpuCore<P> {
             self.state.set_flag(SR_Z, val == 0);
             self.state.set_flag(SR_V, false);
             self.state.set_flag(SR_C, false);
-            if val < 0 {
-                self.state.set_flag(SR_N, true);
-                return self.raise_exception(
-                    bus,
-                    ExceptionVector::ChkInstruction as u8,
-                    self.state.pc,
-                    40,
-                );
-            } else if val > bound {
-                self.state.set_flag(SR_N, false);
+            self.state.set_flag(SR_N, val < 0);
+            if val < 0 || val > bound {
                 return self.raise_exception(
                     bus,
                     ExceptionVector::ChkInstruction as u8,
@@ -1453,7 +1446,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 let quot = num / den;
                 let rem = num % den;
                 if !(-32768..=32767).contains(&quot) {
-                    sr |= SR_V;
+                    sr |= SR_V | SR_N;
                     self.state.sr = sr;
                 } else {
                     let q16 = (quot as i16) as u16;
@@ -1473,7 +1466,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 let quot = dividend / den;
                 let rem = dividend % den;
                 if quot > 0xFFFF {
-                    sr |= SR_V;
+                    sr |= SR_V | SR_N;
                     self.state.sr = sr;
                 } else {
                     let q16 = quot as u16;

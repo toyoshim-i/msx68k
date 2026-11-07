@@ -219,10 +219,10 @@ pub fn alu_sbcd(state: &mut CpuState, src: u8, dst: u8) -> u8 {
     let x = u16::from(state.flag(SR_X));
     let s = src as u16;
     let d = dst as u16;
-    let binary_diff = d.wrapping_sub(s).wrapping_sub(x);
+    let binary_diff = d.wrapping_sub(s).wrapping_sub(x) & 0x1FF;
 
     let lo_borrow = (d & 0x0F) < ((s & 0x0F) + x);
-    let hi_borrow = d < (s + x) || (binary_diff & 0x1F0) > 0x90;
+    let hi_borrow = (binary_diff & 0x100) != 0;
 
     let mut corf: u16 = 0;
     if lo_borrow {
@@ -232,9 +232,9 @@ pub fn alu_sbcd(state: &mut CpuState, src: u8, dst: u8) -> u8 {
         corf += 0x60;
     }
 
-    let res16 = binary_diff.wrapping_sub(corf);
+    let res16 = binary_diff.wrapping_sub(corf) & 0x1FF;
     let res = (res16 & 0xFF) as u8;
-    let borrow = hi_borrow || (d < s + x);
+    let borrow = hi_borrow || (res16 & 0x100) != 0;
     let overflow = (binary_diff & !res16 & 0x80) != 0;
 
     let prev_z = state.sr & SR_Z;

@@ -111,6 +111,8 @@ pub struct CpuState {
     pub pc: u32,
     /// Address of the currently executing instruction (for exception frames and diagnostics).
     pub ir_pc: u32,
+    /// Current instruction opcode register (`IR`).
+    pub ir: u16,
     /// Status Register (`SR`).
     pub sr: u16,
     /// Inactive User Stack Pointer (updated when switching out of user mode).
@@ -125,6 +127,8 @@ pub struct CpuState {
     pub nmi_pending: bool,
     /// Whether to enforce odd-address checks (Address Error) on 16/32-bit accesses.
     pub check_address_error: bool,
+    /// Whether the `T` (Trace) bit in `SR` raises a Vector 9 exception after instruction execution.
+    pub trace_enabled: bool,
     /// Cumulative CPU clock cycles elapsed (only incremented in `TrackedPolicy`).
     pub total_cycles: u64,
 }
@@ -143,6 +147,7 @@ impl CpuState {
             a: [0; 8],
             pc: 0,
             ir_pc: 0,
+            ir: 0,
             sr: SR_S | SR_IPM_MASK,
             usp: 0,
             ssp: 0,
@@ -150,6 +155,7 @@ impl CpuState {
             pending_ipl: 0,
             nmi_pending: false,
             check_address_error: true,
+            trace_enabled: true,
             total_cycles: 0,
         }
     }
