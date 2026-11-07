@@ -49,7 +49,31 @@ For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing
 
 ---
 
-## 2. Target Deployment Modes
+## 2. Quick Start
+
+Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and floppy disk images (`.XDF` / `.2HD`) in `disks/`:
+
+```bash
+# Boot Human68k v3.02 (defaults to disks/HUMAN302.XDF if present):
+cargo run --release
+
+# Boot SX-Window v3.1 (System Disk in FD0, Accessory Disk in FD1) in Burst mode:
+cargo run --release -- --fd0 disks/SXWIN311.XDF --fd1 disks/SXWIN315.XDF --speed burst
+```
+
+### Runtime Window Controls (`msx68k-app`)
+- **Mouse**: Relative cursor movement (`Z8530 SCC` Channel B) and Left/Right mouse buttons (hold Right mouse button in SX-Window to display the top menu bar).
+- **Keyboard**: Forwarded as X68000 hardware scan codes via `MC68901 MFP` USART.
+- **Hotkeys**:
+  - `F1`: Switch to `10MHz` mode (`CPU 10MHz / Bus 10MHz`)
+  - `F2`: Switch to `16MHz` mode (`XVI: CPU 16MHz / Bus 16MHz`)
+  - `F3`: Switch to `24MHz` mode (`RedZone: CPU 24MHz / Bus 16MHz`)
+  - `F4`: Switch to `Burst` mode (`0 wait`)
+  - `F12`: Soft Reset X68000 VM
+
+---
+
+## 3. Target Deployment Modes
 
 1. **ARM SBC Appliance Mode (Bare-Metal Experience)**
    - Runs as `PID 1` on minimal Linux (direct DRM/KMS + Vulkan via `wgpu`, no X11/Wayland/systemd) on Raspberry Pi 5 or RK3588 SBCs, booting straight into the high-resolution SX-Window desktop in seconds.
@@ -59,7 +83,7 @@ For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing
 
 ---
 
-## 3. Development Roadmap
+## 4. Development Roadmap
 
 - **Phase 1: Core Emulation & `wgpu` VICON Pipeline**
   - Monomorphized 68000/68030 CPU core (`10MHz`, `16MHz`, `030`, `burst`) and lazy on-demand I/O bus.
