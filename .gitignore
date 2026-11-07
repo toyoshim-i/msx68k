@@ -1,0 +1,33 @@
+# Rust / Cargo build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+
+# Uncommitted Japanese reference documents & notes
+/docs/ref/
+
+# Local ROMs, disk images, and system media
+*.rom
+*.ROM
+*.dat
+*.DAT
+*.xdf
+*.XDF
+*.hdf
+*.HDF
+*.hds
+*.HDS
+*.dim
+*.DIM
+*.iso
+*.ISO
+*.mos
+*.MOS
+
+# OS / Editor files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~

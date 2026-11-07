@@ -1,0 +1,75 @@
+# msx68k
+
+**msx68k** is a hybrid Sharp X68000 / SX-Window × ARM execution environment written in Rust and `wgpu`.
+
+Rather than stopping at traditional cycle-accurate hardware emulation, **msx68k** modernizes the classic X68000 GUI environment (**SX-Window**) into a high-resolution (1080p / 4K), TrueColor desktop while preserving 100% compatibility with legacy 68000 games, demos, and tools through on-demand isolated virtual machines and a PowerMac-style (`68k` ⇄ `ARM`) Mixed Mode architecture.
+
+---
+
+## 1. Core Architecture & Design Principles
+
+### 1.1 Dual Execution Model: Shared Master SX-Window + Isolated VMs
+- **Master SX-Window Environment**: Well-behaved SX-Window applications (`.SX`), command-line tools (`HAS.X`, `GCC`, `LHA.X`), and shared resident drivers (`MXDRV.X`, `ZMUSIC.X`) run cooperatively inside a single shared SX-Window environment at native host speeds (`burst` mode).
+- **On-Demand Isolated VMs**: Applications that directly manipulate CRTC registers, GVRAM/TVRAM, or hardware sprites—or trigger a transition to full-screen Human68k mode (`_CRTMOD`)—are seamlessly spun out into dedicated, cycle-accurate X68000 virtual machine instances rendered as individual windows on the SX-Window desktop (or native host OS windows in Rootless mode).
+
+### 1.2 Breaking the 1024×1024 TVRAM Barrier
+Original SX-Window renders its entire GUI into the 512 KB Text VRAM (`$E00000`, 1024×1024, 4-bit 16-color planes) using hardcoded 128-byte stride math (`Y * 128 + (X >> 3)`) and CRTC hardware raster copy/bitmask registers.
+- Higher-level SX-Window managers (Window Manager, Menu Manager, and application `RastPort` / `BitMap` APIs) already operate on signed 16-bit coordinates (`-32768` to `+32767`).
+- By hooking the low-level Drawing Manager (DM) primitives via A-Line/F-Line traps and redirecting rendering to native `wgpu` surfaces, **msx68k** removes the 1024×1024 / 16-color hardware ceiling, enabling Full HD (1920×1080) and 4K (3840×2160) TrueColor SX-Window desktops.
+
+### 1.3 Monomorphized 4-Mode CPU Core & Mixed Mode Bridge
+The 68000/68030 CPU engine uses Rust trait monomorphization (`CpuPolicy`) so cycle-accounting overhead completely vanishes in `burst` mode:
+
+| Mode | Target CPU | Characteristics |
+| :--- | :--- | :--- |
+| `68000_10mhz` | MC68000 @ 10 MHz | Full cycle accuracy including VICON VRAM bus contention and I/O wait states. |
+| `68000_16mhz` | MC68000 @ 16 MHz | X68000 XVI compatible asymmetric wait states (16 MHz RAM with 10 MHz I/O & VRAM bus synchronization). |
+| `68030_25mhz` | MC68EC030 @ 25 MHz | 68030 instructions, 256 B instruction/data cache hit/miss timing, and pipeline behavior. |
+| `burst` | 68000 / 68030 (Uncapped) | Zero wait-state/cycle accounting overhead for the Master SX-Window desktop and build tools. Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
+
+- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents) and FAT `.X` / `.SX` binaries.
+
+### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
+For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline:
+- GVRAM (512 KB), TVRAM (512 KB), Sprite/PCG/BG RAM (32 KB), and a 512-line per-scanline register snapshot array (capturing H-Blank raster scroll, palette, and priority mutations) are uploaded to the GPU each frame (~1 MB total).
+- The WGSL fragment/compute pipeline composites Text, 4-plane/16-bit GVRAM, dual BG layers, 128 sprites, special priority, and translucent blending in parallel on the GPU.
+
+### 1.5 Lazy I/O Instantiation & 3-Tier Straight Storage Bridge
+- **Zero-Device Fast VM Spawn**: VMs boot in microseconds via a custom IPL with all peripheral slots initialized to `None`. Chips (CRTC, OPM, ADPCM, MFP, SCC, DMAC, Sprite) and their cycle timers are instantiated only when their memory-mapped I/O ports (`$E80000`–`$EFFFFF`) are first accessed.
+- **3-Tier Straight Storage Bridge**: To prevent FAT/directory cache corruption across concurrent VMs without fragile cross-layer translation, disk operations from sub-VMs are forwarded at their exact abstraction level—(1) Human68k DOS calls (`$FFxx`), (2) Disk IOCS (`$40`–`$4F`), or (3) SCSI IOCS (`$F5` `_SCSIDRV`)—directly to the Master SX-Window VM's corresponding layer with zero-copy DMA buffer mapping.
+
+### 1.6 Audio Sharing & Selective Native TSRs
+- **Master Audio Sharing**: Sound I/O accesses (`OPM`, `ADPCM`, `MIDI`) do not trigger VM isolation, allowing resident music drivers (`MXDRV.X`, `ZMUSIC.X`, `MCDRV.X`) to remain as authentic 68000 binaries inside the Master VM (preserving undocumented work-area compatibility with external spectrum analyzers and players).
+- **High-Definition Native TSRs**: Pure compute or hardware-bottlenecked TSRs are replaced by 32-byte 68k header stubs backed by native Rust implementations:
+  - `PCM8` / `PCM8A` / `PCM8PP`: Bypasses the 15.6 kHz 4-bit ADPCM bottleneck and streams 48/96 kHz 32-bit float multi-channel audio directly to the host master mixer while keeping 68k status work areas synchronized.
+  - `FLOAT2.X`–`FLOAT4.X`: Routes `$FExx` floating-point traps directly to ARM hardware FPU/NEON instructions.
+  - `TwentyOne.X`: Native long-filename and case-preservation support bridged to the host file system.
+
+---
+
+## 2. Target Deployment Modes
+
+1. **ARM SBC Appliance Mode (Bare-Metal Experience)**
+   - Runs as `PID 1` on minimal Linux (direct DRM/KMS + Vulkan via `wgpu`, no X11/Wayland/systemd) on Raspberry Pi 5 or RK3588 SBCs, booting straight into the high-resolution SX-Window desktop in seconds.
+2. **Desktop OS Integration (Linux / macOS / Windows)**
+   - **In-Screen Mode**: Renders the full high-resolution SX-Window desktop inside a single host window or fullscreen display.
+   - **Seamless (Rootless) Mode**: Uses `winit` + `wgpu` multi-surface rendering to map individual SX-Window applications and isolated X68000 VMs directly to native host OS windows.
+
+---
+
+## 3. Development Roadmap
+
+- **Phase 1: Core Emulation & `wgpu` VICON Pipeline**
+  - Monomorphized 68000/68030 CPU core (`10MHz`, `16MHz`, `030`, `burst`) and lazy on-demand I/O bus.
+  - WGSL VICON/CYNTHIA compositor (GVRAM, TVRAM, Sprite/BG, per-scanline raster state).
+  - Custom IPL and single-VM boot of unmodified Human68k and SX-Window.
+- **Phase 2: TVRAM-Free Native SX-Window Drawing & Native TSR Stubs**
+  - A-Line/F-Line Drawing Manager (DM) interception backed by `wgpu` surfaces to unlock 1080p/4K TrueColor SX-Window desktops.
+  - Native TSR stubs for `FLOATx`, high-definition `PCM8`, and `TwentyOne`.
+- **Phase 3: Multi-VM Isolation & 3-Tier Storage Bridge**
+  - Automatic VM detachment on direct CRTC/GVRAM access and `_CRTMOD` transitions.
+  - 3-tier straight storage forwarding (DOS / Disk IOCS / SCSI IOCS) and multi-VM master audio mixer.
+  - Per-executable compatibility profile database (BLAKE3 hash matching).
+- **Phase 4: Native OS Core Migration & FAT Binary SDK**
+  - Full ARM native replacement of SX-Window window/event management.
+  - `.X` / `.SX` FAT binary toolchain and Virtual Bus API for native hardware extensions.
