@@ -770,18 +770,6 @@ impl X68kBus {
 
                 if self.scsi.boot_from_scsi {
                     self.main_ram[req_ptr + 22] = 1; // Starting letter = 1 (A:)
-                    if self.main_ram.len() >= 0x1C82 {
-                        self.main_ram[0x1C7E] = 0; // Drive A: -> SCSI HDD unit 0
-                        self.main_ram[0x1C7F] = 0; // Drive B: -> SCSI HDD unit 0
-                        self.main_ram[0x1C80] = 1; // Drive C: -> Floppy 0
-                        self.main_ram[0x1C81] = 2; // Drive D: -> Floppy 1
-                    }
-                    if self.main_ram.len() >= 0x1C16 {
-                        self.main_ram[0x1C15] = 0; // Boot drive = 0 (Drive A:)
-                    }
-                    if self.main_ram.len() >= 0x83F4 {
-                        self.main_ram[0x83F2] = b'A'; // Current dir drive = A:
-                    }
                 }
             }
             1 => {

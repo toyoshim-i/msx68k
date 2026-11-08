@@ -314,4 +314,66 @@ impl X68kVm {
         let mut handler = BusTrapHandler;
         self.run_cycles_with_trap(target_cycles, &mut handler)
     }
+
+    /// Executes up to `max_instructions` instructions in Burst mode while pacing peripheral
+    /// advancement to exactly `target_ticks_10mhz` (e.g. `166_667` for a 1/60s frame).
+    ///
+    /// This prevents guest timers (MFP Timer-C 200Hz, V-Blank 55.45Hz, double-click intervals)
+    /// from running disproportionately fast when CPU execution is uncapped in Burst mode.
+    pub fn run_burst_frame_with_trap<T: TrapHandler<X68kBus>>(
+        &mut self,
+        max_instructions: usize,
+        target_ticks_10mhz: u32,
+        trap_handler: &mut T,
+    ) -> usize {
+        let state = std::mem::take(&mut self.cpu_state);
+        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut elapsed_ticks = 0u32;
+        let mut tick_accum = 0usize;
+        let mut instructions_executed = 0usize;
+
+        let num_inst = max_instructions.max(1);
+        while instructions_executed < max_instructions {
+            core.state.set_ipl(self.bus.highest_pending_ipl());
+            let out = core.step(&mut self.bus, trap_handler);
+            instructions_executed += 1;
+
+            if out.stopped {
+                let remaining = target_ticks_10mhz.saturating_sub(elapsed_ticks);
+                if remaining == 0 {
+                    break;
+                }
+                let step = remaining.min(64);
+                self.bus.advance_peripherals(step);
+                elapsed_ticks += step;
+            } else {
+                tick_accum += target_ticks_10mhz as usize;
+                let step = (tick_accum / num_inst) as u32;
+                tick_accum %= num_inst;
+                if step > 0 {
+                    let actual_step = step.min(target_ticks_10mhz.saturating_sub(elapsed_ticks));
+                    if actual_step > 0 {
+                        self.bus.advance_peripherals(actual_step);
+                        elapsed_ticks += actual_step;
+                    }
+                }
+            }
+        }
+
+        let remaining = target_ticks_10mhz.saturating_sub(elapsed_ticks);
+        if remaining > 0 {
+            self.bus.advance_peripherals(remaining);
+        }
+
+        core.state.set_ipl(self.bus.highest_pending_ipl());
+        self.cpu_state = core.into_state();
+        instructions_executed
+    }
+
+    /// Executes up to `max_instructions` instructions in Burst mode while pacing peripheral
+    /// advancement to `target_ticks_10mhz` using the default [`BusTrapHandler`].
+    pub fn run_burst_frame(&mut self, max_instructions: usize, target_ticks_10mhz: u32) -> usize {
+        let mut handler = BusTrapHandler;
+        self.run_burst_frame_with_trap(max_instructions, target_ticks_10mhz, &mut handler)
+    }
 }

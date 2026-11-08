@@ -533,6 +533,23 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         "SX-Window cursor coordinates at dynamic global vector (text_base + $549F6) must match host mouse position"
     );
 
+    // Verify drive mapping table at $1C7E..$1C82 and boot drive at $1C15:
+    // Drive A: ($1C7E) -> Physical Drive 0 (SCSI HDD)
+    // Drive B: ($1C7F) -> Physical Drive 1 (Floppy Drive 0)
+    // Drive C: ($1C80) -> Physical Drive 2 (Floppy Drive 1)
+    let drive_a = vm.bus.read_u8(0x0000_1C7E, true).unwrap();
+    let drive_b = vm.bus.read_u8(0x0000_1C7F, true).unwrap();
+    let drive_c = vm.bus.read_u8(0x0000_1C80, true).unwrap();
+    let boot_drv = vm.bus.read_u8(0x0000_1C15, true).unwrap();
+    eprintln!(
+        "Drive map: A:={}, B:={}, C:={}, boot_drive={}",
+        drive_a, drive_b, drive_c, boot_drv
+    );
+    assert_eq!(drive_a, 0, "Drive A: must map to SCSI HDD Unit 0");
+    assert_eq!(drive_b, 1, "Drive B: must map to Floppy Drive 0");
+    assert_eq!(drive_c, 2, "Drive C: must map to Floppy Drive 1");
+    assert_eq!(boot_drv, 0, "Boot drive must be Drive A: (0)");
+
     let a4_ptr = vm.bus.read_u32(text_base + 0x633CA, true).unwrap();
     let a4_x = vm.bus.read_u16(a4_ptr + 0x0A, true).unwrap() as i16;
     let a4_y = vm.bus.read_u16(a4_ptr + 0x0C, true).unwrap() as i16;
@@ -540,5 +557,42 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         (a4_x, a4_y),
         (250, 180),
         "FSX.X MouseWorkArea coordinates must match host mouse position"
+    );
+}
+
+#[test]
+fn test_burst_frame_peripheral_timing_pacing() {
+    let mut vm = X68kVm::new(
+        VmConfig::master_sx()
+            .with_speed_mode(CpuSpeedMode::Burst)
+            .with_ram_mb(4),
+    );
+
+    // Initial frame count
+    let initial_frames = vm.bus.crtc.frame_count();
+    assert_eq!(initial_frames, 0);
+
+    // Execute 60 frames paced at 1/60s (166_667 ticks per frame = 10,000,020 ticks = 1.0 wall-clock second)
+    const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
+    for _ in 0..60 {
+        vm.run_burst_frame(250_000, TARGET_TICKS_60HZ);
+    }
+
+    let elapsed_frames = vm.bus.crtc.frame_count();
+    // In standard 31.5 kHz mode (568 scanlines * 317 cycles = 180,056 cycles/V-Blank frame, 55.54 Hz),
+    // 10,000,020 cycles produces exactly 55 or 56 V-Blank frames in 1.0 second.
+    // (Without burst frame pacing, 60 frames * 250,000 * 8 = 120,000,000 cycles would produce 666+ frames!)
+    assert!(
+        (54..=57).contains(&elapsed_frames),
+        "Expected ~55 V-Blank frames in 1.0s of paced burst execution, got {elapsed_frames}"
+    );
+
+    // Also verify that unpaced run_steps still runs at full unpaced speed for fast headless tests
+    let unpaced_start = vm.bus.crtc.frame_count();
+    vm.run_steps(250_000); // 250,000 * 8 = 2,000,000 ticks = ~11 frames in a single call
+    let unpaced_frames = vm.bus.crtc.frame_count() - unpaced_start;
+    assert!(
+        unpaced_frames >= 10,
+        "run_steps should remain unpaced for headless batch tests, advanced {unpaced_frames} frames"
     );
 }

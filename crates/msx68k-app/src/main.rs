@@ -373,7 +373,11 @@ impl Msx68kApp {
     fn step_vm_one_frame(&mut self) {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
-                self.vm.run_steps(250_000);
+                // In Burst mode, pace peripheral clock to exact 1/60s frame time (166,667 10MHz ticks)
+                // across up to 250,000 instructions so guest timers (Timer C, V-Blank, double-click)
+                // match real wall-clock time.
+                const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
+                self.vm.run_burst_frame(250_000, TARGET_TICKS_60HZ);
             }
             mode => {
                 // If FDD motor is spinning during floppy access, give a higher instruction budget
