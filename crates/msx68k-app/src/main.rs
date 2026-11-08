@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use msx68k_bus::{CpuSpeedMode, VmConfig, X68kVm};
 use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -438,7 +438,7 @@ impl ApplicationHandler for Msx68kApp {
         let win_h = active_h * self.args.scale;
         let attrs = Window::default_attributes()
             .with_title("msx68k — Sharp X68000")
-            .with_inner_size(LogicalSize::new(win_w, win_h));
+            .with_inner_size(PhysicalSize::new(win_w, win_h));
 
         let window = Arc::new(
             event_loop
@@ -528,17 +528,28 @@ impl ApplicationHandler for Msx68kApp {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let (scale_x, scale_y) = if let Some(gpu) = &self.gpu {
+                let (x, y) = if let Some(gpu) = &self.gpu {
                     let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
+                    let sw = gpu.surface_config.width.max(1) as f64;
+                    let sh = gpu.surface_config.height.max(1) as f64;
+                    let rw = res_w.max(1) as f64;
+                    let rh = res_h.max(1) as f64;
+                    let target_aspect = rw / rh;
+                    let window_aspect = sw / sh;
+                    let (vp_x, vp_y, vp_w, vp_h) = if window_aspect > target_aspect {
+                        let w = sh * target_aspect;
+                        ((sw - w) * 0.5, 0.0, w, sh)
+                    } else {
+                        let h = sw / target_aspect;
+                        (0.0, (sh - h) * 0.5, sw, h)
+                    };
                     (
-                        (gpu.surface_config.width as f64 / res_w.max(1) as f64).max(0.25),
-                        (gpu.surface_config.height as f64 / res_h.max(1) as f64).max(0.25),
+                        ((position.x - vp_x) * (rw / vp_w.max(1.0))).clamp(0.0, (rw - 1.0).max(0.0)),
+                        ((position.y - vp_y) * (rh / vp_h.max(1.0))).clamp(0.0, (rh - 1.0).max(0.0)),
                     )
                 } else {
-                    (1.0, 1.0)
+                    (position.x, position.y)
                 };
-                let x = position.x / scale_x;
-                let y = position.y / scale_y;
                 let guest_x = x.round() as i16;
                 let guest_y = y.round() as i16;
                 self.vm.bus.set_host_mouse_position(Some((guest_x, guest_y)));
@@ -631,13 +642,20 @@ impl ApplicationHandler for Msx68kApp {
                 let active_res = self.vm.bus.crtc.active_resolution();
                 if active_res != self.last_resolution {
                     self.last_resolution = active_res;
-                    if let Some(gpu) = &self.gpu {
+                    if let Some(gpu) = &mut self.gpu {
                         let new_w = active_res.0 * self.args.scale;
                         let new_h = active_res.1 * self.args.scale;
-                        let _ = gpu.window.request_inner_size(LogicalSize::new(new_w, new_h));
+                        let applied = gpu
+                            .window
+                            .request_inner_size(PhysicalSize::new(new_w, new_h))
+                            .unwrap_or(PhysicalSize::new(new_w, new_h));
+                        gpu.surface_config.width = applied.width.max(1);
+                        gpu.surface_config.height = applied.height.max(1);
+                        gpu.surface
+                            .configure(gpu.compositor.device(), &gpu.surface_config);
                         println!(
                             "Auto-resized window to {}x{} (Guest resolution {}x{})",
-                            new_w, new_h, active_res.0, active_res.1
+                            applied.width, applied.height, active_res.0, active_res.1
                         );
                     }
                 }
