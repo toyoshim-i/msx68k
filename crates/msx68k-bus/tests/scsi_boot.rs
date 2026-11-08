@@ -558,6 +558,39 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         (250, 180),
         "FSX.X MouseWorkArea coordinates must match host mouse position"
     );
+
+    // Live Desktop Resize Test: Switch to 1024x768 while desktop is open
+    vm.bus.apply_screen_resolution(1024, 768);
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768));
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 6, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 8, true).unwrap(), 768);
+
+    // Verify Desktop GrafPort, BitMap, and Region bounding boxes were updated
+    let dtgs_addr = text_base + 0x54380;
+    let gp_addr = vm.bus.read_u32(dtgs_addr + 4, true).unwrap();
+    assert!(gp_addr > 0);
+    assert_eq!(vm.bus.read_u16(gp_addr + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(gp_addr + 10, true).unwrap(), 768);
+    let bm_addr = vm.bus.read_u32(gp_addr, true).unwrap();
+    assert!(bm_addr > 0);
+    assert_eq!(vm.bus.read_u16(bm_addr + 6, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(bm_addr + 8, true).unwrap(), 768);
+
+    let vis_h = vm.bus.read_u32(gp_addr + 0x10, true).unwrap();
+    assert!(vis_h > 0);
+    let vis_ptr = vm.bus.read_u32(vis_h, true).unwrap();
+    assert!(vis_ptr > 0);
+    assert_eq!(vm.bus.read_u16(vis_ptr + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(vis_ptr + 10, true).unwrap(), 768);
+
+    // Verify TVRAM contains rendered desktop pattern in extended region (x >= 768 and y >= 512)
+    let tv = vm.bus.tvram().expect("TVRAM must be allocated");
+    let ext_x_byte = 50 * 128 + 52 * 2; // y=50, x=832 (>768)
+    let ext_x_word = u16::from_be_bytes([tv[ext_x_byte], tv[ext_x_byte + 1]]);
+    assert_ne!(ext_x_word, 0, "Extended horizontal area (x > 768) must contain desktop pattern");
+    let ext_y_byte = 600 * 128 + 20 * 2; // y=600 (>512)
+    let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
+    assert_ne!(ext_y_word, 0, "Extended vertical area (y > 512) must contain desktop pattern");
 }
 
 #[test]
@@ -595,4 +628,212 @@ fn test_burst_frame_peripheral_timing_pacing() {
         unpaced_frames >= 10,
         "run_steps should remain unpaced for headless batch tests, advanced {unpaced_frames} frames"
     );
+}
+
+#[test]
+fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
+    let mut vm = X68kVm::new_app_vm();
+
+    // 1. Initial resolution is 768x512
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+
+    // Place Hypercall 0xFE88 + RTS at $0001_0000
+    let code_addr = 0x0001_0000;
+    vm.bus.write_u16(code_addr, 0xFE88, true).unwrap();
+    vm.bus.write_u16(code_addr + 2, 0x4E75, true).unwrap();
+
+    // Mock resident SYS/FSX.X kernel structures in Main RAM
+    let text_base: u32 = 0x0003_0000;
+    // Set IOCS mouse vector $0000_0938
+    vm.bus
+        .write_u32(0x0000_0938, text_base + 0x04F82A, true)
+        .unwrap();
+
+    // ActiveScreenModeRecord at text_base + 0x55278 (width at +6, height at +8)
+    let active_rec = text_base + 0x55278;
+    vm.bus.write_u16(active_rec + 6, 768, true).unwrap();
+    vm.bus.write_u16(active_rec + 8, 512, true).unwrap();
+
+    // Physical CRT mode 16 table at text_base + 0x15200
+    let crt16 = text_base + 0x15200;
+    vm.bus.write_u16(crt16, 768, true).unwrap();
+    vm.bus.write_u16(crt16 + 2, 512, true).unwrap();
+
+    // Desktop GrafPort at text_base + 0x54380
+    let dtgs = text_base + 0x54380;
+    let gp = text_base + 0x57000;
+    vm.bus.write_u32(dtgs + 4, gp, true).unwrap();
+    vm.bus.write_u16(gp + 4, 0, true).unwrap();
+    vm.bus.write_u16(gp + 6, 0, true).unwrap();
+    vm.bus.write_u16(gp + 8, 768, true).unwrap();
+    vm.bus.write_u16(gp + 10, 512, true).unwrap();
+
+    // MouseWorkArea at text_base + 0x5CA44
+    let a4 = text_base + 0x5CA44;
+    vm.bus.write_u32(text_base + 0x633CA, a4, true).unwrap();
+    // bounds: min=(0,0), max=(768, 512)
+    vm.bus.write_u16(a4 + 0x34, 0, true).unwrap();
+    vm.bus.write_u16(a4 + 0x36, 0, true).unwrap();
+    vm.bus.write_u16(a4 + 0x38, 768, true).unwrap();
+    vm.bus.write_u16(a4 + 0x3A, 512, true).unwrap();
+    // mouse pos: (500, 400)
+    vm.bus.write_u16(a4 + 0x0A, 500, true).unwrap();
+    vm.bus.write_u16(a4 + 0x0C, 400, true).unwrap();
+
+    // Test A: Query Mode (D1 = -1)
+    vm.cpu_state.d[1] = 0xFFFF_FFFF;
+    vm.cpu_state.pc = code_addr;
+    vm.step();
+    assert_eq!(vm.cpu_state.d[0], 0, "Initial query should return mode 0");
+    assert_eq!(vm.cpu_state.d[1], 768);
+    assert_eq!(vm.cpu_state.d[2], 512);
+
+    // Test B: Switch to Mode 1 (1024x768)
+    vm.cpu_state.d[1] = 1;
+    vm.cpu_state.pc = code_addr;
+    vm.step();
+    assert_eq!(vm.cpu_state.d[0], 1, "Should return mode 1");
+    assert_eq!(vm.cpu_state.d[1], 1024);
+    assert_eq!(vm.cpu_state.d[2], 768);
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768));
+    assert_eq!(vm.bus.crtc.regs[2], 0);
+    assert_eq!(vm.bus.crtc.regs[3], 128);
+    assert_eq!(vm.bus.crtc.regs[6], 0);
+    assert_eq!(vm.bus.crtc.regs[7], 768);
+    assert_eq!(vm.bus.crtc.regs[10], 0);
+    assert_eq!(vm.bus.crtc.regs[11], 0);
+
+    // Check SRAM persistence ($ED0072..$ED007E)
+    let sram_sig_s = vm.bus.read_u8(0x00ED_0072, true).unwrap();
+    let sram_sig_x = vm.bus.read_u8(0x00ED_0073, true).unwrap();
+    assert_eq!(sram_sig_s, b'S');
+    assert_eq!(sram_sig_x, b'X');
+    let sram_vmode = vm.bus.read_u8(0x00ED_007C, true).unwrap();
+    let sram_crtmode = vm.bus.read_u8(0x00ED_007E, true).unwrap();
+    assert_eq!(sram_vmode, (4 << 4) | 0x03);
+    assert_eq!(sram_crtmode, 0x80 | 16);
+
+    // Check patched resident structures
+    assert_eq!(vm.bus.read_u16(active_rec + 6, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(active_rec + 8, true).unwrap(), 768);
+    assert_eq!(vm.bus.read_u16(crt16, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(crt16 + 2, true).unwrap(), 768);
+    assert_eq!(vm.bus.read_u16(gp + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(gp + 10, true).unwrap(), 768);
+    assert_eq!(vm.bus.read_u16(a4 + 0x38, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(a4 + 0x3A, true).unwrap(), 768);
+
+    // Test C: Switch to Mode 2 (1024x1024)
+    vm.cpu_state.d[1] = 2;
+    vm.cpu_state.pc = code_addr;
+    vm.step();
+    assert_eq!(vm.cpu_state.d[0], 2, "Should return mode 2");
+    assert_eq!(vm.cpu_state.d[1], 1024);
+    assert_eq!(vm.cpu_state.d[2], 1024);
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 1024));
+    let sram_vmode2 = vm.bus.read_u8(0x00ED_007C, true).unwrap();
+    assert_eq!(sram_vmode2, (6 << 4) | 0x03);
+    assert_eq!(vm.bus.read_u16(active_rec + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(a4 + 0x3A, true).unwrap(), 1024);
+
+    // Test D: Switch back to Mode 0 (768x512) and check clamping of mouse
+    // Place mouse at (900, 800) before switching down
+    vm.bus.write_u16(a4 + 0x0A, 900, true).unwrap();
+    vm.bus.write_u16(a4 + 0x0C, 800, true).unwrap();
+    vm.cpu_state.d[1] = 0;
+    vm.cpu_state.pc = code_addr;
+    vm.step();
+    assert_eq!(vm.cpu_state.d[0], 0, "Should return mode 0");
+    assert_eq!(vm.cpu_state.d[1], 768);
+    assert_eq!(vm.cpu_state.d[2], 512);
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    assert_eq!(vm.bus.read_u16(a4 + 0x38, true).unwrap(), 768);
+    assert_eq!(vm.bus.read_u16(a4 + 0x3A, true).unwrap(), 512);
+    // Mouse coords must have been clamped to (767, 511)
+    let clamped_x = vm.bus.read_u16(a4 + 0x0A, true).unwrap();
+    let clamped_y = vm.bus.read_u16(a4 + 0x0C, true).unwrap();
+    assert_eq!(clamped_x, 767);
+    assert_eq!(clamped_y, 511);
+}
+
+#[test]
+fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ipl_path = workspace_root.join("roms/IPLROM.DAT");
+    let cgrom_path = workspace_root.join("roms/CGROM.DAT");
+    let human_path = workspace_root.join("disks/HUMAN302.XDF");
+    if !ipl_path.exists() || !cgrom_path.exists() || !human_path.exists() {
+        eprintln!("ROMs or HUMAN302.XDF not found, skipping boot test");
+        return;
+    }
+
+    let ipl_data = std::fs::read(&ipl_path).unwrap();
+    let cgrom_data = std::fs::read(&cgrom_path).unwrap();
+    let human_data = std::fs::read(&human_path).unwrap();
+
+    let sx_disks = [
+        ("SXWIN311", workspace_root.join("disks/SXWIN311.XDF")),
+        ("SXWIN312", workspace_root.join("disks/SXWIN312.XDF")),
+        ("SXWIN313", workspace_root.join("disks/SXWIN313.XDF")),
+        ("SXWIN314", workspace_root.join("disks/SXWIN314.XDF")),
+        ("SXWIN315", workspace_root.join("disks/SXWIN315.XDF")),
+        ("SXWIN316", workspace_root.join("disks/SXWIN316.XDF")),
+    ];
+    let mut sx_loaded = Vec::new();
+    for (name, path) in &sx_disks {
+        if let Ok(bytes) = std::fs::read(path) {
+            sx_loaded.push((*name, bytes));
+        }
+    }
+    let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+
+    let mut vm = X68kVm::new(
+        VmConfig::master_sx()
+            .with_speed_mode(CpuSpeedMode::Burst)
+            .with_ram_mb(4),
+    );
+
+    vm.bus.load_cgrom(&cgrom_data);
+    vm.bus.load_ipl_rom(&ipl_data);
+
+    // Pre-configure initial resolution to 1024x768 (as if passed via CLI --resolution 1024x768)
+    vm.bus.apply_screen_resolution(1024, 768);
+
+    assert!(vm.bus.insert_scsi_hdd(0, hdd_image));
+    vm.bus.set_boot_from_scsi(true);
+
+    vm.reset().unwrap();
+
+    // Boot until SX-Window reaches desktop
+    for _chunk in 1..=90 {
+        vm.run_steps(250_000);
+        if vm.bus.vicon.r0_mode() == 0x0004 && vm.bus.vicon.r2_display() == 0x003F {
+            let tv_non_zero = vm
+                .bus
+                .tvram()
+                .map_or(0, |tv| tv.iter().filter(|&&b| b != 0).count());
+            if tv_non_zero > 140_000 {
+                break;
+            }
+        }
+    }
+
+    // Verify CRTC resolution remained 1024x768 throughout boot
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768));
+
+    // Verify FSX.X structures in RAM
+    let iocs_mouse_vec = vm.bus.read_u32(0x0000_0938, true).unwrap();
+    let text_base = iocs_mouse_vec - 0x04F82A;
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 6, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 8, true).unwrap(), 768);
+
+    // Verify TVRAM contains pixels in extended areas (>768 and >512)
+    let tv = vm.bus.tvram().expect("TVRAM must be allocated");
+    let ext_x_byte = 50 * 128 + 52 * 2; // y=50, x=832 (>768)
+    let ext_x_word = u16::from_be_bytes([tv[ext_x_byte], tv[ext_x_byte + 1]]);
+    assert_ne!(ext_x_word, 0, "Boot-time 1024x768 desktop must draw into extended horizontal area (x > 768)");
+    let ext_y_byte = 600 * 128 + 20 * 2; // y=600 (>512)
+    let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
+    assert_ne!(ext_y_word, 0, "Boot-time 1024x768 desktop must draw into extended vertical area (y > 512)");
 }

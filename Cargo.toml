@@ -6,6 +6,10 @@ members = [
     "crates/msx68k-vicon",
     "crates/msx68k-app",
 ]
+exclude = [
+    "third_party/rhas",
+    "third_party/rhlk",
+]
 default-members = ["crates/msx68k-app"]
 
 [workspace.package]

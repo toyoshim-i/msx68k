@@ -114,6 +114,7 @@ struct AppArgs {
     speed_mode: CpuSpeedMode,
     ram_mb: usize,
     scale: u32,
+    resolution: Option<(u32, u32)>,
 }
 
 impl Default for AppArgs {
@@ -136,6 +137,7 @@ impl Default for AppArgs {
             speed_mode: CpuSpeedMode::Mhz10,
             ram_mb: 4,
             scale: 1,
+            resolution: None,
         }
     }
 }
@@ -195,6 +197,22 @@ impl AppArgs {
                         cfg.scale = v.clamp(1, 4);
                     }
                 }
+                "--resolution" => {
+                    if let Some(s) = args.next() {
+                        let parts: Vec<&str> = s.split(['x', 'X', '*']).collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) =
+                                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                            {
+                                cfg.resolution = Some((w, h));
+                            }
+                        } else if s == "1024" {
+                            cfg.resolution = Some((1024, 1024));
+                        } else if s == "768" {
+                            cfg.resolution = Some((768, 512));
+                        }
+                    }
+                }
                 "--help" | "-h" => {
                     println!(
                         "msx68k — Sharp X68000 / SX-Window Hybrid Execution Environment\n\n\
@@ -206,9 +224,10 @@ impl AppArgs {
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
-                           --scale <1..4>       Initial window scale (default: 1 = 768x512)\n\n\
+                           --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
+                           --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024)\n\n\
                          Hotkeys:\n  \
-                           F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F12: Reset"
+                           F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F5: Cycle Resolution | F12: Reset"
                     );
                     std::process::exit(0);
                 }
@@ -237,6 +256,7 @@ struct Msx68kApp {
     last_cursor_pos: Option<(f64, f64)>,
     mouse_left: bool,
     mouse_right: bool,
+    last_resolution: (u32, u32),
 }
 
 impl Msx68kApp {
@@ -349,6 +369,11 @@ impl Msx68kApp {
         }
 
         vm.reset().expect("Failed to reset X68000 VM");
+        if let Some((w, h)) = args.resolution {
+            vm.bus.apply_screen_resolution(w, h);
+            println!("Configured initial screen resolution: {}x{}", w, h);
+        }
+        let initial_res = vm.bus.crtc.active_resolution();
         println!(
             "Initialized X68000 VM ({:?}, {} MB RAM, initial PC=${:06X})",
             vm.speed_mode(),
@@ -367,6 +392,7 @@ impl Msx68kApp {
             last_cursor_pos: None,
             mouse_left: false,
             mouse_right: false,
+            last_resolution: initial_res,
         }
     }
 
@@ -401,8 +427,9 @@ impl ApplicationHandler for Msx68kApp {
             return;
         }
 
-        let win_w = 768 * self.args.scale;
-        let win_h = 512 * self.args.scale;
+        let (active_w, active_h) = self.vm.bus.crtc.active_resolution();
+        let win_w = active_w * self.args.scale;
+        let win_h = active_h * self.args.scale;
         let attrs = Window::default_attributes()
             .with_title("msx68k — Sharp X68000")
             .with_inner_size(LogicalSize::new(win_w, win_h));
@@ -561,6 +588,17 @@ impl ApplicationHandler for Msx68kApp {
                                 println!("Switched CPU speed to Burst (0 wait)");
                                 return;
                             }
+                            KeyCode::F5 => {
+                                let (cur_w, cur_h) = self.vm.bus.crtc.active_resolution();
+                                let (next_w, next_h) = match (cur_w, cur_h) {
+                                    (768, 512) => (1024, 768),
+                                    (1024, 768) => (1024, 1024),
+                                    _ => (768, 512),
+                                };
+                                self.vm.bus.apply_screen_resolution(next_w, next_h);
+                                println!("F5: Switched resolution to {}x{}", next_w, next_h);
+                                return;
+                            }
                             KeyCode::F12 => {
                                 let _ = self.vm.reset();
                                 println!("Reset X68000 VM");
@@ -583,6 +621,20 @@ impl ApplicationHandler for Msx68kApp {
             }
             WindowEvent::RedrawRequested => {
                 self.step_vm_one_frame();
+
+                let active_res = self.vm.bus.crtc.active_resolution();
+                if active_res != self.last_resolution {
+                    self.last_resolution = active_res;
+                    if let Some(gpu) = &self.gpu {
+                        let new_w = active_res.0 * self.args.scale;
+                        let new_h = active_res.1 * self.args.scale;
+                        let _ = gpu.window.request_inner_size(LogicalSize::new(new_w, new_h));
+                        println!(
+                            "Auto-resized window to {}x{} (Guest resolution {}x{})",
+                            new_w, new_h, active_res.0, active_res.1
+                        );
+                    }
+                }
 
                 if let Some(gpu) = &mut self.gpu {
                     let frame = match gpu.surface.get_current_texture() {
@@ -633,7 +685,7 @@ impl ApplicationHandler for Msx68kApp {
                             ""
                         };
                         gpu.window.set_title(&format!(
-                            "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F12:Reset)",
+                            "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
                             self.vm.cpu_state.pc
                         ));
                     }

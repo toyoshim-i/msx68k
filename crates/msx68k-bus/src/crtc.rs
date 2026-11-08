@@ -37,7 +37,7 @@ pub struct CrtcSyncEvents {
 #[derive(Debug, Clone)]
 pub struct Crtc {
     /// CRTC registers `R00`..`R23`.
-    regs: [u16; 24],
+    pub regs: [u16; 24],
     /// Operation port bit 3 (`$E80481` bit 3): Hardware Raster Copy active.
     raster_copy_on: bool,
     /// Operation port bit 1 (`$E80481` bit 1): Graphic Fast Clear standby.

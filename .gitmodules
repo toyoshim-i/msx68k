@@ -1,3 +1,9 @@
 [submodule "third_party/m68000"]
 	path = third_party/m68000
 	url = https://github.com/SingleStepTests/m68000.git
+[submodule "third_party/rhas"]
+	path = third_party/rhas
+	url = https://github.com/toyoshim-i/Rhas.git
+[submodule "third_party/rhlk"]
+	path = third_party/rhlk
+	url = https://github.com/toyoshim-i/Rhlk.git

@@ -109,6 +109,8 @@ pub struct X68kBus {
     pub scsi: crate::scsi::ScsiController,
     /// Host OS mouse pointer in guest screen coordinates.
     pub host_mouse_pos: Option<(i16, i16)>,
+    /// Configured display target resolution `(width, height)` across reboots and mode switches.
+    pub target_resolution: Option<(u32, u32)>,
 }
 
 impl X68kBus {
@@ -161,6 +163,7 @@ impl X68kBus {
             ioi: IoInterruptController::new(),
             scsi: crate::scsi::ScsiController::new(),
             host_mouse_pos: None,
+            target_resolution: None,
         }
     }
 
@@ -595,8 +598,26 @@ impl Bus for X68kBus {
                 Ok(())
             }
             MemoryRegion::Crtc => {
-                self.crtc
-                    .write_u8(a, val, &mut self.tvram, &mut self.gvram)
+                let res = self.crtc
+                    .write_u8(a, val, &mut self.tvram, &mut self.gvram);
+                if let Some((w, h)) = self.target_resolution {
+                    if (w, h) != (768, 512) {
+                        let offset = (a & 0x3F) as usize;
+                        let reg_idx = offset >> 1;
+                        if matches!(reg_idx, 2 | 3 | 6 | 7 | 10 | 11 | 20) {
+                            self.crtc.regs[2] = 0;
+                            self.crtc.regs[3] = (w / 8) as u16;
+                            self.crtc.regs[6] = 0;
+                            self.crtc.regs[7] = h as u16;
+                            self.crtc.regs[10] = 0;
+                            self.crtc.regs[11] = 0;
+                            if h > 512 {
+                                self.crtc.regs[20] = 0x001F;
+                            }
+                        }
+                    }
+                }
+                res
             }
             MemoryRegion::PaletteVicon => {
                 self.vicon.write_u8(a, val);

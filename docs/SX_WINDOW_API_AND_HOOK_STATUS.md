@@ -646,15 +646,90 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A227`** | `SYS/FSX.X`<br/>`text_base + 0x047DCE` | `4E 56 00 00` | Sub-Window Manager: `WSOpen` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Allocator**: Intercepts sub-window opening, allocates host `VirtualGvramSurface`, and binds to `WSRecord`. |
 | **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
 | **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
-| **`$FE88`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
-| **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
-| **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |
-| **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554AA` | `00 02 1A D8` | Driver Table +0x0C (`RRect`) | **`[ ] Planned (Phase 2B)`** | **Native Rounded Rect Hypercall**: Antialiased GPU rounded rectangle primitive. |
-| **`$FE8C`** | `SYS/FSX.X`<br/>`text_base + 0x554AE` | `00 02 19 52` | Driver Table +0x10 (`Oval`) | **`[ ] Planned (Phase 2B)`** | **Native Oval Hypercall**: Antialiased GPU ellipse/oval primitive. |
-| **`$FE8D`** | `SYS/FSX.X`<br/>`text_base + 0x554B2` | `00 02 22 D6` | Driver Table +0x14 (`Arc`) | **`[ ] Planned (Phase 2B)`** | **Native Arc Hypercall**: GPU arc and pie wedge primitive. |
-| **`$FE8E`** | `SYS/FSX.X`<br/>`text_base + 0x554B6` | `00 02 16 D4` | Driver Table +0x18 (`Poly`) | **`[ ] Planned (Phase 2B)`** | **Native Polygon Hypercall**: GPU convex/concave polygon rasterizer. |
-| **`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x554BA` | `00 02 29 A6` | Driver Table +0x1C (`Rgn`) | **`[ ] Planned (Phase 2B)`** | **Native Region Hypercall**: Fast GPU multi-rectangle stencil/scissor region fill. |
-| **`$FE90`** | `SYS/FSX.X`<br/>`text_base + 0x554BE` | `00 02 35 48` | Driver Table +0x20 (`Bits`) | **`[ ] Planned (Phase 2B)`** | **Native BitBlt Hypercall**: GPU texture-to-texture bit-block transfer with alpha masking and scaling. |
-| **`$FE91`** | `SYS/FSX.X`<br/>`text_base + 0x554C2` | `00 03 42 84` | Driver Table +0x24 (`Text`) | **`[ ] Planned (Phase 2B)`** | **Native Text Hypercall**: High-DPI font rendering with sub-pixel antialiasing and JIS Kanji support. |
+| **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Dynamic Screen Mode & Resolution Switching**: Queries (`D1 = -1`) or switches screen mode (0: 768×512, 1: 1024×768, 2: 1024×1024). Reprograms CRTC registers (R02, R03, R06, R07, R10, R11, R20), persists settings into battery-backed SRAM (`$ED0072..$ED007E`), and updates resident `SYS/FSX.X` kernel structures (`ActiveScreenModeRecord`, mode table, CRT table, `MouseWorkArea` bounds, desktop GrafPort). |
+| **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
+| **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
+| **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |
+| **`$FE8C`** | `SYS/FSX.X`<br/>`text_base + 0x554AA` | `00 02 1A D8` | Driver Table +0x0C (`RRect`) | **`[ ] Planned (Phase 2B)`** | **Native Rounded Rect Hypercall**: Antialiased GPU rounded rectangle primitive. |
+| **`$FE8D`** | `SYS/FSX.X`<br/>`text_base + 0x554AE` | `00 02 19 52` | Driver Table +0x10 (`Oval`) | **`[ ] Planned (Phase 2B)`** | **Native Oval Hypercall**: Antialiased GPU ellipse/oval primitive. |
+| **`$FE8E`** | `SYS/FSX.X`<br/>`text_base + 0x554B2` | `00 02 22 D6` | Driver Table +0x14 (`Arc`) | **`[ ] Planned (Phase 2B)`** | **Native Arc Hypercall**: GPU arc and pie wedge primitive. |
+| **`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x554B6` | `00 02 16 D4` | Driver Table +0x18 (`Poly`) | **`[ ] Planned (Phase 2B)`** | **Native Polygon Hypercall**: GPU convex/concave polygon rasterizer. |
+| **`$FE90`** | `SYS/FSX.X`<br/>`text_base + 0x554BA` | `00 02 29 A6` | Driver Table +0x1C (`Rgn`) | **`[ ] Planned (Phase 2B)`** | **Native Region Hypercall**: Fast GPU multi-rectangle stencil/scissor region fill. |
+| **`$FE91`** | `SYS/FSX.X`<br/>`text_base + 0x554BE` | `00 02 35 48` | Driver Table +0x20 (`Bits`) | **`[ ] Planned (Phase 2B)`** | **Native BitBlt Hypercall**: GPU texture-to-texture bit-block transfer with alpha masking and scaling. |
+| **`$FE92`** | `SYS/FSX.X`<br/>`text_base + 0x554C2` | `00 03 42 84` | Driver Table +0x24 (`Text`) | **`[ ] Planned (Phase 2B)`** | **Native Text Hypercall**: High-DPI font rendering with sub-pixel antialiasing and JIS Kanji support. |
 | **`$A17E`** | `SYS/FSX.X`<br/>`text_base + 0x01D746` | `4E 56 FF 4A` | Graph Man: `GMScroll` | **`[ ] Planned (Phase 2B)`** | **Native Surface Scroll**: Instant GPU texture blit bypassing CRTC raster copy and TVRAM 128B stride. |
 | **`WM-Rootless`** | `SYS/FSX.X`<br/>`text_base + 0x0476D8` | Various | Window Manager Rootless Hook | **`[ ] Planned (Phase 2C)`** | **Host OS Window Decoupling**: Maps SX-Window windows directly to host OS desktop windows (`winit`). |
+
+---
+
+## 7. Clean-Room Toolchain & Guest Resolution Switcher (`SXMODE.X`)
+
+### 7.1 Clean-Room Macro Headers (`guest/include/*.mac`)
+To ensure complete independence from copyrighted or proprietary SDK headers, clean-room assembly macros were designed from scratch in `HAS060` format:
+- **`guest/include/doscall.mac`**: Clean-room Human68k DOS call macro (`DOS macro call / .dc.w &call / endm`) and standard DOS vector numbers (`_EXIT`, `_PRINT`, `_OPEN`, `_READ`, `_WRITE`, `_MALLOC`, `_SETBLOCK`, `_EXEC`, `_EXIT2`, etc.).
+- **`guest/include/iocscall.mac`**: Clean-room X68000 IOCS trap macro (`IOCS macro call / moveq.l #&call, d0 / trap #15 / endm`) and call numbers (`_B_KEYINP`, `_CRTMOD`, `_B_PUTC`, `_B_PRINT`, `_SCROLL`, `_SCSIDRV`, etc.).
+- **`guest/include/sxcall.mac`**: Clean-room SX-Window macros:
+  - `SXCALL macro call`: Injects `$A000 | (&call & $0FFF)`.
+  - `HYPERCALL macro call`: Injects `&call` (F-Line hypercall opcode `$FE80..$FE8F`).
+  - Full constants for all Manager trap ranges (`$A000..$A61F`), hypercall IDs (`HYPER_SX_MOUSE_SYNC`, `HYPER_SX_SET_SCREEN_MODE`), and kernel data structure offsets (`rect_*`, `gp_*`, `bm_*`, `mwa_*`).
+
+### 7.2 In-Process Guest Assembler & Linker (`crates/msx68k-bus/src/guest_build.rs`)
+Leverages `third_party/rhas` (HAS060-compatible MC68000 cross-assembler) and `third_party/rhlk` (Human68k object linker) as path dependencies within Rust:
+- **`assemble_file`**: Runs `rhas` in-process against `.s` source files with `-i guest/include` include path support.
+- **`link_objects`**: Runs `rhlk` to produce Human68k `HU` (`.X`) executable binaries in memory.
+- **`build_guest_x_executable`**: Combines assembly and linking into a single build pipeline without external toolchain dependencies.
+
+### 7.3 Guest Utility: `SXMODE.X` (`guest/sxmode/sxmode.s`)
+A hybrid CLI and interactive SX-Window GUI application for querying and switching SX-Window desktop resolutions, adhering strictly to the verified binary format of `SYS/FSX.X` and `カレンダ.X`:
+- **Binary Structure & SX-Window Compatibility**:
+  - Contains mandatory 32-byte `'OBJR'` header at `.text + 0x0000` (`magic = 'OBJR'`, `text_size`, `work_size = $00001800` [6 KB], `stack_size = app_stack_top - objr_header`).
+  - Executable entry point at `.text + 0x0020` (`_start`), allowing SX-Window Process Manager (`SYS/FSX.X` offset `0x14090`) to recognize and run it directly as a cooperative GUI desktop task rather than falling back to console mode.
+- **Entry Register Preservation**:
+  - On entry, preserves `A0` (SX Task Block pointer, where `8(A0)` is Task ID) and `A1` (application base address) into `D2` and `D3`, and copies `A2` (command line buffer pointer) into `A3`.
+- **CLI Mode**:
+  - Reads command line argument buffer from `A3` (Human68k ABI: `0(A3)` is length byte, `1(A3)` is argument characters).
+  - Supported CLI options:
+    - `sxmode 0` or `sxmode 768x512`: Switch to Mode 0 (768×512 Standard).
+    - `sxmode 1` or `sxmode 1024x768`: Switch to Mode 1 (1024×768 XGA 4:3).
+    - `sxmode 2` or `sxmode 1024x1024`: Switch to Mode 2 (1024×1024 Full VRAM).
+  - Applies mode immediately via `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) and exits via `DOS _EXIT2` without launching GUI.
+- **Interactive GUI Mode (Launched without arguments in SX-Window)**:
+  - Detects SX-Window runtime by checking Vector #10 (`Line 1010 Emulator` at `$0000_0028 < $00E0_0000`).
+  - Switches stack to dedicated 2 KB application stack (`app_stack_top`).
+  - Initializes application task via `TSInitApp` (`$A350`), passing the 6 KB work buffer (`work_area: .ds.b 6144`, which `SYS/FSX.X` clears by writing 5,962 zeroes) and Task ID from `8(A0)`.
+  - Queries `TSGetID` (`$A360`).
+  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=270, right=400)` with Pascal string title (`6, "SXMODE", 0`).
+  - Sets port (`GMSetGraph` `$A131`), selects 12×13 system font (`GMFontKind` `$A18B`, `GMFontSize` `$A18E`), and renders three framed buttons using Pascal strings with `GMDrawStrL` (`$A190`):
+    - Button 0 (`y=16..46, x=20..200`): `" 768 x 512 "`
+    - Button 1 (`y=56..86, x=20..200`): `"1024 x 768 "`
+    - Button 2 (`y=96..126, x=20..200`): `"1024 x 1024"`
+  - Queries active mode via `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) and inverts the active button rectangle via official `GMInvertRect` (`$A1A3`).
+  - Executes canonical cooperative event loop via `TSEventAvail` (`$A357`):
+    - `updateEvt` (7, verified from `SYS/FSX.X`): pushes `win_ptr` once, calls `WMUpdate` (`$A20D`), redraws buttons, calls `WMUpdtOver` (`$A20E`), and pops `win_ptr`.
+    - `appQuitEvt` (12): cleans up via `WMDispose` (`$A1FC`) and `TSExit` (`$A352`).
+    - `mouseDown` (1): brings window to front (`WMSelect` `$A1FE`), sets port (`GMSetGraph` `$A131`), and delegates window drag, close box, and content testing to `SXCallWindM` (`$A3A2`):
+      - Close box confirmed (`D0 == 7`): calls `WMDispose` (`$A1FC`), `TSExit` (`$A352`), and exits cleanly via `DOS _EXIT2`.
+      - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit, invokes `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) to dynamically resize the desktop in real time, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
+- **Console Fallback Mode (Launched without arguments outside SX-Window)**:
+  - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> 0`) and exits cleanly.
+- **SCSI HDD Injection**: Built automatically during `build_bootable_sxwin_scsi_hdd` and placed into `A:\SXMODE.X` and `A:\BIN\SXMODE.X`.
+
+### 7.4 Host Emulator Integration
+- **CLI Flag `--resolution <WxH>`**: Configures the initial screen mode (`768x512`, `1024x768`, `1024x1024`).
+- **Hotkey `F5`**: Dynamically cycles display resolutions at runtime (`768x512` -> `1024x768` -> `1024x1024` -> `768x512`).
+- **Dynamic Window Resizing**: Host emulator window automatically resizes to match the emulator's active CRTC display resolution when modes change.
+
+### 7.5 Live Desktop Resize & Boot-Time Persistence Mechanism
+1. **CRTC Write Intercept (`MemoryRegion::Crtc`)**:
+   - When `--resolution` is specified on the command-line or applied via `apply_screen_resolution()`, `bus.target_resolution` is configured.
+   - During `IPLROM` and `HUMAN.SYS` boot, or when `SXWIN.X` initializes at `$001A86`, guest code calls `IOCS $10` (`_CRTMOD(16)`), which attempts to reset CRTC registers `R02, R03, R06, R07, R10, R11, R20` back to standard 768×512.
+   - The memory write handler for `MemoryRegion::Crtc` intercepts guest writes to these registers when `target_resolution` is active, enforcing the requested resolution without breaking other CRTC registers.
+2. **FSX.X Kernel Structure Patching**:
+   - `apply_screen_resolution()` updates `ActiveScreenModeRecord` (`text_base + 0x55278`), Mode 3 (`+0x55338`), Mode 4 (`+0x5534E`), Mode 6 (`+0x5537A`), and Physical CRT Mode 16 (`+0x15200`).
+   - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
+   - Patches Desktop GrafPort `portRect` (`gp + 4..12`), Screen `BitMap` (`bm + 6..10`), `visRgn` (`vis_ptr + 8..12`), and `clipRgn` (`clip_ptr + 8..12`). Note that `text_base + 0x54384` (`dtgs + 4`) is the 32-bit pointer to `gp`, and `text_base + 0x543C6` (`dtgs + 0x46`) is the 32-bit pointer to `menu_gp`.
+   - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
+   - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
+3. **Seamless TVRAM Pattern & Menubar Tiling**:
+   - When expanding resolution live, `apply_screen_resolution()` replicates the 8×8 desktop background pattern across `x >= 768` and `y >= 512`.
+   - Extends the menubar background across `x >= 768` for lines `y < 45`.

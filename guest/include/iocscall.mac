@@ -1,0 +1,40 @@
+* -----------------------------------------------------------------------------
+* X68000 IOCS Call Interface & Trap #15 Equates
+* Clean-room specification for msx68k virtual environment
+* -----------------------------------------------------------------------------
+
+IOCS	.macro	call
+	moveq.l	#&call,d0
+	trap	#15
+	.endm
+
+* Standard X68000 IOCS Function Codes
+_B_KEYINP	.equ	$00
+_B_KEYSNS	.equ	$01
+_B_SFTSNS	.equ	$02
+_B_COLOR	.equ	$06
+_B_LOCATE	.equ	$07
+_B_PUTC		.equ	$09
+_B_PRINT	.equ	$0A
+_CRTMOD		.equ	$10
+_DOWNSCR	.equ	$11
+_UPSCR		.equ	$12
+_SCROLL		.equ	$13
+_TPALET		.equ	$14
+_TPALET2	.equ	$15
+_TCOLOR		.equ	$16
+_VRAMGET	.equ	$17
+_VRAMPUT	.equ	$18
+_FNTGET		.equ	$19
+_TEXTGET	.equ	$1A
+_TEXTPUT	.equ	$1B
+_CLIPPUT	.equ	$1C
+_SP_INIT	.equ	$20
+_B_INTVEC	.equ	$2C
+_B_SUPER	.equ	$2E
+_B_BPEEK	.equ	$82
+_B_BREAD	.equ	$83
+_B_BPOKE	.equ	$85
+_B_BWRITE	.equ	$86
+_ONTIME		.equ	$87
+_SCSIDRV	.equ	$F5

@@ -2,6 +2,7 @@
 //! and Mixed Mode Hypercall Engine for X68000.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use msx68k_cpu::{CpuState, TrapResult};
 
 use crate::bus::X68kBus;
@@ -103,6 +104,8 @@ pub enum HypercallId {
     ScsiDriverStrategy = 0xFE86,
     /// `romdb` block driver Interrupt routine (`A5` = request packet).
     ScsiDriverInterrupt = 0xFE87,
+    /// Dynamic resolution & screen mode switch (Step 1: up to 1024x1024 full display).
+    SxSetScreenMode = 0xFE88,
 }
 
 impl HypercallId {
@@ -116,6 +119,7 @@ impl HypercallId {
             0xFE85 => Some(Self::ScsiIocsDispatch),
             0xFE86 => Some(Self::ScsiDriverStrategy),
             0xFE87 => Some(Self::ScsiDriverInterrupt),
+            0xFE88 => Some(Self::SxSetScreenMode),
             _ => None,
         }
     }
@@ -342,6 +346,267 @@ impl X68kBus {
         self.host_mouse_pos
     }
 
+    /// Dynamically applies a screen resolution preset (up to 1024x1024) to the CRTC,
+    /// battery-backed SRAM settings ($ED0072..$ED007E), and resident SYS/FSX.X kernel structures.
+    pub fn apply_screen_resolution(&mut self, width: u32, height: u32) {
+        let width = width.clamp(256, 1024);
+        let height = height.clamp(256, 1024);
+        self.target_resolution = Some((width, height));
+
+        // 1. Program CRTC registers
+        let h_cols = (width / 8) as u16;
+        self.crtc.regs[2] = 0;
+        self.crtc.regs[3] = h_cols;
+        self.crtc.regs[6] = 0;
+        self.crtc.regs[7] = height as u16;
+        self.crtc.regs[10] = 0; // Text scroll X = 0
+        self.crtc.regs[11] = 0; // Text scroll Y = 0
+        if height > 512 {
+            self.crtc.regs[20] = 0x001F; // 31kHz high-res mode (>512 lines)
+        } else {
+            self.crtc.regs[20] = 0x0416; // 31kHz standard mode (768x512)
+        }
+
+        // 2. Update battery-backed SRAM ($ED0072..$ED007E)
+        if self.sram.len() >= 0x80 {
+            self.sram[0x72] = b'S';
+            self.sram[0x73] = b'X';
+            let vmode = if width >= 1024 && height >= 1024 {
+                6
+            } else if width >= 1024 && height >= 768 {
+                4
+            } else {
+                3
+            };
+            self.sram[0x7C] = (vmode << 4) | 0x03;
+            // bit 7 = 1 (configured), bit 6 = 0 (scroll disabled), bits 0..4 = 16 (CRT mode 16)
+            self.sram[0x7E] = 0x80 | 16;
+        }
+
+        // 3. Patch resident SYS/FSX.X kernel data structures if loaded in Main RAM
+        if self.main_ram.len() >= 0x0940 {
+            let iocs_mouse_vec = u32::from_be_bytes([
+                self.main_ram[0x938],
+                self.main_ram[0x939],
+                self.main_ram[0x93A],
+                self.main_ram[0x93B],
+            ]);
+            if iocs_mouse_vec > 0x04F82A {
+                let text_base = (iocs_mouse_vec - 0x04F82A) as usize;
+                if text_base + 0x65000 <= self.main_ram.len() {
+                    let w_be = (width as u16).to_be_bytes();
+                    let h_be = (height as u16).to_be_bytes();
+
+                    // ActiveScreenModeRecord at text_base + 0x55278
+                    let active_rec = text_base + 0x55278;
+                    self.main_ram[active_rec + 6..active_rec + 8].copy_from_slice(&w_be);
+                    self.main_ram[active_rec + 8..active_rec + 10].copy_from_slice(&h_be);
+
+                    // Mode 3 (768x512) at text_base + 0x55338
+                    let m3 = text_base + 0x55338;
+                    self.main_ram[m3 + 6..m3 + 8].copy_from_slice(&w_be);
+                    self.main_ram[m3 + 8..m3 + 10].copy_from_slice(&h_be);
+
+                    // Mode 4 (1024x424) at text_base + 0x5534E
+                    let m4 = text_base + 0x5534E;
+                    self.main_ram[m4 + 6..m4 + 8].copy_from_slice(&w_be);
+                    self.main_ram[m4 + 8..m4 + 10].copy_from_slice(&h_be);
+
+                    // Mode 6 (1024x1024) at text_base + 0x5537A
+                    let m6 = text_base + 0x5537A;
+                    self.main_ram[m6 + 6..m6 + 8].copy_from_slice(&w_be);
+                    self.main_ram[m6 + 8..m6 + 10].copy_from_slice(&h_be);
+
+                    // Physical CRT resolution table at text_base + 0x151C0
+                    // Entry 16 (CRT mode 16) at text_base + 0x15200
+                    let crt16 = text_base + 0x15200;
+                    self.main_ram[crt16..crt16 + 2].copy_from_slice(&w_be);
+                    self.main_ram[crt16 + 2..crt16 + 4].copy_from_slice(&h_be);
+
+                    // Clear text scroll offsets in FSX.X
+                    self.main_ram[text_base + 0x15364..text_base + 0x15368]
+                        .copy_from_slice(&[0, 0, 0, 0]);
+                    self.main_ram[text_base + 0x5525A..text_base + 0x5525E]
+                        .copy_from_slice(&[0, 0, 0, 0]);
+
+                    // Desktop GrafPort pointer at text_base + 0x54384 (dtgs + 4)
+                    let dtgs = text_base + 0x54380;
+                    let gp = u32::from_be_bytes([
+                        self.main_ram[dtgs + 4],
+                        self.main_ram[dtgs + 5],
+                        self.main_ram[dtgs + 6],
+                        self.main_ram[dtgs + 7],
+                    ]) as usize;
+                    if gp > 0 && gp + 0x20 <= self.main_ram.len() {
+                        self.main_ram[gp + 4..gp + 6].copy_from_slice(&0u16.to_be_bytes());
+                        self.main_ram[gp + 6..gp + 8].copy_from_slice(&0u16.to_be_bytes());
+                        self.main_ram[gp + 8..gp + 10].copy_from_slice(&w_be);
+                        self.main_ram[gp + 10..gp + 12].copy_from_slice(&h_be);
+
+                        // Screen BitMap pointed by gp + 0:
+                        let bm = u32::from_be_bytes([
+                            self.main_ram[gp],
+                            self.main_ram[gp + 1],
+                            self.main_ram[gp + 2],
+                            self.main_ram[gp + 3],
+                        ]) as usize;
+                        if bm > 0 && bm + 10 <= self.main_ram.len() {
+                            self.main_ram[bm + 6..bm + 8].copy_from_slice(&w_be);
+                            self.main_ram[bm + 8..bm + 10].copy_from_slice(&h_be);
+                        }
+
+                        // visRgn handle at gp + 0x10:
+                        let vis_h = u32::from_be_bytes([
+                            self.main_ram[gp + 0x10],
+                            self.main_ram[gp + 0x11],
+                            self.main_ram[gp + 0x12],
+                            self.main_ram[gp + 0x13],
+                        ]) as usize;
+                        if vis_h > 0 && vis_h + 4 <= self.main_ram.len() {
+                            let vis_ptr = u32::from_be_bytes([
+                                self.main_ram[vis_h],
+                                self.main_ram[vis_h + 1],
+                                self.main_ram[vis_h + 2],
+                                self.main_ram[vis_h + 3],
+                            ]) as usize;
+                            if vis_ptr > 0 && vis_ptr + 12 <= self.main_ram.len() {
+                                self.main_ram[vis_ptr + 8..vis_ptr + 10].copy_from_slice(&w_be);
+                                self.main_ram[vis_ptr + 10..vis_ptr + 12].copy_from_slice(&h_be);
+                            }
+                        }
+
+                        // clipRgn handle at gp + 0x14:
+                        let clip_h = u32::from_be_bytes([
+                            self.main_ram[gp + 0x14],
+                            self.main_ram[gp + 0x15],
+                            self.main_ram[gp + 0x16],
+                            self.main_ram[gp + 0x17],
+                        ]) as usize;
+                        if clip_h > 0 && clip_h + 4 <= self.main_ram.len() {
+                            let clip_ptr = u32::from_be_bytes([
+                                self.main_ram[clip_h],
+                                self.main_ram[clip_h + 1],
+                                self.main_ram[clip_h + 2],
+                                self.main_ram[clip_h + 3],
+                            ]) as usize;
+                            if clip_ptr > 0 && clip_ptr + 12 <= self.main_ram.len() {
+                                let cur_r = i16::from_be_bytes([
+                                    self.main_ram[clip_ptr + 8],
+                                    self.main_ram[clip_ptr + 9],
+                                ]);
+                                if cur_r > 0 && cur_r < width as i16 {
+                                    self.main_ram[clip_ptr + 8..clip_ptr + 10].copy_from_slice(&w_be);
+                                }
+                                let cur_b = i16::from_be_bytes([
+                                    self.main_ram[clip_ptr + 10],
+                                    self.main_ram[clip_ptr + 11],
+                                ]);
+                                if cur_b > 0 && cur_b < height as i16 {
+                                    self.main_ram[clip_ptr + 10..clip_ptr + 12].copy_from_slice(&h_be);
+                                }
+                            }
+                        }
+                    }
+
+                    // Menubar GrafPort pointed by dtgs + 0x46:
+                    let menu_gp = u32::from_be_bytes([
+                        self.main_ram[dtgs + 0x46],
+                        self.main_ram[dtgs + 0x47],
+                        self.main_ram[dtgs + 0x48],
+                        self.main_ram[dtgs + 0x49],
+                    ]) as usize;
+                    if menu_gp > 0 && menu_gp + 0x10 <= self.main_ram.len() {
+                        self.main_ram[menu_gp + 8..menu_gp + 10].copy_from_slice(&w_be);
+                        let menu_bm = u32::from_be_bytes([
+                            self.main_ram[menu_gp],
+                            self.main_ram[menu_gp + 1],
+                            self.main_ram[menu_gp + 2],
+                            self.main_ram[menu_gp + 3],
+                        ]) as usize;
+                        if menu_bm > 0 && menu_bm + 10 <= self.main_ram.len() {
+                            self.main_ram[menu_bm + 6..menu_bm + 8].copy_from_slice(&w_be);
+                        }
+                    }
+
+                    // Update MouseWorkArea if pointer at text_base + 0x633CA is valid
+                    let a4_ptr_addr = text_base + 0x633CA;
+                    let a4 = u32::from_be_bytes([
+                        self.main_ram[a4_ptr_addr],
+                        self.main_ram[a4_ptr_addr + 1],
+                        self.main_ram[a4_ptr_addr + 2],
+                        self.main_ram[a4_ptr_addr + 3],
+                    ]) as usize;
+                    if a4 + 0x3C <= self.main_ram.len() {
+                        self.main_ram[a4 + 0x34..a4 + 0x36].copy_from_slice(&0u16.to_be_bytes());
+                        self.main_ram[a4 + 0x36..a4 + 0x38].copy_from_slice(&0u16.to_be_bytes());
+                        self.main_ram[a4 + 0x38..a4 + 0x3A].copy_from_slice(&w_be);
+                        self.main_ram[a4 + 0x3A..a4 + 0x3C].copy_from_slice(&h_be);
+
+                        // Clamp mouse position if outside new bounds
+                        let cur_x = u16::from_be_bytes([
+                            self.main_ram[a4 + 0x0A],
+                            self.main_ram[a4 + 0x0B],
+                        ])
+                        .min((width - 1) as u16);
+                        let cur_y = u16::from_be_bytes([
+                            self.main_ram[a4 + 0x0C],
+                            self.main_ram[a4 + 0x0D],
+                        ])
+                        .min((height - 1) as u16);
+                        self.main_ram[a4 + 0x0A..a4 + 0x0C].copy_from_slice(&cur_x.to_be_bytes());
+                        self.main_ram[a4 + 0x0C..a4 + 0x0E].copy_from_slice(&cur_y.to_be_bytes());
+                        self.main_ram[text_base + 0x549F6..text_base + 0x549F8]
+                            .copy_from_slice(&cur_x.to_be_bytes());
+                        self.main_ram[text_base + 0x549F8..text_base + 0x549FA]
+                            .copy_from_slice(&cur_y.to_be_bytes());
+                    }
+                }
+            }
+        }
+
+        // 4. Fill extended TVRAM areas (desktop pattern and menubar extension)
+        let new_w = width as usize;
+        let new_h = height as usize;
+        if self.tvram().is_some() && (new_w > 768 || new_h > 512) {
+            let tv = self.tvram_mut();
+            for plane in 0..4 {
+                    let plane_base = plane * 0x20000;
+
+                    // Extend menubar horizontally (scanlines 0..45)
+                    for y in 0..45 {
+                        let ref_off = plane_base + y * 128 + 46 * 2;
+                        let ref_word = [tv[ref_off], tv[ref_off + 1]];
+                        for col in 48..(new_w / 16) {
+                            let dst_off = plane_base + y * 128 + col * 2;
+                            tv[dst_off..dst_off + 2].copy_from_slice(&ref_word);
+                        }
+                    }
+
+                    // Extend desktop pattern horizontally for existing scanlines (45..512.min(new_h))
+                    for y in 45..512.min(new_h) {
+                        for col in 48..(new_w / 16) {
+                            let src_col = col % 8;
+                            let src_off = plane_base + y * 128 + src_col * 2;
+                            let word = [tv[src_off], tv[src_off + 1]];
+                            let dst_off = plane_base + y * 128 + col * 2;
+                            tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                        }
+                    }
+
+                    // Extend desktop pattern vertically for new scanlines (512..new_h)
+                    for y in 512..new_h {
+                        let ref_y = 504 + (y % 8);
+                        for col in 0..(new_w / 16) {
+                            let src_off = plane_base + ref_y * 128 + col * 2;
+                            let word = [tv[src_off], tv[src_off + 1]];
+                            let dst_off = plane_base + y * 128 + col * 2;
+                            tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                        }
+                    }
+                }
+            }
+        }
+
     /// Enables and populates the Virtual SCSI ROM header and entry points at `$FC0000`.
     pub fn enable_scsi_rom(&mut self) {
         self.scsi.scsi_rom_enabled = true;
@@ -421,6 +686,11 @@ impl X68kBus {
                 // Patch MOVEM.L D0-D2/A5, -(SP) with Hypercall 0xFE81 (SxMouseSync) + RTS (0x4E75)
                 self.main_ram[patch_addr..patch_addr + 4]
                     .copy_from_slice(&[0xFE, 0x81, 0x4E, 0x75]);
+
+                // If a non-default target resolution is configured, apply it to FSX.X now
+                if let Some((w, h)) = self.target_resolution {
+                    self.apply_screen_resolution(w, h);
+                }
             }
         }
     }
@@ -444,7 +714,51 @@ impl X68kBus {
             HypercallId::ScsiIocsDispatch => self.hypercall_scsi_iocs_dispatch(state),
             HypercallId::ScsiDriverStrategy => self.hypercall_scsi_driver_strategy(state),
             HypercallId::ScsiDriverInterrupt => self.hypercall_scsi_driver_interrupt(state),
+            HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
         }
+    }
+
+    /// Handles `0xFE88` (`SxSetScreenMode`): queries or switches SX-Window display resolution
+    /// (Mode 0: 768x512, Mode 1: 1024x768, Mode 2: 1024x1024).
+    fn hypercall_sx_set_screen_mode(&mut self, state: &mut CpuState) -> TrapResult {
+        let (cur_w, cur_h) = self.crtc.active_resolution();
+        let cur_mode: u32 = match (cur_w, cur_h) {
+            (1024, 1024) => 2,
+            (1024, 768) => 1,
+            _ => 0,
+        };
+
+        let req_mode = state.d[1] as i32;
+        if req_mode == -1 {
+            // Query mode: return current mode and resolution
+            state.d[0] = cur_mode;
+            state.d[1] = cur_w;
+            state.d[2] = cur_h;
+            return TrapResult::Handled { extra_cycles: 0 };
+        }
+
+        let (target_w, target_h, target_mode) = match req_mode {
+            1 => (1024, 768, 1),
+            2 => (1024, 1024, 2),
+            0 => (768, 512, 0),
+            _ => {
+                let w = state.d[1];
+                let h = state.d[2];
+                if w >= 1024 && h >= 1024 {
+                    (1024, 1024, 2)
+                } else if w >= 1024 && h >= 768 {
+                    (1024, 768, 1)
+                } else {
+                    (768, 512, 0)
+                }
+            }
+        };
+
+        self.apply_screen_resolution(target_w, target_h);
+        state.d[0] = target_mode;
+        state.d[1] = target_w;
+        state.d[2] = target_h;
+        TrapResult::Handled { extra_cycles: 0 }
     }
 
     /// Handles `0xFE81` (`SxMouseSync`): updates SX-Window mouse coordinates in `MouseWorkArea` (`A4`).
@@ -1125,6 +1439,49 @@ pub fn build_bootable_sxwin_scsi_hdd(
                 }
             }
             f.data.extend_from_slice(b"\r\n");
+        }
+    }
+
+    // 4b. Inject SXMODE.X built from guest/sxmode/sxmode.s
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
+    let inc_dir = workspace_root.join("guest/include");
+    if sxmode_src.exists() && inc_dir.exists() {
+        if let Ok(sxmode_bytes) =
+            crate::guest_build::build_guest_x_executable(&sxmode_src, &[&inc_dir])
+        {
+            let mut raw_name = [b' '; 8];
+            raw_name[..6].copy_from_slice(b"SXMODE");
+            let mut raw_ext = [b' '; 3];
+            raw_ext[..1].copy_from_slice(b"X");
+
+            // Place in root directory A:\SXMODE.X
+            let f_root = ExtractedFile {
+                path_dirs: Vec::new(),
+                raw_name,
+                raw_ext,
+                raw_name2: [0u8; 10],
+                attr: 0x20,
+                time: 0x6000,
+                date: 0x5821,
+                data: sxmode_bytes.clone(),
+            };
+            merged_map.insert(make_file_key(&f_root), f_root);
+
+            // Also place in A:\BIN\SXMODE.X
+            let mut bin_dir = [b' '; 8];
+            bin_dir[..3].copy_from_slice(b"BIN");
+            let f_bin = ExtractedFile {
+                path_dirs: vec![(bin_dir, [b' '; 3], [0u8; 10])],
+                raw_name,
+                raw_ext,
+                raw_name2: [0u8; 10],
+                attr: 0x20,
+                time: 0x6000,
+                date: 0x5821,
+                data: sxmode_bytes,
+            };
+            merged_map.insert(make_file_key(&f_bin), f_bin);
         }
     }
 

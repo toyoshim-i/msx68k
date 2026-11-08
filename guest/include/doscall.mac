@@ -1,0 +1,70 @@
+* -----------------------------------------------------------------------------
+* Human68k DOS Call Interface & Equates
+* Clean-room specification for msx68k virtual environment
+* -----------------------------------------------------------------------------
+
+DOS	.macro	call
+	.dc.w	&call
+	.endm
+
+* Human68k Standard DOS Function Codes ($FF00..$FFFF)
+_EXIT		.equ	$FF00
+_GETCHAR	.equ	$FF01
+_PUTCHAR	.equ	$FF02
+_COMINP		.equ	$FF03
+_COMOUT		.equ	$FF04
+_PRNOUT		.equ	$FF05
+_INPOUT		.equ	$FF06
+_INKEY		.equ	$FF07
+_GETC		.equ	$FF08
+_PRINT		.equ	$FF09
+_GETS		.equ	$FF0A
+_KEYSNS		.equ	$FF0B
+_KFLUSH		.equ	$FF0C
+_FFLUSH		.equ	$FF0D
+_CHGDRV		.equ	$FF0E
+_DRVCTRL	.equ	$FF0F
+_CONSNS		.equ	$FF10
+_PRNSNS		.equ	$FF11
+_CBLSNS		.equ	$FF12
+_AUXOUT		.equ	$FF13
+_MDATE		.equ	$FF14
+_CURDRV		.equ	$FF19
+_GETSS		.equ	$FF1A
+_FGETC		.equ	$FF1B
+_FGETS		.equ	$FF1C
+_FPUTC		.equ	$FF1D
+_FPUTS		.equ	$FF1E
+_ALLDRV		.equ	$FF1F
+_SUPER		.equ	$FF20
+_FATCHK		.equ	$FF21
+_FATCHK2	.equ	$FF22
+_HEND		.equ	$FF23
+_VERIFY		.equ	$FF2E
+_DUP0		.equ	$FF2F
+_KEEPPR		.equ	$FF31
+_GETENV		.equ	$FF33
+_VERIFYG	.equ	$FF35
+_COMMON_DEL	.equ	$FF36
+_MKDIR		.equ	$FF39
+_RMDIR		.equ	$FF3A
+_CHDIR		.equ	$FF3B
+_CREATE		.equ	$FF3C
+_OPEN		.equ	$FF3D
+_CLOSE		.equ	$FF3E
+_READ		.equ	$FF3F
+_WRITE		.equ	$FF40
+_DELETE		.equ	$FF41
+_SEEK		.equ	$FF42
+_CHMOD		.equ	$FF43
+_IOCTRL		.equ	$FF44
+_DUP		.equ	$FF45
+_DUP2		.equ	$FF46
+_CURDIR		.equ	$FF47
+_MALLOC		.equ	$FF48
+_MFREE		.equ	$FF49
+_SETBLOCK	.equ	$FF4A
+_EXEC		.equ	$FF4B
+_EXIT2		.equ	$FF4C
+_FILES		.equ	$FF4E
+_NFILES		.equ	$FF4F

@@ -1,0 +1,460 @@
+//! Clean-room guest toolchain integration using `rhas` (HAS060X assembler)
+//! and `rhlk` (HLK linker) for building Human68k guest `.X` executables.
+
+use std::ffi::OsString;
+use std::path::Path;
+use clap::Parser;
+use rhas::{context, error, options, pass};
+
+/// Assembles a 68000 assembly file using `rhas` with specified include directories.
+/// Returns the resulting `.o` object bytes.
+pub fn assemble_file(source_path: &Path, include_dirs: &[&Path]) -> Result<Vec<u8>, String> {
+    let mut args = vec!["rhas".to_string()];
+    for inc in include_dirs {
+        args.push(format!("-i{}", inc.display()));
+    }
+    args.push(source_path.to_string_lossy().to_string());
+
+    let opts = options::parse_args(args.iter().skip(1).map(|s| s.as_str()), false)
+        .map_err(|e| format!("rhas parse_args error: {e:?}"))?;
+
+    let mut ctx = context::AssemblyContext::new(opts);
+    let mut reporter =
+        error::StderrReporter::new(ctx.effective_warn_level(), ctx.opts.compat_error_format);
+    match pass::assemble(&mut ctx, &mut reporter) {
+        Ok(result) => Ok(result.obj_bytes),
+        Err(e) => Err(format!("rhas assemble error: {e:?}")),
+    }
+}
+
+/// Links object files into a Human68k `.X` executable using `rhlk`.
+pub fn link_objects(object_files: &[&Path], output_path: &Path) -> Result<(), String> {
+    let mut args_vec: Vec<OsString> = vec![
+        "rhlk".into(),
+        "-o".into(),
+        output_path.as_os_str().to_os_string(),
+    ];
+    for obj in object_files {
+        args_vec.push(obj.as_os_str().to_os_string());
+    }
+    let mut parsed_args = rhlk::cli::Args::parse_from(args_vec.iter());
+    if let Err(e) = rhlk::cli::finalize_compat_args(&mut parsed_args, &args_vec) {
+        return Err(format!("rhlk finalize error: {e:?}"));
+    }
+    rhlk::run(parsed_args).map_err(|e| format!("rhlk run error: {e:?}"))
+}
+
+/// Assembles a 68000 source file and links it into a Human68k `.X` executable.
+/// Returns the raw binary bytes of the `.X` file.
+pub fn build_guest_x_executable(
+    source_path: &Path,
+    include_dirs: &[&Path],
+) -> Result<Vec<u8>, String> {
+    let obj_bytes = assemble_file(source_path, include_dirs)?;
+    let temp_dir = std::env::temp_dir();
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temp_obj = temp_dir.join(format!("msx68k_build_{unique_id}.o"));
+    let temp_out = temp_dir.join(format!("msx68k_build_{unique_id}.x"));
+
+    std::fs::write(&temp_obj, &obj_bytes).map_err(|e| e.to_string())?;
+    let link_res = link_objects(&[&temp_obj], &temp_out);
+    let _ = std::fs::remove_file(&temp_obj);
+    link_res?;
+
+    let mut x_bytes = std::fs::read(&temp_out).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&temp_out);
+
+    // If payload begins with 'OBJR' at .text (+64) and exec is 0, set entry point to 0x00000020
+    if x_bytes.len() >= 68 && &x_bytes[64..68] == b"OBJR" {
+        let cur_exec = u32::from_be_bytes([x_bytes[8], x_bytes[9], x_bytes[10], x_bytes[11]]);
+        if cur_exec == 0 {
+            x_bytes[8..12].copy_from_slice(&0x0000_0020u32.to_be_bytes());
+        }
+    }
+    Ok(x_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_sxmode_x_executable() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = workspace_root.join("guest/sxmode/sxmode.s");
+        let inc_dir = workspace_root.join("guest/include");
+
+        assert!(source_path.exists(), "sxmode.s must exist");
+        assert!(inc_dir.exists(), "guest/include must exist");
+
+        let x_bytes = build_guest_x_executable(&source_path, &[&inc_dir])
+            .expect("Must assemble and link sxmode.s into SXMODE.X");
+
+        assert!(x_bytes.len() >= 64, "X executable must have at least 64-byte header");
+        assert_eq!(&x_bytes[0..2], b"HU", "X executable must have 'HU' magic");
+
+        let exec = u32::from_be_bytes([x_bytes[8], x_bytes[9], x_bytes[10], x_bytes[11]]);
+        let text_size = u32::from_be_bytes([x_bytes[12], x_bytes[13], x_bytes[14], x_bytes[15]]);
+        let data_size = u32::from_be_bytes([x_bytes[16], x_bytes[17], x_bytes[18], x_bytes[19]]);
+        let bss_size = u32::from_be_bytes([x_bytes[20], x_bytes[21], x_bytes[22], x_bytes[23]]);
+        let reloc_size = u32::from_be_bytes([x_bytes[24], x_bytes[25], x_bytes[26], x_bytes[27]]);
+
+        eprintln!(
+            "X Header: exec=0x{:08X}, text_size={}, data_size={}, bss_size={}, reloc_size={}",
+            exec, text_size, data_size, bss_size, reloc_size
+        );
+        assert_eq!(exec, 0x0000_0020);
+        assert_eq!(&x_bytes[64..68], b"OBJR");
+        let work_size = u32::from_be_bytes([x_bytes[72], x_bytes[73], x_bytes[74], x_bytes[75]]);
+        let stack_offset = u32::from_be_bytes([x_bytes[76], x_bytes[77], x_bytes[78], x_bytes[79]]);
+        assert_eq!(work_size, 0x0000_1800, "OBJR work area size must be 6144 (0x1800)");
+        assert!(stack_offset > work_size, "Initial stack offset must be above work area");
+        assert!(text_size > 0);
+        assert_eq!(data_size, 0);
+        assert_eq!(bss_size, 0);
+
+        let text_bytes = &x_bytes[64..64 + text_size as usize];
+        eprintln!("Text bytes (len={}):", text_bytes.len());
+        for (i, chunk) in text_bytes.chunks(16).enumerate() {
+            let hex_str = chunk.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+            eprintln!("  0x{:04X}: {}", i * 16, hex_str);
+        }
+    }
+
+    #[test]
+    fn test_execute_built_sxmode_x_on_vm() {
+        use crate::vm::X68kVm;
+        use msx68k_cpu::Bus;
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = workspace_root.join("guest/sxmode/sxmode.s");
+        let inc_dir = workspace_root.join("guest/include");
+
+        let x_bytes = build_guest_x_executable(&source_path, &[&inc_dir])
+            .expect("Must assemble and link sxmode.s into SXMODE.X");
+
+        assert_eq!(&x_bytes[0..2], b"HU");
+        let exec = u32::from_be_bytes([x_bytes[8], x_bytes[9], x_bytes[10], x_bytes[11]]);
+        let text_size = u32::from_be_bytes([x_bytes[12], x_bytes[13], x_bytes[14], x_bytes[15]]);
+        assert_eq!(exec, 0x0000_0020);
+        assert_eq!(&x_bytes[64..68], b"OBJR");
+
+        let text_payload = &x_bytes[64..64 + text_size as usize];
+
+        let mut vm = X68kVm::new_app_vm();
+
+        // Mock resident SYS/FSX.X kernel structures in Main RAM
+        let text_base: u32 = 0x0003_0000;
+        vm.bus
+            .write_u32(0x0000_0938, text_base + 0x04F82A, true)
+            .unwrap();
+        let active_rec = text_base + 0x55278;
+        vm.bus.write_u16(active_rec + 6, 768, true).unwrap();
+        vm.bus.write_u16(active_rec + 8, 512, true).unwrap();
+
+        let crt16 = text_base + 0x15200;
+        vm.bus.write_u16(crt16, 768, true).unwrap();
+        vm.bus.write_u16(crt16 + 2, 512, true).unwrap();
+
+        let dtgs = text_base + 0x54380;
+        let gp = text_base + 0x57000;
+        vm.bus.write_u32(dtgs + 4, gp, true).unwrap();
+        vm.bus.write_u16(gp + 4, 0, true).unwrap();
+        vm.bus.write_u16(gp + 6, 0, true).unwrap();
+        vm.bus.write_u16(gp + 8, 768, true).unwrap();
+        vm.bus.write_u16(gp + 10, 512, true).unwrap();
+
+        let a4 = text_base + 0x5CA44;
+        vm.bus.write_u32(text_base + 0x633CA, a4, true).unwrap();
+        vm.bus.write_u16(a4 + 0x34, 0, true).unwrap();
+        vm.bus.write_u16(a4 + 0x36, 0, true).unwrap();
+        vm.bus.write_u16(a4 + 0x38, 768, true).unwrap();
+        vm.bus.write_u16(a4 + 0x3A, 512, true).unwrap();
+
+        // Load SXMODE.X text into RAM at 0x0001_0000
+        let code_addr: u32 = 0x0001_0000;
+        for (i, &b) in text_payload.iter().enumerate() {
+            vm.bus.write_u8(code_addr + i as u32, b, true).unwrap();
+        }
+
+        let cmd_addr: u32 = 0x0001_2000;
+        let run_sxmode = |vm: &mut X68kVm, cmd: &str| -> (u16, (u32, u32)) {
+            // Human68k command line buffer at A2:
+            // byte 0 = length of arguments
+            // byte 1..1+len = argument characters
+            // byte 1+len+1 = null terminator
+            let mut cmd_buf = Vec::new();
+            cmd_buf.push(cmd.len() as u8);
+            cmd_buf.extend_from_slice(cmd.as_bytes());
+            cmd_buf.push(0);
+            for (i, &b) in cmd_buf.iter().enumerate() {
+                vm.bus.write_u8(cmd_addr + i as u32, b, true).unwrap();
+            }
+
+            // In Human68k ABI: A0 = Environment / PSP pointer, A2 = Command line buffer pointer
+            vm.cpu_state.a[0] = 0x0001_1000;
+            vm.cpu_state.a[2] = cmd_addr;
+            vm.cpu_state.a[7] = 0x0002_0000;
+            vm.cpu_state.pc = code_addr + exec;
+
+            let mut steps = 0;
+            while steps < 100 {
+                let cur_pc = vm.cpu_state.pc;
+                let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
+                if opcode == 0xFF4C {
+                    // Reached DOS _EXIT2!
+                    break;
+                }
+                vm.step();
+                steps += 1;
+            }
+            assert!(
+                steps < 100,
+                "SXMODE.X should reach DOS _EXIT2 ($FF4C) within 100 steps (steps={steps})"
+            );
+
+            let sp = vm.cpu_state.a[7];
+            let exit_code = vm.bus.read_u16(sp, true).unwrap();
+            let resolution = vm.bus.crtc.active_resolution();
+            (exit_code, resolution)
+        };
+
+        // 1. Initial resolution is 768x512
+        assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+
+        // 2. Test cycling with no arguments: 0 -> 1 -> 2 -> 0
+        let (code, res) = run_sxmode(&mut vm, "");
+        assert_eq!(code, 1, "Mode 0 should cycle to Mode 1");
+        assert_eq!(res, (1024, 768));
+
+        let (code, res) = run_sxmode(&mut vm, "");
+        assert_eq!(code, 2, "Mode 1 should cycle to Mode 2");
+        assert_eq!(res, (1024, 1024));
+
+        let (code, res) = run_sxmode(&mut vm, "");
+        assert_eq!(code, 0, "Mode 2 should cycle to Mode 0");
+        assert_eq!(res, (768, 512));
+
+        // 3. Test explicit mode switches
+        let (code, res) = run_sxmode(&mut vm, "1024x768");
+        assert_eq!(code, 1);
+        assert_eq!(res, (1024, 768));
+
+        let (code, res) = run_sxmode(&mut vm, "2");
+        assert_eq!(code, 2);
+        assert_eq!(res, (1024, 1024));
+
+        let (code, res) = run_sxmode(&mut vm, "768x512");
+        assert_eq!(code, 0);
+        assert_eq!(res, (768, 512));
+
+        // 4. Test with leading whitespace and alternate aliases
+        let (code, res) = run_sxmode(&mut vm, "   1 ");
+        assert_eq!(code, 1);
+        assert_eq!(res, (1024, 768));
+
+        let (code, res) = run_sxmode(&mut vm, "\t1024");
+        assert_eq!(code, 2);
+        assert_eq!(res, (1024, 1024));
+
+        let (code, res) = run_sxmode(&mut vm, "  0");
+        assert_eq!(code, 0);
+        assert_eq!(res, (768, 512));
+    }
+
+    #[test]
+    fn test_execute_built_sxmode_gui_interactive_mode_on_vm() {
+        use crate::vm::X68kVm;
+        use msx68k_cpu::Bus;
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = workspace_root.join("guest/sxmode/sxmode.s");
+        let inc_dir = workspace_root.join("guest/include");
+
+        let x_bytes = build_guest_x_executable(&source_path, &[&inc_dir])
+            .expect("Must assemble and link sxmode.s into SXMODE.X");
+
+        let exec = u32::from_be_bytes([x_bytes[8], x_bytes[9], x_bytes[10], x_bytes[11]]);
+        let text_size = u32::from_be_bytes([x_bytes[12], x_bytes[13], x_bytes[14], x_bytes[15]]);
+        assert_eq!(exec, 0x0000_0020);
+        assert_eq!(&x_bytes[64..68], b"OBJR");
+
+        let text_payload = &x_bytes[64..64 + text_size as usize];
+
+        let mut vm = X68kVm::new_app_vm();
+
+        // Set Vector #10 ($0000_0028) to an active SX-Window vector (< $00E0_0000)
+        vm.bus.write_u32(0x0000_0028, 0x0003_1000, true).unwrap();
+
+        // Load SXMODE.X text into RAM at 0x0001_0000
+        let code_addr: u32 = 0x0001_0000;
+        for (i, &b) in text_payload.iter().enumerate() {
+            vm.bus.write_u8(code_addr + i as u32, b, true).unwrap();
+        }
+
+        // SX Task Block in RAM at 0x0001_1000 (offset 8 = Task ID: 1)
+        vm.bus.write_u32(0x0001_1008, 1, true).unwrap();
+
+        // Empty command line buffer at A2 (simulating double-click in Filer)
+        let cmd_addr: u32 = 0x0001_2000;
+        vm.bus.write_u8(cmd_addr, 0, true).unwrap();
+        vm.bus.write_u8(cmd_addr + 1, 0, true).unwrap();
+
+        vm.cpu_state.a[0] = 0x0001_1000;
+        vm.cpu_state.a[1] = code_addr;
+        vm.cpu_state.a[2] = cmd_addr;
+        vm.cpu_state.a[7] = 0x0002_0000;
+        vm.cpu_state.pc = code_addr + exec;
+
+        struct MockSxTrapHandler {
+            event_count: usize,
+            win_ptr: u32,
+        }
+
+        impl msx68k_cpu::TrapHandler<crate::bus::X68kBus> for MockSxTrapHandler {
+            fn on_f_line(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                opcode: u16,
+                pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                bus.handle_hypercall(state, opcode, pc)
+            }
+
+            fn on_a_line(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                opcode: u16,
+                _pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                match opcode {
+                    0xA350 => {
+                        // AppInit ($A350): clears 5,962 bytes at work_area pointer
+                        let sp = state.a[7];
+                        let work_area = bus.read_u32(sp, true).unwrap();
+                        for i in 0..5962 {
+                            bus.write_u8(work_area + i, 0, true).unwrap();
+                        }
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA360 => {
+                        // GetAppRefCon ($A360): returns refCon in D0
+                        state.d[0] = 0;
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA1F9 => {
+                        // WMOpen ($A1F9): returns WindowPtr in A0 and status in D0
+                        state.a[0] = self.win_ptr;
+                        state.d[0] = 0;
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA131 | 0xA18B | 0xA18E | 0xA173 | 0xA172 | 0xA16E | 0xA190 | 0xA1A3
+                    | 0xA1FE | 0xA358 | 0xA20D | 0xA20E => {
+                        // GMSetGraph ($A131), GMFontKind ($A18B), GMFontSize ($A18E),
+                        // GMFillRect ($A173), GMFrameRect ($A172), GMMove ($A16E),
+                        // GMDrawStrL ($A190), GMInvertRect ($A1A3), WMSelect ($A1FE),
+                        // TSGetEvent ($A358), WMUpdate ($A20D), WMUpdtOver ($A20E)
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA357 => {
+                        // EMGetNextEvent ($A357): args: (sp) = mask: u16, (sp + 2) = event_rec_ptr: u32
+                        let sp = state.a[7];
+                        let event_rec_ptr = bus.read_u32(sp + 2, true).unwrap();
+                        self.event_count += 1;
+                        if self.event_count == 1 {
+                            // Event 1: mouseDown (1) on Button 1
+                            bus.write_u16(event_rec_ptr, 1, true).unwrap(); // event_what = mouseDown (1)
+                            bus.write_u32(event_rec_ptr + 2, self.win_ptr, true)
+                                .unwrap(); // event_msg = win_ptr
+                            bus.write_u32(event_rec_ptr + 10, (190 << 16) | 280, true)
+                                .unwrap(); // event_where (global y=190, x=280)
+                            state.d[0] = 1;
+                        } else if self.event_count == 2 {
+                            // Event 2: mouseDown (1) on Close Box
+                            bus.write_u16(event_rec_ptr, 1, true).unwrap(); // event_what = mouseDown (1)
+                            bus.write_u32(event_rec_ptr + 2, self.win_ptr, true)
+                                .unwrap(); // event_msg = win_ptr
+                            bus.write_u32(event_rec_ptr + 10, (130 << 16) | 190, true)
+                                .unwrap(); // event_where (global y=130, x=190)
+                            state.d[0] = 1;
+                        } else {
+                            state.d[0] = 0;
+                        }
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA3A2 => {
+                        // WDoEvent ($A3A2): args: (sp) = win_ptr: u32, (sp + 4) = event_rec_ptr: u32
+                        // Returns D0 == 7 (Close Box confirmed) or D0 == 3 (inContent click)
+                        if self.event_count == 1 {
+                            state.d[0] = 3; // inContent
+                        } else {
+                            state.d[0] = 7; // Close Box confirmed!
+                        }
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA13F => {
+                        // GMGlobalToLocal ($A13F): takes Point BY VALUE (4B on stack)
+                        // Returns local Point [y:word, x:word] in D0!
+                        let sp = state.a[7];
+                        let glob_pt = bus.read_u32(sp, true).unwrap();
+                        let glob_y = (glob_pt >> 16) as i16;
+                        let glob_x = (glob_pt & 0xFFFF) as i16;
+                        // Window origin is (120, 180)
+                        let loc_y = glob_y - 120;
+                        let loc_x = glob_x - 180;
+                        state.d[0] = ((loc_y as u32) << 16) | ((loc_x as u16) as u32);
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA1FC => {
+                        // WMCloseWindow ($A1FC)
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA352 => {
+                        // AppExit ($A352)
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    _ => panic!("Unhandled mock SXCALL: 0x{:04X}", opcode),
+                }
+            }
+        }
+
+        let mut trap_handler = MockSxTrapHandler {
+            event_count: 0,
+            win_ptr: 0x0004_0000,
+        };
+
+        // Initially at default 768x512
+        assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+
+        let mut steps = 0;
+        while steps < 1000 {
+            let cur_pc = vm.cpu_state.pc;
+            let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
+            if opcode == 0xFF4C {
+                // Reached DOS _EXIT2!
+                break;
+            }
+            vm.step_with_trap(&mut trap_handler);
+            steps += 1;
+        }
+
+        assert!(
+            steps < 1000,
+            "SXMODE GUI should process events and reach DOS _EXIT2 ($FF4C) within 1000 steps (steps={steps})"
+        );
+
+        let sp = vm.cpu_state.a[7];
+        let exit_code = vm.bus.read_u16(sp, true).unwrap();
+        assert_eq!(exit_code, 0, "Clean GUI exit code must be 0");
+        assert_eq!(
+            vm.bus.crtc.active_resolution(),
+            (1024, 768),
+            "Interactive Button 1 click must have switched resolution to 1024x768"
+        );
+        assert_eq!(trap_handler.event_count, 2);
+    }
+}

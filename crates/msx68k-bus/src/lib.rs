@@ -4,6 +4,7 @@ pub mod bus;
 pub mod crtc;
 pub mod dmac;
 pub mod fdc;
+pub mod guest_build;
 pub mod mfp;
 pub mod peripherals;
 pub mod scsi;

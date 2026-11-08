@@ -1,0 +1,257 @@
+* -----------------------------------------------------------------------------
+* SX-Window v3.1 A-Line ($Axxx) API & Native Hypercall ($FExx) Equates
+* Clean-room specification aligned with official Sharp SX-Window Workroom SDK
+* -----------------------------------------------------------------------------
+
+SXCALL	.macro	trap
+	.dc.w	&trap
+	.endm
+
+HYPERCALL .macro id
+	.dc.w	&id
+	.endm
+
+* -----------------------------------------------------------------------------
+* Native Mixed Mode Hypercall Opcodes ($FE80..$FE8F)
+* -----------------------------------------------------------------------------
+HYPER_SX_MOUSE_SYNC	.equ	$FE81	; Synchronize SX-Window mouse coordinates
+HYPER_SCSI_ROM_BOOT	.equ	$FE82	; SCSI HDD boot loader invocation
+HYPER_SCSI_ROMDB_BUILD	.equ	$FE83	; SCSI romdb block device driver builder
+HYPER_SCSI_IOCS_INSTALL	.equ	$FE84	; SCSI IOCS $F5 vector installer
+HYPER_SCSI_IOCS_DISPATCH .equ	$FE85	; SCSI IOCS $F5 runtime dispatcher
+HYPER_SX_SET_SCREEN_MODE .equ	$FE88	; Dynamic resolution & screen mode switch
+
+* -----------------------------------------------------------------------------
+* Memory Manager (MM) APIs ($A000..$A055)
+* -----------------------------------------------------------------------------
+MMAllocPtr		.equ	$A01E
+MMDisposePtr		.equ	$A020
+MMAllocHandle		.equ	$A022
+MMDisposeHandle		.equ	$A024
+MMSetHandleSize		.equ	$A026
+MMGetHandleSize		.equ	$A028
+MMLockHandle		.equ	$A02A
+MMUnlockHandle		.equ	$A02C
+
+* -----------------------------------------------------------------------------
+* Mouse Manager (MSM) APIs ($A06A..$A078)
+* -----------------------------------------------------------------------------
+MSShow			.equ	$A06A
+MSHide			.equ	$A06B
+MSCurSpeed		.equ	$A072
+MSBoundSet		.equ	$A077
+MSMove			.equ	$A078
+
+* -----------------------------------------------------------------------------
+* Event & Task Manager (TS) APIs ($A34C..$A4C0)
+* Official Sharp Workroom SX-68K names & common aliases
+* -----------------------------------------------------------------------------
+TSInitTsk		.equ	$A34C
+TSInitCrtM		.equ	$A34E
+TSTiniCrtM		.equ	$A34F
+TSInitApp		.equ	$A350	; Initialize application task (clears 6KB work area)
+AppInit			.equ	$A350	; Compatibility alias
+TSExit			.equ	$A352	; Terminate application task
+AppExit			.equ	$A352	; Compatibility alias
+TSEventAvail		.equ	$A357	; Query next pending event from queue
+EMGetNextEvent		.equ	$A357	; Compatibility alias
+TSGetEvent		.equ	$A358	; Yield and retrieve event (EMPostYield)
+EMPostYield		.equ	$A358	; Compatibility alias
+TSPostEventTsk		.equ	$A35A
+TSGetID			.equ	$A360	; Get current task / app RefCon
+GetAppRefCon		.equ	$A360	; Compatibility alias
+SXCallWindM		.equ	$A3A2	; Window drag, close-box & content event processor
+WDoEvent		.equ	$A3A2	; Compatibility alias
+EMEventAvail		.equ	$A0A3
+EMFlushEvents		.equ	$A0A4
+
+* -----------------------------------------------------------------------------
+* Graph Man (GM) 2D Drawing & Screen Management ($A12D..$A1E9, $A540..$A574)
+* Official Sharp Workroom SX-68K names & common aliases
+* -----------------------------------------------------------------------------
+GMOpenGraph		.equ	$A12D
+GMCloseGraph		.equ	$A12E
+GMInitGraph		.equ	$A130
+GMSetGraph		.equ	$A131	; Set active GrafPort
+GMSetPort		.equ	$A131	; Compatibility alias
+GMGetGraph		.equ	$A132
+GMGetPort		.equ	$A132	; Compatibility alias
+GMCopyGraph		.equ	$A133
+GMMoveGraph		.equ	$A136
+GMSlideGraph		.equ	$A137
+GMClipRect		.equ	$A13A
+GMSetGraphSize		.equ	$A13C
+GMInitBitmap		.equ	$A13C
+GMLocalToGlobal		.equ	$A13E
+GMGlobalToLocal		.equ	$A13F	; Point by value (4B), returns [y:w, x:w] in D0
+GMNullRect		.equ	$A14E
+GMSizeRect		.equ	$A14F
+GMAndRects		.equ	$A150
+GMMoveRect		.equ	$A151
+GMSlideRect		.equ	$A152
+GMInsetRect		.equ	$A153
+GMPtInRect		.equ	$A156
+GMEqualRect		.equ	$A157
+GMEmptyRect		.equ	$A158
+GMMove			.equ	$A16E	; Move pen to LPoint (y << 16 | x)
+GMMoveTo		.equ	$A16E	; Compatibility alias
+GMMoveRel		.equ	$A16F
+GMLine			.equ	$A170
+GMLineRel		.equ	$A171
+GMFrameRect		.equ	$A172	; Draw rectangle outline (Rect *)
+GMFillRect		.equ	$A173	; Fill rectangle with current pattern (Rect *)
+GMEraseRect		.equ	$A173	; Compatibility alias
+GMFrameOval		.equ	$A174	; Draw ellipse outline (Rect *)
+GMFillOval		.equ	$A175	; Fill ellipse (Rect *)
+GMFrameRRect		.equ	$A176	; Draw rounded rectangle outline
+GMFillRRect		.equ	$A177	; Fill rounded rectangle
+GMFrameArc		.equ	$A178
+GMFillArc		.equ	$A179
+GMFrameRgn		.equ	$A17A
+GMFillRgn		.equ	$A17B
+GMFramePoly		.equ	$A17C
+GMFillPoly		.equ	$A17D
+GMScroll		.equ	$A17E
+GMCopy			.equ	$A17F
+GMCopyMask		.equ	$A180
+GMFontKind		.equ	$A18B	; Set text font kind
+GMSetTxFont		.equ	$A18B	; Compatibility alias
+GMFontFace		.equ	$A18C	; Set text font face
+GMSetTxFace		.equ	$A18C	; Compatibility alias
+GMFontMode		.equ	$A18D	; Set text transfer mode
+GMFontSize		.equ	$A18E	; Set text size (w: int16, h: int16)
+GMSetTxSize		.equ	$A18E	; Compatibility alias
+GMDrawChar		.equ	$A18F	; Draw single character
+GMDrawStrL		.equ	$A190	; Draw Pascal string (length byte + ASCII, 4B ptr)
+GMDrawString		.equ	$A190	; Compatibility alias
+GMDrawStr		.equ	$A191	; Draw string slice (ptr, offset, count)
+GMDrawText		.equ	$A191	; Compatibility alias
+GMDrawStrZ		.equ	$A192	; Draw null-terminated C-string (4B ptr)
+GMCharWidth		.equ	$A194
+GMStrLWidth		.equ	$A195
+GMStrWidth		.equ	$A196
+GMStrLength		.equ	$A197
+GMFontInfo		.equ	$A198
+GMShadowStrZ		.equ	$A1A1
+GMShadowRect		.equ	$A1A2
+GMInvertRect		.equ	$A1A3	; Invert rectangle bits (Rect *, int mode: 6B on stack)
+GMCenterRect		.equ	$A1D6
+
+* -----------------------------------------------------------------------------
+* Window Manager (WM) APIs ($A1F8..$A22E)
+* Official Sharp Workroom SX-68K names & common aliases
+* -----------------------------------------------------------------------------
+WMInit			.equ	$A1F8
+WMNewWindow		.equ	$A1F8
+WMOpen			.equ	$A1F9	; Open document window (26B stack args, returns A0 Window *)
+WMRefer			.equ	$A1FA
+WMClose			.equ	$A1FB
+WMDispose		.equ	$A1FC	; Close & dispose window (Window *)
+WMCloseWindow		.equ	$A1FC	; Compatibility alias
+WMDisposeWindow		.equ	$A1FC	; Compatibility alias
+WMFind			.equ	$A1FD	; Find clicked window
+WMFindWindow		.equ	$A1FD	; Compatibility alias
+WMSelect		.equ	$A1FE	; Bring window to front & activate
+WMBringToFront		.equ	$A1FE	; Compatibility alias
+WMSelectWindow		.equ	$A1FE	; Compatibility alias
+WMCarry			.equ	$A200
+WMMove			.equ	$A202
+WMDrag			.equ	$A205
+WMDragWindow		.equ	$A205	; Compatibility alias
+WMTrackGoAway		.equ	$A20A	; Compatibility alias
+WMUpdate		.equ	$A20D	; Begin window update
+WMBeginUpdate		.equ	$A20D	; Compatibility alias
+WMUpdtOver		.equ	$A20E	; End window update
+WMEndUpdate		.equ	$A20E	; Compatibility alias
+WMGetDTGS		.equ	$A224	; Get desktop GrafPort
+
+* -----------------------------------------------------------------------------
+* Sub-Window Manager (SWM) APIs ($A227..$A22B)
+* -----------------------------------------------------------------------------
+WSOpen			.equ	$A227
+WSClose			.equ	$A228
+WSDispose		.equ	$A229
+WSSelect		.equ	$A22A
+WSUpdate		.equ	$A22B
+
+* -----------------------------------------------------------------------------
+* Control Manager (CM) APIs ($A289..$A2A7)
+* -----------------------------------------------------------------------------
+CMNewControl		.equ	$A289
+CMDisposeControl	.equ	$A28A
+CMSetCtlValue		.equ	$A28E
+CMGetCtlValue		.equ	$A28F
+
+* -----------------------------------------------------------------------------
+* Dialog Manager (DLM) APIs ($A2C0..$A2FA)
+* -----------------------------------------------------------------------------
+DMGetNewDialog		.equ	$A2C0
+DMModalDialog		.equ	$A2C2
+DMIsDialogEvent		.equ	$A2C3
+DMDialogSelect		.equ	$A2C4
+DMAlert			.equ	$A2CA
+DMStopAlert		.equ	$A2CB
+DMNoteAlert		.equ	$A2CC
+DMCautionAlert		.equ	$A2CD
+
+* -----------------------------------------------------------------------------
+* Screen & SRAM Management ($A42E..$A437)
+* -----------------------------------------------------------------------------
+SCA_TextScroll		.equ	$A42E	; Hardware CRTC text scroll
+SCA_GetScroll		.equ	$A42F	; Get current text scroll offsets
+SCA_SetCrtMode		.equ	$A430	; Set physical CRT mode in SRAM ($ED007E)
+SCA_GetCrtMode		.equ	$A431	; Get physical CRT mode from SRAM
+SCA_GetCrtTable		.equ	$A432	; Get physical CRT resolution table
+SCA_SetScrnMode		.equ	$A436	; Set virtual screen mode in SRAM ($ED007C)
+SCA_GetScrnMode		.equ	$A437	; Get virtual screen mode from SRAM
+
+* -----------------------------------------------------------------------------
+* Data Structure Offsets & Equates
+* -----------------------------------------------------------------------------
+
+* Rect Record (8 bytes)
+rect_top		.equ	0
+rect_left		.equ	2
+rect_bottom		.equ	4
+rect_right		.equ	6
+rect_size		.equ	8
+
+* Point Record (4 bytes)
+pt_v			.equ	0
+pt_h			.equ	2
+pt_size			.equ	4
+
+* GrafPort Record (108 bytes)
+gp_device		.equ	0
+gp_portBits		.equ	2
+gp_portRect		.equ	4
+gp_visRgn		.equ	12
+gp_clipRgn		.equ	16
+gp_foreColor		.equ	20
+gp_backColor		.equ	22
+gp_txFont		.equ	24
+gp_txFace		.equ	26
+gp_txMode		.equ	28
+gp_txSize		.equ	30
+gp_spExtra		.equ	32
+gp_pnLoc		.equ	36
+gp_pnSize		.equ	40
+gp_pnMode		.equ	44
+gp_pnPat		.equ	46
+gp_fillPat		.equ	54
+gp_pnVis		.equ	62
+
+* BitMap Record (22 bytes)
+bm_baseAddr		.equ	0
+bm_rowBytes		.equ	4
+bm_bounds		.equ	6
+bm_planes		.equ	14
+bm_size			.equ	22
+
+* MouseWorkArea Offsets (pointed by text_base + $633CA)
+mwa_curX		.equ	10
+mwa_curY		.equ	12
+mwa_boundTop		.equ	52
+mwa_boundLeft		.equ	54
+mwa_boundBottom		.equ	56
+mwa_boundRight		.equ	58
