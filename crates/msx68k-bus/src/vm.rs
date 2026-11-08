@@ -2,12 +2,33 @@
 //! and the region-aware X68000 system bus.
 
 use msx68k_cpu::{
-    BurstPolicy, BusFault, CpuCore, CpuState, NoopTrapHandler, StepOutcome, TrackedPolicy,
+    BurstPolicy, BusFault, CpuCore, CpuState, StepOutcome, TrackedPolicy,
     TrapHandler,
 };
 
 use crate::bus::{X68kBus, MAX_MAIN_RAM_BYTES};
 use crate::timing::{BusTimingConfig, CpuSpeedMode, VmRole};
+
+/// Default mixed-mode hypercall trap handler for the X68000 virtual machine.
+///
+/// Intercepts reserved F-Line hypercall opcodes `$FE80..=$FE8F` and dispatches them to
+/// [`X68kBus::handle_hypercall`], while passing all other F-Line and A-Line instructions
+/// through standard 68000 exception vectors.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BusTrapHandler;
+
+impl TrapHandler<X68kBus> for BusTrapHandler {
+    #[inline]
+    fn on_f_line(
+        &mut self,
+        state: &mut CpuState,
+        bus: &mut X68kBus,
+        opcode: u16,
+        pc: u32,
+    ) -> msx68k_cpu::TrapResult {
+        bus.handle_hypercall(state, opcode, pc)
+    }
+}
 
 /// Configuration for spawning a Master SX-Window VM or an Isolated Application VM.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -179,7 +200,7 @@ impl X68kVm {
     /// Executes a single instruction using the monomorphized policy matching the active speed mode,
     /// advancing motherboard peripherals (CRTC, MFP, OPM) and routing pending interrupts.
     #[inline]
-    pub fn step_with_trap<T: TrapHandler>(&mut self, trap_handler: &mut T) -> StepOutcome {
+    pub fn step_with_trap<T: TrapHandler<X68kBus>>(&mut self, trap_handler: &mut T) -> StepOutcome {
         let bus_ipl = self.bus.highest_pending_ipl();
         self.cpu_state.set_ipl(bus_ipl);
 
@@ -204,15 +225,15 @@ impl X68kVm {
         }
     }
 
-    /// Executes a single instruction with the default [`NoopTrapHandler`].
+    /// Executes a single instruction with the default [`BusTrapHandler`].
     #[inline]
     pub fn step(&mut self) -> StepOutcome {
-        let mut noop = NoopTrapHandler;
-        self.step_with_trap(&mut noop)
+        let mut handler = BusTrapHandler;
+        self.step_with_trap(&mut handler)
     }
 
     /// Executes up to `max_instructions` instructions inside a tight monomorphized loop.
-    pub fn run_steps_with_trap<T: TrapHandler>(
+    pub fn run_steps_with_trap<T: TrapHandler<X68kBus>>(
         &mut self,
         max_instructions: usize,
         trap_handler: &mut T,
@@ -246,15 +267,15 @@ impl X68kVm {
         }
     }
 
-    /// Executes up to `max_instructions` instructions with the default [`NoopTrapHandler`].
+    /// Executes up to `max_instructions` instructions with the default [`BusTrapHandler`].
     pub fn run_steps(&mut self, max_instructions: usize) -> u64 {
-        let mut noop = NoopTrapHandler;
-        self.run_steps_with_trap(max_instructions, &mut noop)
+        let mut handler = BusTrapHandler;
+        self.run_steps_with_trap(max_instructions, &mut handler)
     }
 
     /// Executes until at least `target_cycles` CPU clock cycles have elapsed (for cycle-tracked modes).
     /// In `Burst` mode, executes `target_cycles` instructions as a batch budget.
-    pub fn run_cycles_with_trap<T: TrapHandler>(
+    pub fn run_cycles_with_trap<T: TrapHandler<X68kBus>>(
         &mut self,
         target_cycles: u32,
         trap_handler: &mut T,
@@ -288,9 +309,9 @@ impl X68kVm {
         }
     }
 
-    /// Executes until at least `target_cycles` CPU clock cycles have elapsed with the default [`NoopTrapHandler`].
+    /// Executes until at least `target_cycles` CPU clock cycles have elapsed with the default [`BusTrapHandler`].
     pub fn run_cycles(&mut self, target_cycles: u32) -> u32 {
-        let mut noop = NoopTrapHandler;
-        self.run_cycles_with_trap(target_cycles, &mut noop)
+        let mut handler = BusTrapHandler;
+        self.run_cycles_with_trap(target_cycles, &mut handler)
     }
 }

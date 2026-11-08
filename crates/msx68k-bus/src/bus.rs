@@ -58,7 +58,7 @@ impl HardwareAccessFlags {
 pub struct X68kBus {
     /// Main RAM (`$000000`..`main_ram.len()`). Accesses between `main_ram.len()` and `$BFFFFF`
     /// raise a hardware Bus Error (`Vector 2`), matching real X68000 memory sizing probes.
-    main_ram: Vec<u8>,
+    pub(crate) main_ram: Vec<u8>,
     /// Lazily allocated GVRAM (`512 KB`).
     gvram: Option<Box<[u8]>>,
     /// Lazily allocated TVRAM (`512 KB`, `$E00000`–`$E7FFFF`).
@@ -66,7 +66,7 @@ pub struct X68kBus {
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
     sprite_bg: Option<Box<[u8]>>,
     /// Battery-backed SRAM (`$ED0000`–`$ED3FFF`, 16 KB).
-    sram: Vec<u8>,
+    pub(crate) sram: Vec<u8>,
     /// Write-unlock latch for SRAM (`$E8E00D == 0x31`).
     sram_write_enabled: bool,
     /// Supervisor Area Set boundary (`($E86001 + 1) * 8192`).
@@ -74,7 +74,7 @@ pub struct X68kBus {
     /// Enforce supervisor protection on Main RAM below `supervisor_area_limit` and I/O space.
     enforce_supervisor_protection: bool,
     /// Font & IPL ROM (`1 MB`, `$F00000`–`$FFFFFF`).
-    rom: Vec<u8>,
+    pub(crate) rom: Vec<u8>,
     /// Precomputed 4 KB page wait-state table.
     wait_table: WaitStateTable,
     /// Recorded hardware subsystem access flags.
@@ -105,6 +105,10 @@ pub struct X68kBus {
     pub ppi: Ppi,
     /// I/O Interrupt Controller (`$E9C000`–`$E9DFFF`, Level 1).
     pub ioi: IoInterruptController,
+    /// Virtual SCSI Controller (`$FC0000` ROM + `IOCS $F5` + `romdb`).
+    pub scsi: crate::scsi::ScsiController,
+    /// Host OS mouse pointer in guest screen coordinates.
+    pub host_mouse_pos: Option<(i16, i16)>,
 }
 
 impl X68kBus {
@@ -155,6 +159,8 @@ impl X68kBus {
             scc: Scc::new(),
             ppi: Ppi::new(),
             ioi: IoInterruptController::new(),
+            scsi: crate::scsi::ScsiController::new(),
+            host_mouse_pos: None,
         }
     }
 
@@ -499,7 +505,7 @@ impl Bus for X68kBus {
             }
             MemoryRegion::Rom => {
                 let offset = (a - 0x00F0_0000) as usize;
-                if (0x00FC_0000..0x00FE_0000).contains(&a) {
+                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
                     // Unpopulated SCSI ROM window ($FC0000-$FDFFFF) raises Bus Error on standard EXPERT
                     return Err(BusFault::BusError {
                         addr: a,
@@ -569,6 +575,9 @@ impl Bus for X68kBus {
                     is_write: true,
                 })?;
                 *slot = val;
+                if (0x0000_0938..=0x0000_093B).contains(&a) {
+                    self.check_fsx_mouse_hook_patch();
+                }
                 Ok(())
             }
             MemoryRegion::Gvram => {
@@ -700,7 +709,7 @@ impl Bus for X68kBus {
                 Ok(())
             }
             MemoryRegion::Rom => {
-                if (0x00FC_0000..0x00FE_0000).contains(&a) {
+                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
                     return Err(BusFault::BusError {
                         addr: a,
                         is_write: true,
@@ -729,6 +738,11 @@ impl Bus for X68kBus {
             if idx + 1 < self.main_ram.len() {
                 self.main_ram[idx] = (val >> 8) as u8;
                 self.main_ram[idx + 1] = val as u8;
+                if (0x0000_0938..=0x0000_093B).contains(&a)
+                    || (0x0000_0938..=0x0000_093B).contains(&(a + 1))
+                {
+                    self.check_fsx_mouse_hook_patch();
+                }
                 return Ok(());
             }
             return Err(BusFault::BusError {

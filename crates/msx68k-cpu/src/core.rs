@@ -303,7 +303,7 @@ impl<P: CpuPolicy> CpuCore<P> {
     }
 
     /// Executes a single MC68000 instruction (or interrupt/stop cycle).
-    pub fn step<B: Bus, T: TrapHandler>(
+    pub fn step<B: Bus, T: TrapHandler<B>>(
         &mut self,
         bus: &mut B,
         trap_handler: &mut T,
@@ -533,7 +533,7 @@ impl<P: CpuPolicy> CpuCore<P> {
     }
 
     /// Decodes and executes a single instruction at `self.state.pc`.
-    fn execute_one<B: Bus, T: TrapHandler>(
+    fn execute_one<B: Bus, T: TrapHandler<B>>(
         &mut self,
         bus: &mut B,
         trap_handler: &mut T,
@@ -562,12 +562,13 @@ impl<P: CpuPolicy> CpuCore<P> {
             0x9 => self.exec_add_sub(bus, op, false),
             0xA => {
                 // A-Line ($Axxx) Mixed Mode / Unimplemented Trap
-                match trap_handler.on_a_line(op, self.state.ir_pc) {
+                let ir_pc = self.state.ir_pc;
+                match trap_handler.on_a_line(&mut self.state, bus, op, ir_pc) {
                     TrapResult::Handled { extra_cycles } => {
                         self.add_cycles(4 + extra_cycles);
                         Ok(())
                     }
-                    TrapResult::PassToVector => self.raise_exception(
+                    TrapResult::PassToVector | TrapResult::Unhandled => self.raise_exception(
                         bus,
                         ExceptionVector::Line1010Emulator as u8,
                         self.state.ir_pc,
@@ -581,12 +582,13 @@ impl<P: CpuPolicy> CpuCore<P> {
             0xE => self.exec_group_e(bus, op),
             0xF => {
                 // F-Line ($Fxxx) Human68k DOS call / SX-Window API / FE-function
-                match trap_handler.on_f_line(op, self.state.ir_pc) {
+                let ir_pc = self.state.ir_pc;
+                match trap_handler.on_f_line(&mut self.state, bus, op, ir_pc) {
                     TrapResult::Handled { extra_cycles } => {
                         self.add_cycles(4 + extra_cycles);
                         Ok(())
                     }
-                    TrapResult::PassToVector => self.raise_exception(
+                    TrapResult::PassToVector | TrapResult::Unhandled => self.raise_exception(
                         bus,
                         ExceptionVector::Line1111Emulator as u8,
                         self.state.ir_pc,
@@ -848,7 +850,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         Ok(())
     }
 
-    fn exec_group_4<B: Bus, T: TrapHandler>(
+    fn exec_group_4<B: Bus, T: TrapHandler<B>>(
         &mut self,
         bus: &mut B,
         trap_handler: &mut T,
@@ -953,12 +955,13 @@ impl<P: CpuPolicy> CpuCore<P> {
         // TRAP #0..#15
         if (op & 0xFFF0) == 0x4E40 {
             let trap_no = (op & 0x0F) as u8;
-            match trap_handler.on_trap(trap_no, self.state.pc) {
+            let trap_pc = self.state.pc;
+            match trap_handler.on_trap(&mut self.state, bus, trap_no, trap_pc) {
                 TrapResult::Handled { extra_cycles } => {
                     self.add_cycles(4 + extra_cycles);
                     return Ok(());
                 }
-                TrapResult::PassToVector => {
+                TrapResult::PassToVector | TrapResult::Unhandled => {
                     return self.raise_exception(bus, 32 + trap_no, self.state.pc, 34);
                 }
             }

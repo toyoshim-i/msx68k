@@ -17,26 +17,46 @@ pub enum TrapResult {
     Handled { extra_cycles: u32 },
     /// The trap was not handled natively; take the standard 68000 exception vector.
     PassToVector,
+    /// Equivalent to [`Self::PassToVector`].
+    Unhandled,
 }
 
 /// Hook interface for Mixed Mode (`68k` ⇄ `ARM`), Human68k DOS calls (`$FFxx`),
 /// FE-function FPU calls (`$FExx`), SX-Window Drawing Manager hooks, and `TRAP #n`.
-pub trait TrapHandler {
+pub trait TrapHandler<B = ()> {
     /// Intercepts an A-Line (`$Axxx`) instruction before Vector 10 (`$0028`) is taken.
     /// `pc` points to the `$Axxx` opcode word.
-    fn on_a_line(&mut self, _opcode: u16, _pc: u32) -> TrapResult {
+    fn on_a_line(
+        &mut self,
+        _state: &mut crate::state::CpuState,
+        _bus: &mut B,
+        _opcode: u16,
+        _pc: u32,
+    ) -> TrapResult {
         TrapResult::PassToVector
     }
 
     /// Intercepts an F-Line (`$Fxxx`) instruction before Vector 11 (`$002C`) is taken.
     /// `pc` points to the `$Fxxx` opcode word.
-    fn on_f_line(&mut self, _opcode: u16, _pc: u32) -> TrapResult {
+    fn on_f_line(
+        &mut self,
+        _state: &mut crate::state::CpuState,
+        _bus: &mut B,
+        _opcode: u16,
+        _pc: u32,
+    ) -> TrapResult {
         TrapResult::PassToVector
     }
 
     /// Intercepts a `TRAP #0..#15` instruction before Vectors 32..47 are taken.
     /// `pc` points to the instruction immediately following `TRAP #n`.
-    fn on_trap(&mut self, _trap_no: u8, _pc: u32) -> TrapResult {
+    fn on_trap(
+        &mut self,
+        _state: &mut crate::state::CpuState,
+        _bus: &mut B,
+        _trap_no: u8,
+        _pc: u32,
+    ) -> TrapResult {
         TrapResult::PassToVector
     }
 }
@@ -45,7 +65,7 @@ pub trait TrapHandler {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct NoopTrapHandler;
 
-impl TrapHandler for NoopTrapHandler {}
+impl<B> TrapHandler<B> for NoopTrapHandler {}
 
 /// Memory and I/O bus interface for the MC68000 CPU.
 ///

@@ -111,6 +111,7 @@ struct AppArgs {
     cgrom_path: PathBuf,
     fd0_path: Option<PathBuf>,
     fd1_path: Option<PathBuf>,
+    hdd0_path: Option<PathBuf>,
     speed_mode: CpuSpeedMode,
     ram_mb: usize,
     scale: u32,
@@ -131,11 +132,13 @@ impl Default for AppArgs {
                 fd0.exists().then(|| fd0.to_path_buf())
             });
         let fd1_path = std::env::var_os("MSX68K_FD1").map(PathBuf::from);
+        let hdd0_path = std::env::var_os("MSX68K_HDD0").map(PathBuf::from);
         Self {
             ipl_path,
             cgrom_path,
             fd0_path,
             fd1_path,
+            hdd0_path,
             speed_mode: CpuSpeedMode::Mhz10,
             ram_mb: 4,
             scale: 1,
@@ -167,6 +170,11 @@ impl AppArgs {
                 "--fd1" => {
                     if let Some(p) = args.next() {
                         cfg.fd1_path = Some(PathBuf::from(p));
+                    }
+                }
+                "--hdd0" => {
+                    if let Some(p) = args.next() {
+                        cfg.hdd0_path = Some(PathBuf::from(p));
                     }
                 }
                 "--speed" => {
@@ -201,6 +209,7 @@ impl AppArgs {
                            --cgrom <path>       Path to CGROM.DAT  (default: {DEFAULT_CGROM_PATH})\n  \
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
+                           --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n\n\
@@ -280,6 +289,68 @@ impl Msx68kApp {
                 if vm.bus.insert_floppy(1, data, true) {
                     println!("Mounted FD1: {}", fd1.display());
                 }
+            }
+        }
+
+        if let Some(hdd0) = &args.hdd0_path {
+            if !hdd0.exists() {
+                let human_path = Path::new("disks/HUMAN302.XDF");
+                let sx1_path = Path::new("disks/SXWIN311.XDF");
+                if human_path.exists() && sx1_path.exists() {
+                    println!(
+                        "SCSI HDD image '{}' not found, but HUMAN302.XDF and SX-Window disks found.",
+                        hdd0.display()
+                    );
+                    println!("Building bootable all-in-one SX-Window v3.1 SCSI HDD image (32 MB)...");
+                    if let Ok(human_data) = std::fs::read(human_path) {
+                        let sx_names = [
+                            ("SXWIN311", "disks/SXWIN311.XDF"),
+                            ("SXWIN312", "disks/SXWIN312.XDF"),
+                            ("SXWIN313", "disks/SXWIN313.XDF"),
+                            ("SXWIN314", "disks/SXWIN314.XDF"),
+                            ("SXWIN315", "disks/SXWIN315.XDF"),
+                            ("SXWIN316", "disks/SXWIN316.XDF"),
+                        ];
+                        let mut sx_loaded = Vec::new();
+                        for (name, path_str) in &sx_names {
+                            if let Ok(bytes) = std::fs::read(path_str) {
+                                sx_loaded.push((*name, bytes));
+                            }
+                        }
+                        let sx_refs: Vec<(&str, &[u8])> =
+                            sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+                        let hdd_image =
+                            msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+                        if let Some(parent) = hdd0.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::write(hdd0, &hdd_image) {
+                            eprintln!(
+                                "Failed to save generated SCSI HDD image to '{}': {e}",
+                                hdd0.display()
+                            );
+                        } else {
+                            println!(
+                                "Successfully created and saved bootable SCSI HDD: {}",
+                                hdd0.display()
+                            );
+                        }
+                    }
+                }
+            }
+
+            match std::fs::read(hdd0) {
+                Ok(data) => {
+                    if vm.bus.insert_scsi_hdd(0, data) {
+                        println!("Mounted SCSI HDD0: {}", hdd0.display());
+                        if args.fd0_path.is_none() {
+                            vm.bus.set_boot_from_scsi(true);
+                        }
+                    } else {
+                        eprintln!("Failed to mount SCSI HDD0: {}", hdd0.display());
+                    }
+                }
+                Err(e) => eprintln!("Failed to read SCSI HDD0 '{}': {e}", hdd0.display()),
             }
         }
 
@@ -437,6 +508,9 @@ impl ApplicationHandler for Msx68kApp {
                 };
                 let x = position.x / scale_x;
                 let y = position.y / scale_y;
+                let guest_x = x.round() as i16;
+                let guest_y = y.round() as i16;
+                self.vm.bus.set_host_mouse_position(Some((guest_x, guest_y)));
                 if let Some((lx, ly)) = self.last_cursor_pos {
                     let dx = (x - lx).round() as i32;
                     let dy = (y - ly).round() as i32;
@@ -450,6 +524,7 @@ impl ApplicationHandler for Msx68kApp {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor_pos = None;
+                self.vm.bus.set_host_mouse_position(None);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -462,6 +537,7 @@ impl ApplicationHandler for Msx68kApp {
                     .bus
                     .scc
                     .set_mouse_buttons(self.mouse_left, self.mouse_right);
+                self.vm.bus.scc.add_mouse_delta(0, 0);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -553,8 +629,13 @@ impl ApplicationHandler for Msx68kApp {
                         } else {
                             "FD0:EJECT"
                         };
+                        let scsi_led = if self.vm.bus.is_scsi_rom_enabled() {
+                            " | SCSI:ONLINE"
+                        } else {
+                            ""
+                        };
                         gpu.window.set_title(&format!(
-                            "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F12:Reset)",
+                            "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F12:Reset)",
                             self.vm.cpu_state.pc
                         ));
                     }

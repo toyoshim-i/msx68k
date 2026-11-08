@@ -6,6 +6,7 @@ pub mod dmac;
 pub mod fdc;
 pub mod mfp;
 pub mod peripherals;
+pub mod scsi;
 pub mod timing;
 pub mod vicon;
 pub mod vm;
@@ -20,12 +21,17 @@ pub use dmac::{DmaChannel, Dmac};
 pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};
 pub use mfp::Mfp;
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
+pub use scsi::{
+    build_bootable_sxwin_scsi_hdd, extract_files_from_xdf, parse_scsi_partitions,
+    synthesize_partition_boot_sector, synthesize_scsi_ipl_sector, ExtractedFile, HypercallId,
+    ScsiController, ScsiPartition,
+};
 pub use timing::{
     BusTimingConfig, CpuSpeedMode, MemoryRegion, RegionTimingSpec, VmRole, WaitStateTable,
     PAGE_COUNT_4K, PAGE_SHIFT_4K,
 };
 pub use vicon::{grbi_to_rgba8, Vicon};
-pub use vm::{VmConfig, X68kVm};
+pub use vm::{BusTrapHandler, VmConfig, X68kVm};
 
 #[cfg(test)]
 mod tests {

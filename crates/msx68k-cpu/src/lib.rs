@@ -150,12 +150,24 @@ mod tests {
             last_f_line: u16,
             last_a_line: u16,
         }
-        impl TrapHandler for CustomTrap {
-            fn on_f_line(&mut self, opcode: u16, _pc: u32) -> TrapResult {
+        impl TrapHandler<FlatBus> for CustomTrap {
+            fn on_f_line(
+                &mut self,
+                _state: &mut CpuState,
+                _bus: &mut FlatBus,
+                opcode: u16,
+                _pc: u32,
+            ) -> TrapResult {
                 self.last_f_line = opcode;
                 TrapResult::Handled { extra_cycles: 10 }
             }
-            fn on_a_line(&mut self, opcode: u16, _pc: u32) -> TrapResult {
+            fn on_a_line(
+                &mut self,
+                _state: &mut CpuState,
+                _bus: &mut FlatBus,
+                opcode: u16,
+                _pc: u32,
+            ) -> TrapResult {
                 self.last_a_line = opcode;
                 TrapResult::Handled { extra_cycles: 6 }
             }

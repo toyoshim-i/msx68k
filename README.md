@@ -29,7 +29,7 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 
 - **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
 
-- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 32-byte native stubs (`RoutineDescriptor` equivalents), relocation-aware module patching (`SXKERNEL.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the detailed Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification.
+- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 4-byte native stubs (`[$FE80 | id, $4E75]`), relocation-aware module patching (`SYS/FSX.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the detailed Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification.
 
 ### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
 For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
@@ -57,12 +57,15 @@ Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and
 # Boot Human68k v3.02 (defaults to disks/HUMAN302.XDF if present):
 cargo run --release
 
-# Boot SX-Window v3.1 (System Disk in FD0, Accessory Disk in FD1) in Burst mode:
+# Boot all-in-one SX-Window v3.1 from Virtual SCSI HDD (auto-builds disks/SXWIN31.HDS on first run):
+cargo run --release -- --hdd0 disks/SXWIN31.HDS --speed burst
+
+# Boot SX-Window v3.1 from floppy disks (System Disk in FD0, Accessory Disk in FD1) in Burst mode:
 cargo run --release -- --fd0 disks/SXWIN311.XDF --fd1 disks/SXWIN315.XDF --speed burst
 ```
 
 ### Runtime Window Controls (`msx68k-app`)
-- **Mouse**: Relative cursor movement (`Z8530 SCC` Channel B) and Left/Right mouse buttons (hold Right mouse button in SX-Window to display the top menu bar).
+- **Mouse**: 1:1 pixel-exact synchronization between the host OS cursor and the SX-Window cursor via the `SYS/FSX.X` `SxMouseSync` (`$FE81`) Mixed Mode hook (with automatic fallback to relative `Z8530 SCC` Channel B movement for non-SX-Window software). Hold the Right mouse button in SX-Window to display the top menu bar.
 - **Keyboard**: Forwarded as X68000 hardware scan codes via `MC68901 MFP` USART.
 - **Hotkeys**:
   - `F1`: Switch to `10MHz` mode (`CPU 10MHz / Bus 10MHz`)
