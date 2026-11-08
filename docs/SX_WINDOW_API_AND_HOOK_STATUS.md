@@ -201,19 +201,21 @@ graph TD
 
 ## 3. Screen Mode Selection, SRAM Storage (`$ED0072..$ED0084`), and CRTC / VICON Capabilities
 
-### 3.1 SRAM Storage Layout & `$E8E00D` Write-Protection Protocol
-SX-Window persists screen configuration, mouse acceleration, and desktop defaults across reboots in battery-backed SRAM starting at `$00ED0072`:
+### 3.1 SRAM Storage Layout (`$ED0072..$ED0089`) & `$E8E00D` Protocol
+SX-Window decouples the **Virtual Desktop Size (仮想画面サイズ)** from the **Physical CRT Display Size (実画面サイズ)**, persisting screen configuration, mouse acceleration, and desktop defaults across reboots in battery-backed SRAM starting at `$00ED0072`:
 
 | Address | Size | Name | Description & Bit Layout |
 | :---: | :---: | :--- | :--- |
-| **`$ED0072..$ED0073`** | 2 B | `sram_magic` | ASCII signature `"SX"` (`$5358`). Validated on boot (`cmpi.w #$5358, $00ED0072`). |
+| **`$ED0072..$ED0073`** | 2 B | `sram_magic` | ASCII signature `"SX"` (`$5358`). Validated on boot (`cmpi.w #$5358, $00ED0072`). If absent, restored from default template at `text_base + 0x02FD5A`. |
 | **`$ED0074`** | 1 B | `display_flags` | Display settings and double-click timing multiplier (`* 10 -> global $54A88`). |
 | **`$ED0075`** | 1 B | `mouse_speed` | Mouse acceleration curve index passed to `$A072` (`MSCurSpeed`). |
-| **`$ED0076..$ED007B`** | 6 B | `desktop_defaults` | Default desktop window positions and menubar flags. |
-| **`$ED007C`** | 1 B | **`screen_mode`** | **Active Screen Mode byte**: Upper nibble (`val >> 4`) selects Screen Mode (0..6). Lower nibble (`val & $0F`) holds display flags. |
-| **`$ED007D`** | 1 B | `printer_port` | Hardcopy printer interface configuration. |
-| **`$ED007E`** | 1 B | `system_flags` | Bit 7: System init flag. Bit 6: Sound/bell mute flag. |
-| **`$ED007F..$ED0089`** | 11 B | `reserved` | Reserved for future desktop expansion. |
+| **`$ED0076..$ED0077`** | 2 B | `palette_tcolor0` | 16-bit RGB 5-5-5 for text palette entry 0. |
+| **`$ED0078..$ED007A`** | 3 B | `palette_defaults` | 16-bit RGB 5-5-5 desktop colors (read by `text_base + 0x1E9BC` and `0x3C142` via `IOCS $12` `_TCOLOR`). |
+| **`$ED007B`** | 1 B | `printer_port` | Hardcopy printer driver index (read by `text_base + 0x3DA2C` to load `"PRTD"` resource). |
+| **`$ED007C`** | 1 B | **`virtual_screen_mode`** | **Virtual Desktop Screen Mode (仮想画面モード)**:<br/>• **Upper nibble (`val >> 4`)**: Virtual Screen Mode Index (0..6 from Screen Mode Table at `text_base + 0x552F6`).<br/>• **Bit 1 (`val & $02`)**: Display option flag (read by `$A3FA`, written by `$A3FB`).<br/>• **Bit 0 (`val & $01`)**: Display option flag (read by `$A364`, written by `$A365`). |
+| **`$ED007D`** | 1 B | `wallpaper_id` | Desktop background pattern / wallpaper ID (read by `text_base + 0x426DE` to load `"PICT"` resource). |
+| **`$ED007E`** | 1 B | **`physical_crt_mode`** | **Physical Monitor CRT Mode & Virtual Scroll (実画面モード & スクロール)**:<br/>• **Bits 0..4 (`val & $1F`)**: Physical Monitor CRT Mode ID (0..19 from table at `text_base + 0x151C0`, e.g. `16` = `768×512`, `17` = `1024×424`, `18` = `1024×848`, `19` = `640×480`).<br/>• **Bit 6 (`val & $40`)**: **Virtual Screen Scroll Enable Flag (仮想画面スクロール許可)** (1 = scroll enabled when mouse reaches viewport edge, 0 = disabled).<br/>• **Bit 7 (`val & $80`)**: Configured flag (1 = custom configured, 0 = default to mode 16 `768×512`). |
+| **`$ED007F..$ED0089`** | 11 B | `reserved` | Reserved desktop parameters; `$ED0080` and `$ED0084` store wallpaper geometry (`text_base + 0x426E8`). |
 
 #### Hardware Write-Protection Protocol (`$E8E00D`):
 SRAM write protection is enforced by hardware gate array register **`$00E8E00D`**. Any write to SRAM while locked is ignored:
@@ -234,25 +236,14 @@ text+0x2FD20:  4E75                 RTS
 
 ---
 
-### 3.2 Screen Mode Table (`text_base + 0x552F6`)
-Inside `SYS/FSX.X` in the initialized data segment at **`text_base + 0x552F6`**, there is the master **Screen Mode Configuration Table** composed of **22-byte records**:
+### 3.2 Dual Resolution Tables: Virtual Mode Table vs. Physical CRT Table
 
-```text
-Offset +0x00: Left coordinate (16-bit BE, 0)
-Offset +0x02: Top coordinate (16-bit BE, 0)
-Offset +0x04: Reserved / padding (16-bit BE, 0)
-Offset +0x06: Width in pixels (16-bit BE)
-Offset +0x08: Height in pixels (16-bit BE)
-Offset +0x0A: Framebuffer Base Address (32-bit BE, e.g. $00E00000 or $00C00000)
-Offset +0x0E: Scanline RowBytes / Stride (16-bit BE, e.g. 128 for TVRAM, 1024 for GVRAM)
-Offset +0x10: Number of Planes (16-bit BE, 2 for 4-plane TVRAM, 16 for GVRAM)
-Offset +0x12: Mode Flags (16-bit BE)
-Offset +0x14: Mode Index (16-bit BE, 0..7)
-```
+SX-Window distinguishes between the **Virtual Desktop coordinate canvas** where applications place windows, and the **Physical Monitor viewport** that the CRTC scans out to the display.
 
-#### Decoded Screen Mode Table (`text_base + 0x552F6`):
+#### 1. Virtual Screen Mode Table (`text_base + 0x552F6`):
+Defines the dimensions of the active desktop canvas in 22-byte records:
 
-| Mode | Offset in `FSX.X` | Width × Height | Base Address | Scanline Stride | Planes | Target Domain & Display Role |
+| Mode | Offset in `FSX.X` | Virtual Canvas (W × H) | Base Address | Scanline Stride | Planes | Target Domain & Display Role |
 | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | **0** | `text_base + 0x552F6` | 256 × 256 | `$00E00000` | 128 Bytes | 2 | TVRAM (Low-Res 15kHz) |
 | **1** | `text_base + 0x5530C` | 512 × 512 | `$00E00000` | 128 Bytes | 2 | TVRAM (Standard 31kHz) |
@@ -260,75 +251,141 @@ Offset +0x14: Mode Index (16-bit BE, 0..7)
 | **3** | `text_base + 0x55338` | **768 × 512** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM (Default SX-Window Desktop 31kHz)** |
 | **4** | `text_base + 0x5534E` | 1024 × 424 | `$00E00000` | 128 Bytes | 2 | TVRAM (Wide 24kHz) |
 | **5** | `text_base + 0x55364` | **1024 × 848** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM (Interlaced High-Density)** |
-| **6** | `text_base + 0x5537A` | **1024 × 1024** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM Hardware Limit (Full 512KB TVRAM)** |
+| **6** | `text_base + 0x5537A` | **1024 × 1024** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM Hardware Limit (Full 1024×1024 Virtual Desktop)** |
 | **7** | `text_base + 0x55390` | 256 × 256 | `$00C00000` | 1024 Bytes | 16 | GVRAM (Application graphics mode) |
+
+#### 2. Physical CRT Resolution Table (`text_base + 0x151C0`):
+Defines the hardware monitor scanning modes programmed via `IOCS $10` (`_CRTMOD`), returned by **`$A432`** (`text_base + 0x15196`):
+
+| CRT Mode | Resolution (W × H) | Monitor Scanning Frequency | Hardware Notes |
+| :---: | :---: | :---: | :--- |
+| **00..01, 04..05, 08..09, 12..13** | 512 × 512 | 31.5 kHz | Standard square monitor mode |
+| **02..03, 06..07, 10..11, 14..15** | 256 × 256 | 15.75 kHz | Low-resolution television mode |
+| **16** | **768 × 512** | **31.5 kHz** | **Standard X68000 CRT Monitor (Default Physical Display)** |
+| **17** | **1024 × 424** | **24.8 kHz** | High-resolution wide monitor mode |
+| **18** | **1024 × 848** | **31.5 kHz Interlaced** | High-density interlaced monitor mode |
+| **19** | **640 × 480** | **31.5 kHz VGA** | Standard VGA 60Hz CRT mode |
 
 #### Active Screen Mode Record (`text_base + 0x55278`):
 When SX-Window initializes, it copies the selected 22-byte entry from the mode table into the **Active Screen Mode Record** at **`text_base + 0x55278`**. This active record is used by `GMInitBitmap` (`$A13C` at `text_base + 0x01ECBC`) whenever `type=0` is passed to initialize a screen-backed `BitMap`.
 
 ---
 
-### 3.3 Screen Mode Switching Mechanics
-Screen Mode selection is mediated through specific A-Line APIs:
-- **`$A435`** (`text_base + 0x02FCA8`): Checks SRAM signature `$ED0072` for `"SX"`, reads `$ED007C`, and returns `D0 = (SRAM[$ED007C] >> 4)`.
-- **`$A437`** (`text_base + 0x02FCC4`): Reads the mode from `$ED007C`, validates it, and if valid, calls `IOCS $10` (`_CRTMOD`) to configure CRTC registers.
-- **`$A1C2`** (`text_base + 0x02CFA0`, `GMSetScrnMode`):
-  ```m68k
-  text+0x02CFA4:  3210           MOVE.W  (A0), D1          ; D1 = requested mode
-  text+0x02CFA6:  45FA 008C      LEA     $008C(PC), A2     ; A2 = TVRAM mode table (text + 0x2D034)
-  text+0x02CFAA:  47FA 00F8      LEA     $00F8(PC), A3     ; A3 = GVRAM mode table (text + 0x2D0A4)
-  text+0x02CFAE:  3001           MOVE.W  D1, D0
-  text+0x02CFB0:  0800 0006      BTST    #6, D0            ; Test bit 6 (1024x1024 flag)
-  text+0x02CFB4:  670C           BEQ.S   standard_mode
-  text+0x02CFB6:  0880 0006      BCLR    #6, D0
-  text+0x02CFBA:  45FA 0158      LEA     $0158(PC), A2     ; Select Mode 6 table (text + 0x2D114 -> 0x5537A)
-  standard_mode:
-  text+0x02CFC8:  33C0 0005 5258 MOVE.W  D0, ($55258, text)
-  text+0x02CFCE:  E548           LSL.W   #2, D0            ; Index * 4
-  text+0x02CFD0:  2272 0000      MOVEA.L (A2, D0.W), A1    ; A1 points to Screen Mode Record in 0x552F6
-  text+0x02CFD4:  41F9 0005 5278 LEA     ($55278, text), A0 ; A0 points to active record
-  ; Copies 22 bytes from A1 to A0!
-  ```
-- **`$A1C1`** (`text_base + 0x02CF8C`): Returns current mode word from `text_base + 0x55256`.
-- **`$A55D`** (`text_base + 0x02CF96`): Returns current mode word from `text_base + 0x55258`.
+### 3.3 Control Panel (`コントロール.X` / `コントロール.LB`) User Configuration Interface
+
+The user configures Virtual Screen and Physical Monitor settings through the official SX-Window Control Panel:
+- **Executable**: `コントロール.X` (13,532 bytes, root directory of `SXWIN312.XDF` and `SXWIN31.HDS`).
+- **Resource Library**: `コントロール.LB` (167,101 bytes, contains dialogs, items, and event handlers).
+
+When launched (from desktop icon or the Apple-like SX system menu), `コントロール.X` displays modular control applets:
+1. `画面モード` (Screen Mode Settings)
+2. `システム設定` (System Settings)
+3. `マウス` (Mouse Speed & Thresholds)
+4. `キーボード` (Keyboard Repeat & Modifiers)
+5. `背景設定` (Background / Wallpaper Configuration)
+6. `時刻設定` (Clock / Calendar)
+7. `用紙設定` (Printer Paper Layout)
+
+#### The Screen Configuration Dialog (`コントロール.LB` at `0x1E850..0x1E8E0` and `0xB2F00..0xB2F70`):
+Opening `画面モード` presents an interactive dialog containing:
+- **`画面モード` (Virtual Desktop Screen Mode Dropdown)**: Selects Virtual Desktop dimensions (e.g. `768×512`, `1024×848`, `1024×1024`).
+- **`実画面` (Real Screen / 1024×1024 VRAM Toggle) & `実画面モード` (Physical CRT Mode Dropdown)**:
+  - In X68000 terminology, **`実画面` (Real Screen)** refers to the full 1024×1024 TVRAM memory space, while **`表示画面` (Display Screen)** refers to the physical monitor viewport (e.g. `768×512`).
+  - When the user enables the **`実画面`** toggle in the Control Panel screen settings, SX-Window activates the full 1024×1024 virtual desktop with hardware text/graphics panning inside the 768×512 monitor viewport!
+  - The physical display viewport (`768×512`) is established via **`IOCS $10` (`_CRTMOD`)**. Extending `_CRTMOD` (and its underlying CRT Mode Table) provides a clean, native hook for exposing decoupled high-resolution display modes directly to the guest OS.
+- **`65,536色モード` (65,536 Color Mode Checkbox)**: Toggles high-color graphics plane.
+- **Margins (`上マージン`, `下マージン`, `左マージン`, `右マージン`)**: Controls screen edge scroll thresholds.
+- **Action Buttons**: `実行` (Apply & Save to SRAM) and `中止` (Cancel).
+
+When the user clicks `実行`:
+1. Virtual mode index is written to upper nibble of `$00ED007C` (`$A1C2` / `$A436`).
+2. Physical CRT mode, scroll enable flag (bit 6), and valid flag (bit 7) are packed and written to `$00ED007E` via **`$A430`** (`text_base + 0x15134`) under `$E8E00D` unlock protection.
+3. System prompts for restart or applies mode dynamically.
 
 ---
 
-### 3.4 CRTC & VICON High-Resolution Verification
-A critical question is whether **msx68k**'s existing CRTC timing engine (`crates/msx68k-bus/src/crtc.rs`) and VICON GPU compositor (`crates/msx68k-vicon`) can already render Mode 5 (`1024x848`) and Mode 6 (`1024x1024`):
+### 3.4 Virtual Desktop Hardware Scrolling Mechanics & `$A42E` / `$A42F`
 
-1. **`Crtc::active_resolution()` (`crates/msx68k-bus/src/crtc.rs#L139-L163`)**:
-   ```rust
-   let h_cols = self.regs[3].saturating_sub(self.regs[2]) as u32;
-   let width = match h_cols * 8 {
-       w if (256..=1024).contains(&w) => w,
-       _ => match self.regs[20] & 0x0003 {
-           0 => 256,
-           1 => 512,
-           _ => 768,
-       },
-   };
-   let v_lines = self.regs[7].saturating_sub(self.regs[6]) as u32;
-   let height = if (128..=1024).contains(&v_lines) {
-       ...
-       v_lines
-   } else {
-       512
-   };
-   (width, height)
-   ```
-   **Finding**: `active_resolution()` dynamically accepts `256..=1024` for width and `128..=1024` for height! There is **no hardcoded clamp to 768 or 512**. Both Mode 5 (`1024x848`) and Mode 6 (`1024x1024`) are **natively supported by the CRTC model without modification**.
+When **Virtual Desktop Size > Physical CRT Size** (e.g. Virtual = `1024×1024`, CRT = `768×512`, Scroll Enable = `1`):
 
-2. **`ViconGpuCompositor` (`crates/msx68k-vicon/src/lib.rs#L13-L45`)**:
-   ```rust
-   pub const MAX_FB_WIDTH: u32 = 1024;
-   pub const MAX_FB_HEIGHT: u32 = 1024;
-   ...
-   width: w.clamp(256, MAX_FB_WIDTH),
-   height: h.clamp(128, MAX_FB_HEIGHT),
+1. **Two Coordinate Viewports in Kernel**:
+   - **Full Virtual Desktop Coordinates**: Tracked by `MouseWorkArea[52..59]` (`$34(A4)..$3B(A4)`), configured by `MSBoundSet` (`$A077` at `text_base + 0x04FEB6`). For a 1024×1024 virtual desktop, bounds are `[0, 0, 1024, 1024]`. The mouse cursor moves freely across the entire 1024×1024 virtual canvas.
+   - **Physical CRT Viewport Origin**: Tracked at `text_base + 0x15364` (`scroll_x, scroll_y`) and `text_base + 0x5525A` (`0x5525A = scroll_x, 0x5525C = scroll_y`).
+2. **Edge Pan Trigger**:
+   - As the user moves the mouse toward the right edge (`x >= scroll_x + 768 - margin`) or bottom edge (`y >= scroll_y + 512 - margin`), SX-Window increments the scroll offset.
+3. **CRTC Hardware Text Scroll API (`$A42E` at `text_base + 0x152F6`)**:
+   ```m68k
+   text+0x152F6:  48E7 7040         MOVEM.L D1-D3/A1, -(SP)
+   text+0x152FA:  4CA8 0006 0000    MOVEM.W (A0), D1-D2        ; D1 = scroll_x, D2 = scroll_y
+   text+0x15300:  48B9 0006 0001 5364 MOVEM.W D1-D2, (0x15364) ; Save active text scroll offset!
+   text+0x15308:  43F9 00E8 0014    LEA     ($00E80014).L, A1  ; CRTC R10 (Text Scroll X)!
+   text+0x1530E:  32C1              MOVE.W  D1, (A1)+          ; Write CRTC R10 ($E80014: Text Scroll X)!
+   text+0x15310:  32C2              MOVE.W  D2, (A1)+          ; Write CRTC R11 ($E80016: Text Scroll Y)!
+   text+0x15314:  7603              MOVEQ   #3, D3             ; 4 graphics planes
+   scroll_loop:
+   text+0x15316:  3001              MOVE.W  D1, D0
+   text+0x15318:  9058              SUB.W   (A0)+, D0
+   text+0x1531A:  32C0              MOVE.W  D0, (A1)+          ; Write Graphic Scroll X!
+   text+0x1531C:  3002              MOVE.W  D2, D0
+   text+0x1531E:  9058              SUB.W   (A0)+, D0
+   text+0x15320:  32C0              MOVE.W  D0, (A1)+          ; Write Graphic Scroll Y!
+   text+0x15322:  51CB FFF2         DBF     D3, scroll_loop
+   text+0x15326:  7000              MOVEQ   #0, D0
+   text+0x15328:  4CDF 020E         MOVEM.L (SP)+, D1-D3/A1
+   text+0x1532C:  4E75              RTS
    ```
-   **Finding**: The VICON GPU textures and composition buffers are allocated for `MAX_FB_WIDTH = 1024` and `MAX_FB_HEIGHT = 1024`. Modes 5 and 6 fit entirely within the existing hardware emulation buffers!
-   For resolutions **beyond 1024** (e.g. `1280x720`, `1920x1080` in Phase 2B/2C), the decoupled native host surface will bypass VICON's 1024-pixel TVRAM texture limits entirely.
+   - **`$A42F`** (`text_base + 0x1532E`): Returns current scroll offset `(scroll_x << 16) | scroll_y` from `text_base + 0x15364`.
+   - **Hardware Panning Without Redraw**: Modifying CRTC registers `$E80014` and `$E80016` shifts the raster scanout origin across the 512KB TVRAM instantaneously at 60 fps without redrawing any window contents!
+
+---
+
+### 3.5 CRTC & VICON High-Resolution Verification & Full Non-Scrolling 1024×1024 Mode
+
+A critical question is how **msx68k**'s compositor handles virtual desktop scrolling and how users can achieve a **Full Non-Scrolling 1024×1024 View**:
+
+1. **Native Hardware Scroll Support in `msx68k-vicon` (`crates/msx68k-vicon/src/lib.rs#L636-L637`)**:
+   ```rust
+   let tx = (x + params.text_scroll_x) & 1023;
+   let ty = (y + params.text_scroll_y) & 1023;
+   let in_plane = ((ty * 128) + (tx >> 3)) as usize;
+   ```
+   **Finding**: `ViconGpuCompositor` already reads `params.text_scroll_x` (CRTC R10) and `params.text_scroll_y` (CRTC R11)! When SX-Window's `$A42E` updates CRTC R10/R11 on mouse edge movement, `msx68k`'s host window pans across the virtual desktop smoothly in real time.
+
+2. **How to Enable a Full Non-Scrolling 1024×1024 View**:
+   If the user wants to see the **entire 1024×1024 desktop simultaneously on the host display without any edge panning**:
+   - **Virtual Screen Mode**: Set `$ED007C >> 4 = 6` (Mode 6: `1024×1024` Virtual Desktop).
+   - **Physical CRT Mode**: Set CRTC display timing to `1024×1024` (`H-Cols = 128` [1024 dots], `V-Lines = 1024` scanlines).
+   - **Compositor Sizing**: In `crates/msx68k-bus/src/crtc.rs`, `active_resolution()` dynamically calculates:
+     ```rust
+     let h_cols = self.regs[3].saturating_sub(self.regs[2]) as u32; // 128 cols * 8 = 1024
+     let v_lines = self.regs[7].saturating_sub(self.regs[6]) as u32; // 1024 lines
+     (width, height) = (1024, 1024);
+     ```
+   - **Result**: `ViconGpuCompositor` receives `(width, height) = (1024, 1024)` with `scroll_x = 0, scroll_y = 0`. The host window renders all 1024×1024 pixels at 1:1 scale with **zero edge scrolling needed**!
+   - For resolutions **beyond 1024** (e.g. `1280x720`, `1920x1080` in Phase 2B/2C), both the Virtual Canvas and Viewport decouple from TVRAM completely, rendering to an arbitrary-sized native host surface.
+
+---
+
+### 3.6 SX-Window Startup Splash Logo Sequence (`TITLE.SX` vs `TITLE.X`)
+
+During boot (`CONFIG.SYS`), two distinct splash screens are rendered in sequence into **TVRAM** (`$00E00000`):
+
+```text
+TITLE   = \SHELL\TITLE.SX
+...
+DEVICE  = \SYS\FSX.X
+PROGRAM = \SHELL\TITLE.X
+SHELL   = \SHELL\SXWIN.X -@
+```
+
+1. **First Logo (`TITLE = \SHELL\TITLE.SX` — Top-Left `(16, 16)`)**:
+   - Parsed and rendered directly by **`HUMAN.SYS`'s built-in `TITLE =` handler (`$006E80`)** during early kernel boot, *before* `SYS/FSX.X` is loaded.
+   - `TITLE.SX` embeds a picture header at offset `+0x3C`: `[left: 16, top: 16, right: 400, bottom: 144]` (`384×128` pixels).
+   - `HUMAN.SYS` calls `IOCS $1C` (`_CLIPPUT`) using the header's fixed coordinates `(16, 16)`, placing the first logo in the top-left corner of TVRAM while device drivers load.
+2. **Second Logo (`PROGRAM = \SHELL\TITLE.X` — Centered `(192, 160)`)**:
+   - Executed *after* `DEVICE = \SYS\FSX.X` has installed the Line 1010 (`$Axxx`) dispatcher.
+   - `TITLE.X` queries the active CRT mode via `IOCS $10` (`_CRTMOD(-1)` → Mode 16 `768×512`), initializes a `Graph` port via `$A12D` (`portRect = [0, 0, 768, 512]`), shrinks the vertical container by `height >> 3` (`[0, 0, 768, 448]`), and calls **`$A1D6` (`CenterRect`)** to compute `[192, 160, 576, 288]`.
+   - It then calls **`$A183` (`DrawPicture`)** to render the centered SX-Window logo before `SXWIN.X` opens the desktop.
 
 ---
 
@@ -552,14 +609,12 @@ And in the multi-type pixel offset unpacker (`text_base + 0x034724`):
 ---
 
 ### 5.4 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
-To expand SX-Window to arbitrary high resolutions (`1280x720`, `1920x1080`) and 32-bit TrueColor, we only need to hook **four minimal chokepoints**:
+Because the original X68000 24-bit (`16 MB`) physical address space (`$000000`–`$FFFFFF`) has no room for an extended guest VRAM and the 24-bit `HD63450` DMAC cannot address above `$FFFFFF`, **msx68k** bypasses guest VRAM completely for high-resolution modes and renders directly to a **host-native `wgpu` surface** by hooking four minimal chokepoints:
 
-1. **Chokepoint 1: Mode Record & `GMInitBitmap` (`$A13C` / `text_base + 0x01ECBC`)**:
-   - Patch the Active Screen Mode Record at `text_base + 0x55278`:
-     - `bounds.right` = Host width (e.g. `1920`).
-     - `bounds.bottom` = Host height (e.g. `1080`).
-     - `baseAddr` = Virtual host framebuffer in guest RAM or dedicated mapped segment.
-     - `rowBytes` = `Host width * bpp` (e.g. `1920 * 2 = 3840` for 16-bit, or `1920 * 4 = 7680` for 32-bit).
+1. **Chokepoint 1: `IOCS $10` (`_CRTMOD`), Mode Record & `GMInitBitmap` (`$A13C` / `text_base + 0x01ECBC`)**:
+   - Extend `IOCS $10` (`_CRTMOD`) and patch the Active Screen Mode Record at `text_base + 0x55278`:
+     - `bounds.right` = Host width (e.g. `1280` or `1920`).
+     - `bounds.bottom` = Host height (e.g. `720` or `1080`).
 2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
    - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
    - Line, Rect, Fill, BitBlt, and Text rendering commands are intercepted in Rust and rendered directly onto host `wgpu` textures with hardware acceleration!
