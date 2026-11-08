@@ -54,11 +54,11 @@ For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing
 Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and floppy disk images (`.XDF` / `.2HD`) in `disks/`:
 
 ```bash
-# Boot Human68k v3.02 (defaults to disks/HUMAN302.XDF if present):
-cargo run --release
-
 # Boot all-in-one SX-Window v3.1 from Virtual SCSI HDD (auto-builds disks/SXWIN31.HDS on first run):
 cargo run --release -- --hdd0 disks/SXWIN31.HDS --speed burst
+
+# Boot Human68k v3.02 from floppy disk:
+cargo run --release -- --fd0 disks/HUMAN302.XDF
 
 # Boot SX-Window v3.1 from floppy disks (System Disk in FD0, Accessory Disk in FD1) in Burst mode:
 cargo run --release -- --fd0 disks/SXWIN311.XDF --fd1 disks/SXWIN315.XDF --speed burst

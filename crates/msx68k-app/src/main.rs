@@ -29,7 +29,6 @@ use winit::window::{Window, WindowId};
 
 const DEFAULT_IPL_PATH: &str = "roms/IPLROM.DAT";
 const DEFAULT_CGROM_PATH: &str = "roms/CGROM.DAT";
-const DEFAULT_FD0_PATH: &str = "disks/HUMAN302.XDF";
 
 /// Maps a host `winit::keyboard::KeyCode` to a 7-bit X68000 hardware scan code (`0x01`..=`0x7F`).
 fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
@@ -125,12 +124,7 @@ impl Default for AppArgs {
         let cgrom_path = std::env::var_os("MSX68K_CGROM")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CGROM_PATH));
-        let fd0_path = std::env::var_os("MSX68K_FD0")
-            .map(PathBuf::from)
-            .or_else(|| {
-                let fd0 = Path::new(DEFAULT_FD0_PATH);
-                fd0.exists().then(|| fd0.to_path_buf())
-            });
+        let fd0_path = std::env::var_os("MSX68K_FD0").map(PathBuf::from);
         let fd1_path = std::env::var_os("MSX68K_FD1").map(PathBuf::from);
         let hdd0_path = std::env::var_os("MSX68K_HDD0").map(PathBuf::from);
         Self {
