@@ -231,6 +231,7 @@ pub struct Scc {
     accum_dy: i32,
     left_button: bool,
     right_button: bool,
+    poll_count: u64,
 }
 
 impl Scc {
@@ -247,6 +248,13 @@ impl Scc {
         self.rx_head_b = 0;
         self.rx_len_b = 0;
         self.ius_b = false;
+        self.poll_count = 0;
+    }
+
+    /// Returns the number of mouse polls triggered by RTS 0 -> 1 transitions.
+    #[inline]
+    pub const fn poll_count(&self) -> u64 {
+        self.poll_count
     }
 
     /// Accumulates relative mouse movement (`+dx` right, `+dy` down) to be reported on the next
@@ -374,6 +382,7 @@ impl Scc {
                     self.reg_ptr_b = 0;
                     if r == 5 && (old & 0x02) == 0 && (val & 0x02) != 0 {
                         // RTS (bit 1) 0 -> 1 edge triggers 3-byte mouse packet [status, dx, dy]
+                        self.poll_count = self.poll_count.saturating_add(1);
                         let dx = self.accum_dx.clamp(-127, 127);
                         let dy = self.accum_dy.clamp(-127, 127);
                         self.accum_dx -= dx;

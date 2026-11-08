@@ -361,6 +361,14 @@ impl X68kBus {
         self.tvram.is_some()
     }
 
+    /// Returns `true` once the guest has entered graphics desktop mode and is actively polling the mouse.
+    #[inline]
+    pub const fn is_mouse_polling_active(&self) -> bool {
+        self.vicon.r0_mode() == 0x0004
+            && self.vicon.r2_display() == 0x003F
+            && self.scc.poll_count() >= 8
+    }
+
     #[inline]
     fn record_region_access(&mut self, region: MemoryRegion) {
         match region {

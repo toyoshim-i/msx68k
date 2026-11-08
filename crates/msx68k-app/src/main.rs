@@ -399,11 +399,17 @@ impl Msx68kApp {
     fn step_vm_one_frame(&mut self) {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
-                // In Burst mode, pace peripheral clock to exact 1/60s frame time (166,667 10MHz ticks)
-                // across up to 250,000 instructions so guest timers (Timer C, V-Blank, double-click)
-                // match real wall-clock time.
-                const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
-                self.vm.run_burst_frame(250_000, TARGET_TICKS_60HZ);
+                if self.vm.bus.is_mouse_polling_active() {
+                    // Once the desktop is up and actively polling the mouse, pace peripheral
+                    // clock to exact 1/60s frame time (166,667 10MHz ticks) so guest timers
+                    // (Timer C, V-Blank, double-click speed) match real wall-clock time.
+                    const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
+                    self.vm.run_burst_frame(250_000, TARGET_TICKS_60HZ);
+                } else {
+                    // Fast-forward through boot and splash screen timer waits until the
+                    // desktop starts polling the mouse.
+                    self.vm.run_steps(250_000);
+                }
             }
             mode => {
                 // If FDD motor is spinning during floppy access, give a higher instruction budget
