@@ -8,6 +8,7 @@ pub mod guest_build;
 pub mod mfp;
 pub mod peripherals;
 pub mod scsi;
+pub mod sxwin;
 pub mod timing;
 pub mod vicon;
 pub mod vm;
@@ -24,9 +25,10 @@ pub use mfp::Mfp;
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use scsi::{
     build_bootable_sxwin_scsi_hdd, extract_files_from_xdf, parse_scsi_partitions,
-    synthesize_partition_boot_sector, synthesize_scsi_ipl_sector, ExtractedFile, HypercallId,
+    synthesize_partition_boot_sector, synthesize_scsi_ipl_sector, ExtractedFile,
     ScsiController, ScsiPartition,
 };
+pub use sxwin::HypercallId;
 pub use timing::{
     BusTimingConfig, CpuSpeedMode, MemoryRegion, RegionTimingSpec, VmRole, WaitStateTable,
     PAGE_COUNT_4K, PAGE_SHIFT_4K,

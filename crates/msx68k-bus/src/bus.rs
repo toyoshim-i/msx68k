@@ -612,9 +612,10 @@ impl Bus for X68kBus {
                     if (w, h) != (768, 512) {
                         let offset = (a & 0x3F) as usize;
                         let reg_idx = offset >> 1;
-                        if matches!(reg_idx, 2 | 3 | 6 | 7 | 10 | 11 | 20) {
+                        if matches!(reg_idx, 2 | 3 | 4 | 6 | 7 | 10 | 11 | 20) {
                             self.crtc.regs[2] = 0;
                             self.crtc.regs[3] = (w / 8) as u16;
+                            self.crtc.regs[4] = (h as u16) + 32;
                             self.crtc.regs[6] = 0;
                             self.crtc.regs[7] = h as u16;
                             self.crtc.regs[10] = 0;
