@@ -722,6 +722,84 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
     assert_ne!(ext_y_word, 0, "Extended vertical area (y > 512) must contain desktop pattern");
 
+    // Test spawning A:\BIN\SXMODE.X via SXCALL $A351 (TSFock) as a real Process Manager task
+    let stub_addr = 0x0024_0000;
+    let mut stub_bytes = Vec::new();
+    stub_bytes.extend_from_slice(&[0x42, 0x67]); // clr.w -(sp) (ID = 0)
+    stub_bytes.extend_from_slice(&[0x42, 0xa7]); // clr.l -(sp) (Type = 0)
+    stub_bytes.extend_from_slice(&[0x42, 0xa7]); // clr.l -(sp) (environ = 0)
+    stub_bytes.extend_from_slice(&[0x48, 0x7a, 0x00, 0x1c]); // pea cmd_str(pc)
+    stub_bytes.extend_from_slice(&[0x48, 0x7a, 0x00, 0x1a]); // pea file_str(pc)
+    stub_bytes.extend_from_slice(&[0x42, 0x67]); // clr.w -(sp) (mode1=0, mode2=0)
+    stub_bytes.extend_from_slice(&[0xa3, 0x51]); // SXCALL TSFock ($A351)
+    stub_bytes.extend_from_slice(&[0x4f, 0xef, 0x00, 0x14]); // lea 20(sp), sp
+    // caller_loop at 0x16:
+    stub_bytes.extend_from_slice(&[0x48, 0x7a, 0x00, 0x22]); // pea caller_ev(pc)
+    stub_bytes.extend_from_slice(&[0x3f, 0x3c, 0x32, 0x82]); // move.w #$3282, -(sp)
+    stub_bytes.extend_from_slice(&[0xa3, 0x57]); // SXCALL TSEventAvail ($A357)
+    stub_bytes.extend_from_slice(&[0x5c, 0x8f]); // addq.l #6, sp
+    stub_bytes.extend_from_slice(&[0x60, 0xf2]); // bra.s caller_loop (-14)
+    // 0x24:
+    stub_bytes.extend_from_slice(b"\x00\x00"); // cmd_str = ""
+    // 0x26:
+    stub_bytes.extend_from_slice(b"A:\\BIN\\SXMODE.X\0");
+    while stub_bytes.len() < 0x3a {
+        stub_bytes.push(0);
+    }
+    // 0x3a: caller_ev buffer (32 bytes)
+    stub_bytes.resize(0x3a + 32, 0);
+
+    for (i, &b) in stub_bytes.iter().enumerate() {
+        vm.bus.write_u8(stub_addr + i as u32, b, true).unwrap();
+    }
+
+    // Clear TSEventAvail reentrancy guard bit before invoking TSFock stub
+    vm.bus.write_u8(text_base + 0x1536c, 0, true).unwrap();
+    vm.cpu_state.pc = stub_addr;
+    vm.cpu_state.a[7] = 0x0024_0800; // Safe dedicated stack for launcher stub
+
+    let mut tsfock_alines = Vec::new();
+    let mut tsfock_ret = None;
+    for _ in 0..1_000_000 {
+        let cur_pc = vm.cpu_state.pc;
+        if cur_pc == stub_addr + 0x12 && tsfock_ret.is_none() {
+            tsfock_ret = Some(vm.cpu_state.d[0]);
+        }
+        let opcode = vm.bus.read_u16(cur_pc, true).unwrap_or(0);
+        if (opcode & 0xF000) == 0xA000 && !tsfock_alines.contains(&opcode) {
+            tsfock_alines.push(opcode);
+        }
+        vm.step();
+    }
+
+    assert!(tsfock_ret.unwrap_or(0) > 0, "TSFock must successfully spawn SXMODE task ID > 0");
+    for &expected in &[
+        0xA351, // TSFock
+        0xA360, // TSGetID
+        0xA1F9, // WMOpen
+        0xA131, // GMSetGraph
+        0xA147, // GMForeColor
+        0xA148, // GMBackColor
+        0xA18D, // GMFontMode
+        0xA18B, // GMFontKind
+        0xA18E, // GMFontSize
+        0xA207, // WMShow
+        0xA357, // TSEventAvail
+        0xA20D, // WMUpdate
+        0xA144, // GMPenMode
+        0xA173, // GMFillRect
+        0xA172, // GMFrameRect
+        0xA16E, // GMMove
+        0xA190, // GMDrawStrL
+        0xA1A3, // GMInvertRect
+        0xA20E, // WMUpdtOver
+    ] {
+        assert!(
+            tsfock_alines.contains(&expected),
+            "Spawned SXMODE.X task must execute A-line trap {expected:#06X} on booted SYS/FSX.X"
+        );
+    }
+
     // Verify SXMODE.X execution on the running SX-Window system:
     let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
     let inc_dir = workspace_root.join("guest/include");
@@ -756,6 +834,26 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         vm.step();
     }
     assert_eq!(vm.bus.crtc.active_resolution(), (1024, 1024), "SXMODE 2 CLI must switch to 1024x1024");
+
+    // Test GUI entry via gui_start with CLI argument "1024x768"
+    let gui_entry = u32::from_be_bytes([sxmode_bytes[72], sxmode_bytes[73], sxmode_bytes[74], sxmode_bytes[75]]);
+    let cmd_str1 = b"\x0b1024x768\0";
+    for (i, &b) in cmd_str1.iter().enumerate() {
+        vm.bus.write_u8(cmdline_addr + i as u32, b, true).unwrap();
+    }
+    vm.cpu_state.a[0] = 0x0021_0000;
+    vm.cpu_state.a[2] = cmdline_addr;
+    vm.cpu_state.a[7] = 0x0023_0000;
+    vm.cpu_state.pc = app_load_addr + gui_entry;
+
+    for _ in 0..500 {
+        let opcode = vm.bus.read_u16(vm.cpu_state.pc, true).unwrap_or(0);
+        if opcode == 0xFF4C {
+            break;
+        }
+        vm.step();
+    }
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768), "SXMODE 1024x768 via gui_start must switch to 1024x768");
 }
 
 #[test]

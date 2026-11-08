@@ -84,6 +84,9 @@ GMSetGraphSize		.equ	$A13C
 GMInitBitmap		.equ	$A13C
 GMLocalToGlobal		.equ	$A13E
 GMGlobalToLocal		.equ	$A13F	; Point by value (4B), returns [y:w, x:w] in D0
+GMPenMode		.equ	$A144	; Set pen transfer mode (int)
+GMForeColor		.equ	$A147	; Set foreground color (int)
+GMBackColor		.equ	$A148	; Set background color (int)
 GMNullRect		.equ	$A14E
 GMSizeRect		.equ	$A14F
 GMAndRects		.equ	$A150
@@ -93,7 +96,7 @@ GMInsetRect		.equ	$A153
 GMPtInRect		.equ	$A156
 GMEqualRect		.equ	$A157
 GMEmptyRect		.equ	$A158
-GMMove			.equ	$A16E	; Move pen to LPoint (y << 16 | x)
+GMMove			.equ	$A16E	; Move pen to LPoint (x << 16 | y)
 GMMoveTo		.equ	$A16E	; Compatibility alias
 GMMoveRel		.equ	$A16F
 GMLine			.equ	$A170
@@ -158,6 +161,8 @@ WMCarry			.equ	$A200
 WMMove			.equ	$A202
 WMDrag			.equ	$A205
 WMDragWindow		.equ	$A205	; Compatibility alias
+WMShow			.equ	$A207	; Show window (Window *)
+WMHide			.equ	$A208	; Hide window (Window *)
 WMTrackGoAway		.equ	$A20A	; Compatibility alias
 WMUpdate		.equ	$A20D	; Begin window update
 WMBeginUpdate		.equ	$A20D	; Compatibility alias
