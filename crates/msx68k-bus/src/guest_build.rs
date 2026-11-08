@@ -107,10 +107,17 @@ mod tests {
         );
         assert_eq!(exec, 0x0000_0020);
         assert_eq!(&x_bytes[64..68], b"OBJR");
-        let work_size = u32::from_be_bytes([x_bytes[72], x_bytes[73], x_bytes[74], x_bytes[75]]);
-        let stack_offset = u32::from_be_bytes([x_bytes[76], x_bytes[77], x_bytes[78], x_bytes[79]]);
-        assert_eq!(work_size, 0x0000_1800, "OBJR work area size must be 6144 (0x1800)");
-        assert!(stack_offset > work_size, "Initial stack offset must be above work area");
+        let gui_entry = u32::from_be_bytes([x_bytes[72], x_bytes[73], x_bytes[74], x_bytes[75]]);
+        let stack_size = u32::from_be_bytes([x_bytes[76], x_bytes[77], x_bytes[78], x_bytes[79]]);
+        let work_size = u32::from_be_bytes([x_bytes[80], x_bytes[81], x_bytes[82], x_bytes[83]]);
+        assert!(
+            gui_entry > 0 && gui_entry < text_size,
+            "GUI entry offset ({}) must be within text ({})",
+            gui_entry,
+            text_size
+        );
+        assert_eq!(stack_size, 0x0000_0800, "OBJR stack size must be 2048");
+        assert_eq!(work_size, 0x0000_1800, "OBJR work area size must be 6144");
         assert!(text_size > 0);
         assert_eq!(data_size, 0);
         assert_eq!(bss_size, 0);
@@ -342,8 +349,10 @@ mod tests {
                         msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
                     }
                     0xA360 => {
-                        // GetAppRefCon ($A360): returns refCon in D0
-                        state.d[0] = 0;
+                        // TSGetID ($A360): if arg at sp < 0, return current Task ID (1)
+                        let sp = state.a[7];
+                        let arg = bus.read_u16(sp, true).unwrap_or(0) as i16;
+                        state.d[0] = if arg < 0 { 1 } else { 0 };
                         msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
                     }
                     0xA1F9 => {
@@ -456,5 +465,182 @@ mod tests {
             "Interactive Button 1 click must have switched resolution to 1024x768"
         );
         assert_eq!(trap_handler.event_count, 2);
+    }
+
+    #[test]
+    fn test_execute_built_sxmode_gui_direct_entry_on_vm() {
+        use crate::vm::X68kVm;
+        use msx68k_cpu::Bus;
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = workspace_root.join("guest/sxmode/sxmode.s");
+        let inc_dir = workspace_root.join("guest/include");
+
+        let x_bytes = build_guest_x_executable(&source_path, &[&inc_dir])
+            .expect("Must assemble and link sxmode.s into SXMODE.X");
+
+        let text_size = u32::from_be_bytes([x_bytes[12], x_bytes[13], x_bytes[14], x_bytes[15]]);
+        let gui_entry = u32::from_be_bytes([x_bytes[72], x_bytes[73], x_bytes[74], x_bytes[75]]);
+        assert_eq!(&x_bytes[64..68], b"OBJR");
+        assert!(gui_entry > 0 && gui_entry < text_size);
+
+        let text_payload = &x_bytes[64..64 + text_size as usize];
+
+        let mut vm = X68kVm::new_app_vm();
+
+        // Load SXMODE.X text into RAM at 0x0001_0000
+        let code_addr: u32 = 0x0001_0000;
+        for (i, &b) in text_payload.iter().enumerate() {
+            vm.bus.write_u8(code_addr + i as u32, b, true).unwrap();
+        }
+
+        // SX-Window Process Manager sets PC directly to code_addr + OBJR[+0x08] (gui_entry)
+        vm.cpu_state.a[0] = 0x0001_5000; // work_base allocated by SX-Window
+        vm.cpu_state.a[7] = 0x0002_0000; // stack
+        vm.bus.write_u32(0x0001_5008, 0x0000_0002, true).unwrap(); // Task ID in TDB[8]
+        vm.cpu_state.pc = code_addr + gui_entry;
+
+        struct MockSxTrapHandler {
+            event_count: usize,
+            win_ptr: u32,
+        }
+
+        impl msx68k_cpu::TrapHandler<crate::bus::X68kBus> for MockSxTrapHandler {
+            fn on_f_line(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                opcode: u16,
+                pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                bus.handle_hypercall(state, opcode, pc)
+            }
+
+            fn on_a_line(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                opcode: u16,
+                _pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                match opcode {
+                    0xA360 => {
+                        // TSGetID ($A360): if arg at sp < 0, return current Task ID (2)
+                        let sp = state.a[7];
+                        let arg = bus.read_u16(sp, true).unwrap_or(0) as i16;
+                        state.d[0] = if arg < 0 { 0x0000_0002 } else { 0 };
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA350 => {
+                        // TSInitApp
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA1F9 => {
+                        // WMOpen
+                        state.a[0] = self.win_ptr;
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA131 => {
+                        // GMSetGraph
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA18B | 0xA18E => {
+                        // GMFontKind, GMFontSize
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA16E | 0xA172 | 0xA173 | 0xA190 | 0xA1A3 => {
+                        // GMMove, GMFrameRect, GMFillRect, GMDrawStrL, GMInvertRect
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA357 => {
+                        // TSEventAvail
+                        self.event_count += 1;
+                        let sp = state.a[7];
+                        let event_ptr = bus.read_u32(sp + 2, true).unwrap();
+                        if self.event_count == 1 {
+                            // Click Button 2 (1024x1024)
+                            bus.write_u16(event_ptr, 1, true).unwrap(); // mouseDown
+                            bus.write_u32(event_ptr + 2, self.win_ptr, true).unwrap();
+                            bus.write_u32(event_ptr + 10, (230 << 16) | 280, true).unwrap();
+                            state.d[0] = 1;
+                        } else if self.event_count == 2 {
+                            // Close Box event
+                            bus.write_u16(event_ptr, 1, true).unwrap(); // mouseDown
+                            bus.write_u32(event_ptr + 2, self.win_ptr, true).unwrap();
+                            bus.write_u32(event_ptr + 10, (130 << 16) | 190, true).unwrap();
+                            state.d[0] = 1;
+                        } else {
+                            state.d[0] = 0;
+                        }
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA358 => {
+                        // TSGetEvent
+                        state.d[0] = 1;
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA1FE => {
+                        // WMSelect
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA3A2 => {
+                        // SXCallWindM: inContent (3) on first event, Close Box (7) on second
+                        if self.event_count == 1 {
+                            state.d[0] = 3;
+                        } else {
+                            state.d[0] = 7;
+                        }
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA13F => {
+                        // GMGlobalToLocal
+                        let sp = state.a[7];
+                        let glob_pt = bus.read_u32(sp, true).unwrap();
+                        let glob_y = (glob_pt >> 16) as i16;
+                        let glob_x = (glob_pt & 0xFFFF) as i16;
+                        let loc_y = glob_y - 120;
+                        let loc_x = glob_x - 180;
+                        state.d[0] = ((loc_y as u32) << 16) | ((loc_x as u16) as u32);
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA1FC => {
+                        // WMDispose
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    0xA352 => {
+                        // TSExit
+                        msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
+                    }
+                    _ => panic!("Unhandled mock SXCALL: 0x{:04X}", opcode),
+                }
+            }
+        }
+
+        let mut trap_handler = MockSxTrapHandler {
+            event_count: 0,
+            win_ptr: 0x0004_0000,
+        };
+
+        let mut steps = 0;
+        while steps < 1000 {
+            let cur_pc = vm.cpu_state.pc;
+            let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
+            if opcode == 0xFF4C {
+                // Reached DOS _EXIT2!
+                break;
+            }
+            vm.step_with_trap(&mut trap_handler);
+            steps += 1;
+        }
+
+        assert!(
+            steps < 1000,
+            "Direct SX-Window GUI launch must process events and reach DOS _EXIT2 within 1000 steps"
+        );
+        assert_eq!(
+            vm.bus.crtc.active_resolution(),
+            (1024, 1024),
+            "Button 2 click must switch to 1024x1024"
+        );
     }
 }

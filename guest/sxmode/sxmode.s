@@ -9,25 +9,29 @@
 
 	.text
 	.globl	_start
+	.globl	gui_start
 
 objr_header:
 	.dc.b	'O','B','J','R'
-	.dc.l	prog_end - objr_header	; +0x04: text size
-	.dc.l	$00001800		; +0x08: work area size (6144 = $1800)
-	.dc.l	app_stack_top - objr_header ; +0x0C: initial stack offset
-	.dc.l	0, 0, 0, 0		; +0x10..+0x1C: reserved (16 bytes)
+	.dc.l	prog_end - objr_header		; +0x04: text size
+	.dc.l	gui_start - objr_header		; +0x08: SX-Window GUI entry point offset from text start!
+	.dc.l	$00000800			; +0x0C: stack size (2048 bytes)
+	.dc.l	$00001800			; +0x10: heap/work area size (6144 bytes)
+	.dc.l	0, 0, 0				; +0x14..+0x1C: reserved (12 bytes)
 
 _start:
-	* Preserve entry registers:
-	* A0 = SX Task Block pointer (8(a0) = Task ID)
-	* A1 = Application base address
-	* A2 = Human68k command line buffer pointer: 0(a2) = length, 1(a2) = chars
-	move.l	a0, d2
-	move.l	a1, d3
-	movea.l	a2, a3
+	* Entry point from Human68k DOS _EXEC (CLI)
+	* A0 = PSP pointer
+	* A1 = End of program memory block
+	* A2 = Human68k command line buffer: 0(a2) = length, 1(a2) = string
 
 	* Check CLI arguments:
-	movea.l	a3, a1
+	cmpa.w	#0, a2
+	beq.s	no_cli_args
+	move.l	a2, d0
+	btst	#0, d0
+	bne.s	no_cli_args		; Address must be even
+	movea.l	a2, a1
 	tst.b	(a1)+
 	beq.s	no_cli_args
 
@@ -93,7 +97,7 @@ no_cli_args:
 	beq.s	fallback_cycle_mode
 
 	* Running under SX-Window! Launch interactive GUI dialog
-	bra.s	launch_gui
+	bra.s	gui_start
 
 fallback_cycle_mode:
 	* Plain Human68k console fallback: cycle mode 0 -> 1 -> 2 -> 0
@@ -111,20 +115,49 @@ apply_cycled:
 	move.w	d0, -(sp)
 	DOS	_EXIT2
 
-launch_gui:
-	movea.l	d3, a1			; Restore app base address
-	movea.l	d2, a0			; Restore SX Task Block pointer
-	lea	app_stack_top(pc), sp	; Switch SP to app stack top
+gui_start:
+	* Entered from SX-Window GUI launch (OBJR[+0x08]) or from CLI fallback!
+	* When launched by SX-Window Process Manager:
+	*   A0 points to Task Control Block, and 8(A0) contains the Task ID!
+	moveq.l	#0, d2
+	cmpa.w	#0, a0
+	beq.s	check_task_id
+	move.l	8(a0), d2		; d2 = Task ID from TDB[8]!
+
+check_task_id:
+	* Switch SP to application stack:
+	lea	app_stack_top(pc), sp
+
+	* Ensure we have a valid positive Task ID:
+	tst.l	d2
+	bgt.s	init_app
+	* Query TSGetID(-1) if Task ID wasn't positive:
+	move.w	#-1, -(sp)
+	SXCALL	TSGetID
+	addq.l	#2, sp
+	move.l	d0, d2
+	tst.l	d2
+	bgt.s	init_app
+	moveq.l	#1, d2
+
+init_app:
+	lea	app_task_id(pc), a1
+	move.l	d2, (a1)
+
+	* Initialize SX-Window application:
+	* TSInitApp ($A350) takes:
+	*   Arg 1: work_area buffer pointer (pea work_area(pc))
+	*   Arg 2: Task ID (move.l d2, -(sp))
+	*   Arg 3: flags = 0 (clr.l -(sp))
 	clr.l	-(sp)			; Arg 3: flags = 0
-	move.l	8(a0), -(sp)		; Arg 2: Task ID from 8(a0)!
+	move.l	d2, -(sp)		; Arg 2: Task ID
 	pea	work_area(pc)		; Arg 1: 6 KB work area buffer
 	SXCALL	TSInitApp		; $A350
 	lea	12(sp), sp
 
 	* Open SXMODE Window:
 	* bounds: top=120, left=180, bottom=270, right=400 (w=220, h=150)
-	SXCALL	TSGetID			; $A360 -> D0
-	move.l	d0, -(sp)		; refCon
+	move.l	app_task_id(pc), -(sp)	; refCon (Task ID)
 	move.w	#-1, -(sp)		; goAwayFlag (-1)
 	move.l	#-1, -(sp)		; behind (-1)
 	move.w	#$0200, -(sp)		; procID ($0200 = document window)
@@ -374,6 +407,8 @@ str_mode2:
 
 win_ptr:
 	.dc.l	0
+app_task_id:
+	.dc.l	0
 active_mode:
 	.dc.w	0
 
@@ -389,12 +424,14 @@ event_where:
 event_mods:
 	.dc.w	0
 
+	.even
 work_area:
 	.ds.b	6144			; 6 KB work area required by $A350 TSInitApp (clears 5,962 bytes!)
 	.even
 
 app_stack:
 	.ds.b	2048			; 2 KB application stack
+	.even
 app_stack_top:
 	.even
 
