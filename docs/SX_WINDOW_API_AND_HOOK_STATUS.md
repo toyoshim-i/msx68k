@@ -1,6 +1,6 @@
 # SX-Window v3.1 Kernel Architecture, A-Line (`$Axxx`) API Catalog, and Master Hook Tracking Reference
 
-This reference document specifies the low-level binary layout, the **Line 1010 Emulator (`Vector #10`) A-Line (`$Axxx`) Dispatcher**, the complete **SX-Window v3.1 Manager Subsystem Catalog (1,050 active APIs)**, and the exact hardware coupling points (TVRAM `$00E00000`, CRTC `$E80000`, 128-byte stride) inside **`SYS/FSX.X`**. It establishes the technical blueprint for **Phase 2: Decoupled High-Resolution & TrueColor Native Execution** in **msx68k**.
+This reference document specifies the low-level binary layout, the **Line 1010 Emulator (`Vector #10`) A-Line (`$Axxx`) Dispatcher**, the complete **SX-Window v3.1 Manager Subsystem Catalog (1,050 active APIs)**, **Screen Mode Selection & Battery-Backed SRAM Storage**, the **Sub-Window Manager (`SWM`) & Virtualized GVRAM Architecture**, and the low-level **Graph Man (`GM`) Drawing Engine Internals** inside **`SYS/FSX.X`**. It establishes the technical blueprint for **Phase 2: Decoupled High-Resolution & TrueColor Native Execution** in **msx68k**.
 
 ---
 
@@ -14,7 +14,7 @@ The file layout conforms to the Human68k `HU` executable format with an embedded
 - **`+0x0040..+0x005F` (32 bytes)**: Character Device Driver Header (`"SXTools"`, `strategy = +0x004E`, `interrupt = +0x0056`).
 - **`+0x0040..+0x53BAA`**: Relocatable code segment (`text`).
 - **`+0x53BAA..+0x55E52`**: Initialized data segment (`data`).
-- **`+0x55E52..+0x59B4C`**: 16-bit word-delta relocation table (`reloc`).
+- **`+0x55E52..+0x59B4C`**: 16-bit word-delta relocation table (`reloc`, 7,805 relocation entries).
 
 ```text
 [Disk File Offset]                 [Main RAM Physical Space]
@@ -26,7 +26,8 @@ The file layout conforms to the Human68k `HU` executable format with an embedded
           | Vector #10 Dispatcher | (+0x03C6: Line 1010 handler)
           | 16KB Dispatch Table   | (+0x0400..+0x4400: 4096 entries)
           | Code & Subsystems     | (+0x4400..+0x53B6A)
-          | Screen Mode Table     | (+0x552FC..+0x55450: 22B records)
+          | Mode Table & Records  | (+0x55278 active record, +0x552F6 mode table)
+          | Drawing Driver Table  | (+0x5549E: 12 primitive function pointers)
           | MouseWorkArea Pointer | (+0x633CA -> +0x5CA44)
           +-----------------------+
 ```
@@ -153,10 +154,12 @@ graph TD
         RM["Resource Manager (RM)<br/>$A0D9..$A0EF (23 APIs)"]
         MSM["Mouse Manager (MSM)<br/>$A06A..$A078 (12 APIs)"]
         CLM["Color Manager (CLM)<br/>$A600..$A61F (31 APIs)"]
+        SWM["Sub-Window Manager (SWM)<br/>$A227..$A22B (5 APIs)"]
     end
 
     subgraph LowLevel["Graphics & Hardware Layer"]
         GM["Graph Man / Drawing Manager (GM)<br/>$A12D..$A1F6 & $A540..$A574 (228 APIs)"]
+        GDD["Graphic Device Driver Table<br/>text_base + 0x5549E (12 Function Pointers)"]
         TVRAM["Physical TVRAM ($E00000)<br/>& CRTC Registers ($E80000)"]
     end
 
@@ -164,7 +167,9 @@ graph TD
     HighLevel --> MidLevel
     HighLevel --> GM
     MidLevel --> GM
-    GM ==>|"Exclusive Hardware Chokepoint"| TVRAM
+    MidLevel --> SWM
+    GM --> GDD
+    GDD ==>|"Exclusive Hardware Chokepoint"| TVRAM
 ```
 
 ### 2.1 Subsystem Summary Table
@@ -181,7 +186,7 @@ graph TD
 | **Resource Manager** | `RM` | `$A0D9`–`$A0EF` | 23 | Desktop item resources, string tables, icons, font metrics. |
 | **Graph Man (Drawing Manager)** | `GM` | `$A12D`–`$A1F6`, `$A540`–`$A574` | 228 | QuickDraw-style 2D primitives: Lines, Rects, Ovals, Polygons, Regions, Text, BitMaps, Blits. |
 | **Window Manager** | `WM` | `$A1F8`–`$A235` | 47 | Window creation, Z-order layering, title bars, dirty update regions, desktop port (`WMGetDTGS`). |
-| **Sub Window Manager** | `SWM` | `$A227`–`$A22B` | 5 | Child window clipping and local coordinate translation. |
+| **Sub Window Manager** | `SWM` | `$A227`–`$A22B` | 5 | Sub-window creation, 118-byte `WSRecord` management, child window clipping, graphics plane attach. |
 | **Menu Manager** | `MNM` / `MN` | `$A266`–`$A26C` | 7 | Pull-down menubars, hierarchical menus, item selection tracking. |
 | **Control Manager** | `CM` | `$A289`–`$A2A7` | 30 | UI widgets: push buttons, radio buttons, checkboxes, vertical/horizontal scrollbars. |
 | **Dialog Manager** | `DLM` / `DM` | `$A2C0`–`$A2FA` | 22 | Modal/modeless dialogs, alert boxes, file open/save dialogs. |
@@ -194,143 +199,379 @@ graph TD
 
 ---
 
-### 2.2 Key Drawing Manager (`GM`) Primitives
+## 3. Screen Mode Selection, SRAM Storage (`$ED0072..$ED0084`), and CRTC / VICON Capabilities
 
-The Drawing Manager (`GM`) is the **single choke-point** through which all visual output passes:
+### 3.1 SRAM Storage Layout & `$E8E00D` Write-Protection Protocol
+SX-Window persists screen configuration, mouse acceleration, and desktop defaults across reboots in battery-backed SRAM starting at `$00ED0072`:
 
-| Opcode | API Name | Invariant Handler Offset | Arguments & Description |
-| :---: | :--- | :---: | :--- |
-| **`$A12D`** | `GMOpenGraph` | `text_base + 0x01EAAE` | Allocates and opens an active `Graph` (RastPort) structure. |
-| **`$A12E`** | `GMCloseGraph` | `text_base + 0x01EC36` | Closes and releases resources associated with a `Graph`. |
-| **`$A130`** | `GMInitGraph` | `text_base + 0x01EB30` | Initializes a `Graph` record with default clipping and visible regions. |
-| **`$A131`** | `GMSetGraph` | `text_base + 0x01ECA6` | Sets the current active `Graph` port for subsequent drawing calls. |
-| **`$A132`** | `GMGetGraph` | `text_base + 0x01ECB2` | Retrieves a pointer to the current active `Graph` port. |
-| **`$A138`** | `GMSetClip` | `text_base + 0x01EEF2` | Sets the clipping region (`RgnHandle`) for the active `Graph`. |
-| **`$A13A`** | `GMClipRect` | `text_base + 0x01EF7E` | Sets the clipping bounds to an explicit `Rect [left, top, right, bottom]`. |
-| **`$A13D`** | `GMSetBitmap` | `text_base + 0x01EE2C` | Associates a `BitMap` structure with the active `Graph`. |
-| **`$A147`** | `GMForeColor` | `text_base + 0x01F82E` | Sets foreground drawing color index (0..15). |
-| **`$A148`** | `GMBackColor` | `text_base + 0x01F83E` | Sets background drawing color index (0..15). |
-| **`$A170`** | `GMLine` | `text_base + 0x0204C2` | Draws a 1-pixel solid or patterned line from pen location to `(X, Y)`. |
-| **`$A172`** | `GMFrameRect` | `text_base + 0x020A84` | Outlines the boundary of a rectangle using current pen attributes. |
-| **`$A173`** | `GMFillRect` | `text_base + 0x020A88` | Fills the interior of a rectangle with the current pen pattern. |
-| **`$A17E`** | `GMScroll` | `text_base + 0x01D746` | Scrolls a rectangular region on screen by `(dX, dY)` (hardware or blit). |
-| **`$A17F`** | `GMCopy` | `text_base + 0x023288` | Bit-block transfer (`CopyBits`) between arbitrary source and dest `BitMap`s. |
-| **`$A180`** | `GMCopyMask` | `text_base + 0x024AF2` | Bit-block transfer with an arbitrary 1-bit transparency mask. |
-| **`$A191`** | `GMDrawStr` | `text_base + 0x0256FA` | Renders a string of 16-dot or 24-dot JIS Kanji/ANK characters. |
-| **`$A1C4`** | `GMGetScrnSize` | `text_base + 0x02F1A4` | Returns active screen dimensions `(Width, Height)` in `D0`. |
-| **`$A1CA`** | `GMNewBits` | `text_base + 0x02F1F6` | Allocates a `BitMap` buffer (binds to `$00E00000` for screen mode 4). |
-| **`$A1CC`** | `GMLockBits` | `text_base + 0x02F2C8` | Locks pixel buffer in RAM / VRAM and returns 32-bit base address. |
-| **`$A1CD`** | `GMUnlockBits` | `text_base + 0x02F30E` | Unlocks pixel buffer and sets base pointer to `$00E00000`. |
+| Address | Size | Name | Description & Bit Layout |
+| :---: | :---: | :--- | :--- |
+| **`$ED0072..$ED0073`** | 2 B | `sram_magic` | ASCII signature `"SX"` (`$5358`). Validated on boot (`cmpi.w #$5358, $00ED0072`). |
+| **`$ED0074`** | 1 B | `display_flags` | Display settings and double-click timing multiplier (`* 10 -> global $54A88`). |
+| **`$ED0075`** | 1 B | `mouse_speed` | Mouse acceleration curve index passed to `$A072` (`MSCurSpeed`). |
+| **`$ED0076..$ED007B`** | 6 B | `desktop_defaults` | Default desktop window positions and menubar flags. |
+| **`$ED007C`** | 1 B | **`screen_mode`** | **Active Screen Mode byte**: Upper nibble (`val >> 4`) selects Screen Mode (0..6). Lower nibble (`val & $0F`) holds display flags. |
+| **`$ED007D`** | 1 B | `printer_port` | Hardcopy printer interface configuration. |
+| **`$ED007E`** | 1 B | `system_flags` | Bit 7: System init flag. Bit 6: Sound/bell mute flag. |
+| **`$ED007F..$ED0089`** | 11 B | `reserved` | Reserved for future desktop expansion. |
+
+#### Hardware Write-Protection Protocol (`$E8E00D`):
+SRAM write protection is enforced by hardware gate array register **`$00E8E00D`**. Any write to SRAM while locked is ignored:
+- **Unlock Sequence**: Write `#$31` (`49` decimal) to `$00E8E00D`.
+- **Perform SRAM Writes**: Modify target SRAM bytes.
+- **Lock Sequence**: Write `#$00` (`0` decimal) to `$00E8E00D`.
+
+Disassembly from `SYS/FSX.X` (`text_base + 0x2FD00`):
+```m68k
+text+0x2FD00:  13FC 0031 00E8 E00D  MOVE.B  #$31, ($E8E00D).L   ; Unlock SRAM writes!
+text+0x2FD08:  41F9 00ED 007C       LEA     ($ED007C).L, A0     ; Point to Screen Mode byte
+text+0x2FD0E:  103C 0020            MOVE.B  #$20, D0            ; Screen Mode 2 (Default 768x512)
+text+0x2FD12:  0210 000F            ANDI.B  #$0F, (A0)          ; Preserve lower 4 bits
+text+0x2FD16:  8110                 OR.B    D0, (A0)            ; Set new mode in upper nibble
+text+0x2FD18:  13FC 0000 00E8 E00D  MOVE.B  #$00, ($E8E00D).L   ; Lock SRAM writes!
+text+0x2FD20:  4E75                 RTS
+```
 
 ---
 
-## 3. Screen Resolution & TVRAM (`$E00000`) Architecture in `SYS/FSX.X`
-
-### 3.1 The 1024×1024 Physical TVRAM Limit & Screen Mode Table
-SX-Window v3.1 was designed to keep the entire Graphics VRAM (`GVRAM` at `$00C00000..$00C7FFFF`, 512 KB) free for user applications and games. Therefore, the entire GUI desktop is rendered exclusively into **Text VRAM (`TVRAM` at `$00E00000..$00E7FFFF`, 512 KB)** across 4 bitplanes.
-
-Inside `SYS/FSX.X` at **`text_base + 0x552FC`**, there is a master **Screen Mode Configuration Table** composed of **22-byte records**:
+### 3.2 Screen Mode Table (`text_base + 0x552F6`)
+Inside `SYS/FSX.X` in the initialized data segment at **`text_base + 0x552F6`**, there is the master **Screen Mode Configuration Table** composed of **22-byte records**:
 
 ```text
-Offset +0: Width (16-bit BE)
-Offset +2: Height (16-bit BE)
-Offset +4: Base Address (32-bit BE)
-Offset +8: RowBytes / Stride (16-bit BE)
-Offset +10: Planes (16-bit BE)
-Offset +12: Mode ID (16-bit BE)
-Offset +14..+21: CRTC Register Template Parameters (8 bytes)
+Offset +0x00: Left coordinate (16-bit BE, 0)
+Offset +0x02: Top coordinate (16-bit BE, 0)
+Offset +0x04: Reserved / padding (16-bit BE, 0)
+Offset +0x06: Width in pixels (16-bit BE)
+Offset +0x08: Height in pixels (16-bit BE)
+Offset +0x0A: Framebuffer Base Address (32-bit BE, e.g. $00E00000 or $00C00000)
+Offset +0x0E: Scanline RowBytes / Stride (16-bit BE, e.g. 128 for TVRAM, 1024 for GVRAM)
+Offset +0x10: Number of Planes (16-bit BE, 2 for 4-plane TVRAM, 16 for GVRAM)
+Offset +0x12: Mode Flags (16-bit BE)
+Offset +0x14: Mode Index (16-bit BE, 0..7)
 ```
 
-#### Decoded Screen Mode Table (`text_base + 0x552FC`):
+#### Decoded Screen Mode Table (`text_base + 0x552F6`):
 
-| Mode | Offset in `FSX.X` | Width × Height | Base Address | Scanline Stride | Planes | Target Domain |
+| Mode | Offset in `FSX.X` | Width × Height | Base Address | Scanline Stride | Planes | Target Domain & Display Role |
 | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **0** | `text_base + 0x552FC` | 256 × 256 | `$00E00000` | 128 Bytes | 2 | TVRAM (Low-Res) |
-| **1** | `text_base + 0x55312` | 512 × 512 | `$00E00000` | 128 Bytes | 2 | TVRAM (Standard) |
-| **2** | `text_base + 0x55328` | 640 × 480 | `$00E00000` | 128 Bytes | 2 | TVRAM (VGA 60Hz) |
-| **3** | `text_base + 0x5533E` | **768 × 512** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM (Default SX-Window Desktop)** |
-| **4** | `text_base + 0x55354` | 1024 × 424 | `$00E00000` | 128 Bytes | 2 | TVRAM (Wide 24kHz) |
-| **5** | `text_base + 0x5536A` | 1024 × 848 | `$00E00000` | 128 Bytes | 2 | TVRAM (Interlaced) |
-| **6** | `text_base + 0x55380` | **1024 × 1024** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM Hardware Limit (Full 512KB)** |
-| **7** | `text_base + 0x55396` | 256 × 256 | `$00C00000` | 1024 Bytes | 16 | GVRAM (Application graphics mode) |
+| **0** | `text_base + 0x552F6` | 256 × 256 | `$00E00000` | 128 Bytes | 2 | TVRAM (Low-Res 15kHz) |
+| **1** | `text_base + 0x5530C` | 512 × 512 | `$00E00000` | 128 Bytes | 2 | TVRAM (Standard 31kHz) |
+| **2** | `text_base + 0x55322` | 640 × 480 | `$00E00000` | 128 Bytes | 2 | TVRAM (VGA 60Hz 31kHz) |
+| **3** | `text_base + 0x55338` | **768 × 512** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM (Default SX-Window Desktop 31kHz)** |
+| **4** | `text_base + 0x5534E` | 1024 × 424 | `$00E00000` | 128 Bytes | 2 | TVRAM (Wide 24kHz) |
+| **5** | `text_base + 0x55364` | **1024 × 848** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM (Interlaced High-Density)** |
+| **6** | `text_base + 0x5537A` | **1024 × 1024** | **`$00E00000`** | **128 Bytes** | **2** | **TVRAM Hardware Limit (Full 512KB TVRAM)** |
+| **7** | `text_base + 0x55390` | 256 × 256 | `$00C00000` | 1024 Bytes | 16 | GVRAM (Application graphics mode) |
 
-> [!WARNING]
-> **Why 1024×1024 is the Hardware Ceiling in Original SX-Window**:
-> 1. In all TVRAM modes (0..6), `RowBytes` is hardcoded to **`128` bytes** (`1024 dots / 8 = 128`).
-> 2. The maximum addressable height is `512 KB / (128 B * 4 planes) = 1024` scanlines.
-> 3. Drawing routines in Graph Man compute pixel offsets using `Y * 128 + (X >> 3)`.
-> 4. Physical TVRAM ends at `$00E7FFFF`. Any access beyond `Y=1024` or `X=1024` triggers a bus error or wraps around to unmapped I/O.
+#### Active Screen Mode Record (`text_base + 0x55278`):
+When SX-Window initializes, it copies the selected 22-byte entry from the mode table into the **Active Screen Mode Record** at **`text_base + 0x55278`**. This active record is used by `GMInitBitmap` (`$A13C` at `text_base + 0x01ECBC`) whenever `type=0` is passed to initialize a screen-backed `BitMap`.
 
 ---
 
-### 3.2 Direct Hardware Access Audit in `SYS/FSX.X`
-Only five specific locations in the entire `SYS/FSX.X` kernel access TVRAM or CRTC registers directly:
-
-1. **Screen Clear & Mode Init (`text_base + 0x133D8`)**:
-   - Writes `#$01F0` to CRTC R21 bitmask register (`$E8002A`) to enable simultaneous 4-plane multiwrite.
-   - Clears 512 KB of TVRAM at `$00E00000` via a fast `MOVEM.L / DBRA` loop (32,768 longwords).
-   - Configures text palette via `IOCS $13` (`_B_COLOR`) and shows cursor via `IOCS $0E`.
-2. **Software Mouse Cursor Blit (`text_base + 0x04F852`)**:
-   - Subroutine 4 of the mouse receiver handler.
-   - Accesses CRTC base `$E80000` and masks bits via `$E8002A`.
-   - Directly renders the 16×16 cursor bitmap into TVRAM at `$00E00000 + CurY * 128 + (CurX >> 3)`.
-3. **Hardware Raster Copy Engine (`text_base + 0x04732`)**:
-   - Programs CRTC R20 (`$E80028`), `$E80024`, and `$E80026`.
-   - Polls bit 4 of CRTC status register (`$E88001`) until the hardware block-transfer engine completes.
-4. **Emergency Panic Alert Box (`text_base + 0x4BFC0`, `SXER`)**:
-   - Invoked on unhandled exceptions (Bus Error, Address Error).
-   - Computes TVRAM address directly (`MULU #128, D1` + `ADDA.L D1, A0` + `LEA (A0, D0.W), A0` with base `$00E00000`) to draw the "System Error" dialog over corrupted desktops.
-5. **Mouse Clipping Bounds (`text_base + 0x04FE4C`, `MSBoundSet` `$A077`)**:
-   - Updates `$34(A4)..$3B(A4)` (`min_x, min_y, max_x, max_y`) in `MouseWorkArea`.
-   - Clamps mouse coordinates inside Subroutine 3 (`text_base + 0x04F768`, currently intercepted by `HypercallId::SxMouseSync`).
+### 3.3 Screen Mode Switching Mechanics
+Screen Mode selection is mediated through specific A-Line APIs:
+- **`$A435`** (`text_base + 0x02FCA8`): Checks SRAM signature `$ED0072` for `"SX"`, reads `$ED007C`, and returns `D0 = (SRAM[$ED007C] >> 4)`.
+- **`$A437`** (`text_base + 0x02FCC4`): Reads the mode from `$ED007C`, validates it, and if valid, calls `IOCS $10` (`_CRTMOD`) to configure CRTC registers.
+- **`$A1C2`** (`text_base + 0x02CFA0`, `GMSetScrnMode`):
+  ```m68k
+  text+0x02CFA4:  3210           MOVE.W  (A0), D1          ; D1 = requested mode
+  text+0x02CFA6:  45FA 008C      LEA     $008C(PC), A2     ; A2 = TVRAM mode table (text + 0x2D034)
+  text+0x02CFAA:  47FA 00F8      LEA     $00F8(PC), A3     ; A3 = GVRAM mode table (text + 0x2D0A4)
+  text+0x02CFAE:  3001           MOVE.W  D1, D0
+  text+0x02CFB0:  0800 0006      BTST    #6, D0            ; Test bit 6 (1024x1024 flag)
+  text+0x02CFB4:  670C           BEQ.S   standard_mode
+  text+0x02CFB6:  0880 0006      BCLR    #6, D0
+  text+0x02CFBA:  45FA 0158      LEA     $0158(PC), A2     ; Select Mode 6 table (text + 0x2D114 -> 0x5537A)
+  standard_mode:
+  text+0x02CFC8:  33C0 0005 5258 MOVE.W  D0, ($55258, text)
+  text+0x02CFCE:  E548           LSL.W   #2, D0            ; Index * 4
+  text+0x02CFD0:  2272 0000      MOVEA.L (A2, D0.W), A1    ; A1 points to Screen Mode Record in 0x552F6
+  text+0x02CFD4:  41F9 0005 5278 LEA     ($55278, text), A0 ; A0 points to active record
+  ; Copies 22 bytes from A1 to A0!
+  ```
+- **`$A1C1`** (`text_base + 0x02CF8C`): Returns current mode word from `text_base + 0x55256`.
+- **`$A55D`** (`text_base + 0x02CF96`): Returns current mode word from `text_base + 0x55258`.
 
 ---
 
-### 3.3 Complete Subsystem Isolation
-**Crucial Architectural Finding**:
-All higher-level managers—**Window Manager (`WM`)**, **Control Manager (`CM`)**, **Dialog Manager (`DLM`)**, **Menu Manager (`MNM`)**, **Text Manager (`TXM`)**, **Task Manager (`TKM`)**, and **all external applications (`SXWIN.X`, `カレンダ.X`, `電卓.X`, `GRW.X`)**—**NEVER** touch TVRAM (`$00E00000`) or CRTC registers (`$E80000`) directly.
+### 3.4 CRTC & VICON High-Resolution Verification
+A critical question is whether **msx68k**'s existing CRTC timing engine (`crates/msx68k-bus/src/crtc.rs`) and VICON GPU compositor (`crates/msx68k-vicon`) can already render Mode 5 (`1024x848`) and Mode 6 (`1024x1024`):
 
-Every window, button, menu item, dialog box, icon, and character is rendered strictly through calls to **Graph Man (`GM`) primitives (`$A12D..$A1F6`)**!
+1. **`Crtc::active_resolution()` (`crates/msx68k-bus/src/crtc.rs#L139-L163`)**:
+   ```rust
+   let h_cols = self.regs[3].saturating_sub(self.regs[2]) as u32;
+   let width = match h_cols * 8 {
+       w if (256..=1024).contains(&w) => w,
+       _ => match self.regs[20] & 0x0003 {
+           0 => 256,
+           1 => 512,
+           _ => 768,
+       },
+   };
+   let v_lines = self.regs[7].saturating_sub(self.regs[6]) as u32;
+   let height = if (128..=1024).contains(&v_lines) {
+       ...
+       v_lines
+   } else {
+       512
+   };
+   (width, height)
+   ```
+   **Finding**: `active_resolution()` dynamically accepts `256..=1024` for width and `128..=1024` for height! There is **no hardcoded clamp to 768 or 512**. Both Mode 5 (`1024x848`) and Mode 6 (`1024x1024`) are **natively supported by the CRTC model without modification**.
+
+2. **`ViconGpuCompositor` (`crates/msx68k-vicon/src/lib.rs#L13-L45`)**:
+   ```rust
+   pub const MAX_FB_WIDTH: u32 = 1024;
+   pub const MAX_FB_HEIGHT: u32 = 1024;
+   ...
+   width: w.clamp(256, MAX_FB_WIDTH),
+   height: h.clamp(128, MAX_FB_HEIGHT),
+   ```
+   **Finding**: The VICON GPU textures and composition buffers are allocated for `MAX_FB_WIDTH = 1024` and `MAX_FB_HEIGHT = 1024`. Modes 5 and 6 fit entirely within the existing hardware emulation buffers!
+   For resolutions **beyond 1024** (e.g. `1280x720`, `1920x1080` in Phase 2B/2C), the decoupled native host surface will bypass VICON's 1024-pixel TVRAM texture limits entirely.
+
+---
+
+## 4. SX-Window Graphics Plane (`GVRAM` `$C00000`) & Sub-Window Manager (`SWM` `$A227..$A22B`)
+
+### 4.1 Sub-Window Manager Disassembly & `WSRecord` Architecture
+In SX-Window, applications that require pixel-level graphics, bitmap editing, or 16-color/256-color image rendering do not draw into the shared TVRAM text desktop. Instead, they use the **Sub-Window Manager (`SWM` `$A227..$A22B`)** to bind a portion of their window to the hardware Graphics Plane (`GVRAM` at `$00C00000..$00C7FFFF`, 512 KB).
+
+Sub-windows are represented by a **118-byte (`$76`) record** (`WSRecord`):
 
 ```text
-[Applications / WM / CM / DLM / MNM / TXM]
-                  |
-                  v (Calls A-Line $Axxx Primitives)
-      [Graph Man / Drawing Manager]
-                  |
-   +--------------+---------------+
-   |                              |
-[Legacy TVRAM Engine]   [NEW: Mixed Mode Hook Native Surface]
-($00E00000, 128B stride) (Direct wgpu Texture / Arbitrary Resolution)
++0x00 (4B): Link to parent window structure
++0x04 (2B): x1 (Window-relative left coordinate)
++0x06 (2B): y1 (Window-relative top coordinate)
++0x08 (2B): x2 (Window-relative right coordinate)
++0x0A (2B): y2 (Window-relative bottom coordinate)
++0x10 (4B): Next sibling sub-window pointer
++0x14 (4B): Previous sibling sub-window pointer
++0x40 (2B): Window attributes / flags (bit 5 = active, bit 0 = enabled)
++0x42 (1B): Visibility flag ($FF = visible, $00 = hidden)
++0x48 (4B): Visible Region handle (visRgn)
++0x4C (4B): Clipping Region handle (clipRgn)
++0x50 (4B): Dirty Update Region handle (updateRgn)
++0x62 (4B): Parent window pointer
++0x66 (4B): Root sub-window linked list pointer (anchored at text_base + 0x543C6)
++0x72 (4B): Sub-window Z-order / priority / display mode flags
+```
+
+#### SWM API Disassembly:
+1. **`WSOpen` (`$A227` at `text_base + 0x047DCE`)**:
+   - Parameters on stack: `(parent_win: *Window, bounds: *Rect, flags: Long)`.
+   - Allocates 118 bytes (`pea $76; jsr 0x47610`) if caller passes NULL in `A2`.
+   - Copies `(x1, y1, x2, y2)` from caller rect into `WSRecord + 0x04..0x0B`.
+   - Allocates visible region (`visRgn` at `+0x48`), clip region (`clipRgn` at `+0x4C`), and update region (`updateRgn` at `+0x50`).
+   - Inserts `WSRecord` into global Z-ordered sub-window chain anchored at **`text_base + 0x543C6`**.
+   - Sets visibility flag to `$FF` (`move.b #$FF, 66(A2)`).
+   - Recalculates desktop clip regions via `jsr 0x481BA`.
+   - Returns pointer to `WSRecord` in `A0` and `D0 = 0` (Success).
+2. **`WSClose` (`$A228` at `text_base + 0x047F42`)**:
+   - Unlinks `WSRecord` from active display chain `text_base + 0x543C6`.
+   - Clears visibility flag (`clr.b 66(A2)`).
+   - Marks former region dirty and schedules desktop repaint via `jsr 0x43AF2`.
+3. **`WSDispose` (`$A229` at `text_base + 0x047FFC`)**:
+   - Calls `WSClose` (`jsr 0x47F52`).
+   - Releases region handles (`visRgn`, `clipRgn`, `updateRgn`) via `MM` (`jsr 0x4764E`).
+   - Deallocates the 118-byte `WSRecord` from heap.
+4. **`WSEnlist` (`$A22A` at `text_base + 0x048022`)**:
+   - Re-inserts an existing `WSRecord` into the active chain at `text_base + 0x543C6` maintaining priority order.
+5. **`WSDelist` (`$A22B` at `text_base + 0x04812A`)**:
+   - Temporarily removes `WSRecord` from the active display list without freeing memory.
+
+---
+
+### 4.2 Window Movement & GVRAM Scroll Tracking (`WMCarry` `$A200`)
+When a user drags or moves a window containing sub-windows, the Window Manager executes **`WMCarry` (`$A200` at `text_base + 0x044670`)**:
+```m68k
+text+0x044682:  226C 0066      MOVEA.L 102(A4), A1     ; A1 = sub-window pointer from Window + 0x66
+text+0x044686:  4A29 0042      TST.B   66(A1)          ; Test visibility flag (+0x42)
+text+0x04468A:  6766           BEQ.S   skip_subwin
+text+0x04468C:  2F29 0048      MOVE.L  72(A1), -(SP)   ; Push visRgn handle (+0x48)
+text+0x044690:  2F07           MOVE.L  D7, -(SP)       ; Push delta (dX, dY)
+text+0x044692:  A160           OFFSET_RGN              ; Shift region coordinates by (dX, dY)!
+text+0x044694:  508F           ADDQ.L  #8, SP
+```
+In original X68000 hardware, there is only **one hardware Graphic 0 scroll offset register** (`CRTC R12..R15` at `$E80018..$E8001F`). Therefore:
+- The system aligns the hardware GVRAM origin to the **active frontmost sub-window**.
+- As a consequence, running multiple graphics apps simultaneously on real hardware causes them to clobber each other's visual space or fight over the hardware scroll origin!
+
+---
+
+### 4.3 Master VM Architecture: Per-App / Per-Window Virtualized GVRAM
+In **msx68k**, all SX-Window applications run cooperatively within a single Master VM. To eliminate the hardware limitation where only one graphics window can be properly displayed at a time, we implement **Partial Virtualization of the Graphics Plane (`GVRAM`)**:
+
+```mermaid
+graph TD
+    subgraph MasterVM["Master VM (Cooperative 68000 Guest Space)"]
+        App1["Canvas Paint (ｷｬﾝﾊﾞｽ.X)<br/>Window #1 at (100, 80)"]
+        App2["Sharpen Graphics (ｼｬｰﾍﾟﾝ.X)<br/>Window #2 at (550, 200)"]
+        SWM["Sub-Window Manager ($A227..$A22B)<br/>Maintains WSRecords in 0x543C6"]
+        VGVRAM["Guest GVRAM Window Space ($00C00000)<br/>Bank-Switched / Trap-Shadowed"]
+    end
+
+    subgraph HostCompositor["Host GPU Compositor (wgpu)"]
+        Tex1["Surface #1 Texture<br/>(Backing Buffer App #1)"]
+        Tex2["Surface #2 Texture<br/>(Backing Buffer App #2)"]
+        DesktopTex["Desktop Texture (TVRAM / Native Surface)"]
+        FinalFrame["Host Display Window Framebuffer"]
+    end
+
+    App1 -->|WSOpen $A227| SWM
+    App2 -->|WSOpen $A227| SWM
+    SWM --> VGVRAM
+
+    VGVRAM -.->|"Focus / Write Sync"| Tex1
+    VGVRAM -.->|"Focus / Write Sync"| Tex2
+    Tex1 --> FinalFrame
+    Tex2 --> FinalFrame
+    DesktopTex --> FinalFrame
+```
+
+#### Implementation Strategy:
+1. **Hook `WSOpen` (`$A227`) and `WSDispose` (`$A229`)**:
+   - When an application registers a `WSRecord`, the hypercall allocates a dedicated `VirtualGvramSurface` on the host with dimensions matching `(WSRecord.x2 - WSRecord.x1, WSRecord.y2 - WSRecord.y1)`.
+   - On `WSDispose`, the host surface is released.
+2. **Context Bank-Switching on Task / Window Switch**:
+   - When the active task or frontmost window changes (hooking `TSSelect` / `WMSelect`), the emulator saves `$00C00000..$00C7FFFF` into the outgoing window's backing buffer, and restores the incoming window's backing buffer into `$00C00000`.
+   - Result: Fast 100% binary-compatible execution with zero CPU instruction emulation overhead during active drawing.
+3. **Multi-Window `wgpu` Composition**:
+   - In `ViconGpuCompositor`, rather than drawing a single Graphic 0 plane with a single hardware scroll register, the compositor iterates through all registered `WSRecord`s in `text_base + 0x543C6`.
+   - Each window's virtual GVRAM surface is composited directly at its current window screen coordinates `(WSRecord.x1, WSRecord.y1)` clipped to its `visRgn`.
+   - **Result**: Multiple graphics programs (`ｷｬﾝﾊﾞｽ.X`, `ｼｬｰﾍﾟﾝ`, `GRW.X`) can remain visible simultaneously side-by-side without clobbering each other or being tied to a single shared hardware origin!
+
+---
+
+## 5. Graph Man (`GM`) Internals for Phase 2B (Breaking the 1024×1024 TVRAM Limit)
+
+### 5.1 Structure Layouts: `BitMap` and `Graph` (`RastPort`)
+Disassembly of `GMInitGraph` (`text_base + 0x01EB30`), `GMInitBitmap` (`text_base + 0x01ECBC`), and `GMSetBitmap` (`text_base + 0x01EE2C`) reveals the exact binary layouts of Graph Man's core data structures:
+
+#### `BitMap` Structure Layout (22 bytes for screen modes, 18 bytes for off-screen):
+```text
+Offset +0x00 (2B): Type / Color Depth Mode:
+                   0 = Standard 4-plane TVRAM (Packed planar)
+                   1 = 1-bit Monochrome / 16-bit Packed
+                   2 = 4-bit Chunky (16 colors, 2 pixels/byte)
+                   3 = 8-bit Chunky (256 colors, 1 byte/pixel)
+                   4 = 16-bit Direct Color (65,536 colors, 2 bytes/pixel)
+Offset +0x02 (2B): bounds.left   (Window / surface left coordinate)
+Offset +0x04 (2B): bounds.top    (Window / surface top coordinate)
+Offset +0x06 (2B): bounds.right  (Window / surface right coordinate; width = right - left)
+Offset +0x08 (2B): bounds.bottom (Window / surface bottom coordinate; height = bottom - top)
+Offset +0x0A (4B): baseAddr      (32-bit Framebuffer / Memory Pointer, e.g. $00E00000)
+Offset +0x0E (2B): rowBytes      (Scanline byte stride, e.g. 128 for TVRAM, 1024 for GVRAM)
+Offset +0x10 (2B): planes        (Plane count, 2 for TVRAM, 16 for GVRAM)
+Offset +0x12 (2B): modeFlags     (Mode attributes)
+Offset +0x14 (2B): modeIndex     (Mode ID: 0..7)
+```
+
+#### `Graph` (`RastPort`) Structure Layout (64 bytes):
+```text
+Offset +0x00 (4B): *bitmap      (Pointer to associated BitMap structure)
+Offset +0x04 (2B): portRect.left
+Offset +0x06 (2B): portRect.top
+Offset +0x08 (2B): portRect.right
+Offset +0x0A (2B): portRect.bottom
+Offset +0x0C (4B): *device      (Custom Graphic Device Driver dispatch table pointer; if NULL, uses 0x5549E)
+Offset +0x10 (4B): visRgn       (Visible Region handle)
+Offset +0x14 (4B): clipRgn      (Clipping Region handle)
+Offset +0x18 (2B): penX         (Current pen X coordinate)
+Offset +0x1A (2B): penY         (Current pen Y coordinate)
+Offset +0x1C (4B): penMode      (Transfer mode: 0=COPY, 1=OR, 2=XOR, 3=BIC)
+Offset +0x20 (4B): penPat       (32-bit pattern or pointer to 8x8 pattern)
+Offset +0x24 (4B): foreColor    (Foreground color index, 0..15 or 0..255)
+Offset +0x28 (4B): backColor    (Background color index, 0..15 or 0..255)
+Offset +0x2C (2B): penWidth     (Pen outline width)
+Offset +0x2E (2B): penHeight    (Pen outline height)
+Offset +0x30 (2B): reserved
+Offset +0x32 (2B): fontId       (Active font family identifier)
+Offset +0x34 (2B): fontStyle    (Font style flags: Bold, Italic, Underline)
+Offset +0x36 (2B): fontSize     (Font point size)
+Offset +0x38 (2B): fontFace     (Kanji 16-dot vs 24-dot selector)
+Offset +0x3A (2B): textMode     (Text drawing transfer mode)
+Offset +0x3C (4B): reserved
 ```
 
 ---
 
-### 3.4 Roadmap to Arbitrary High Resolutions & TrueColor
+### 5.2 Graphic Device Driver Table (`text_base + 0x5549E`)
+A crucial discovery is that all Graph Man drawing primitives dispatch through an internal **Device Driver Dispatch Table** at **`text_base + 0x5549E`** containing 12 function pointers:
 
-#### Phase 2A: Virtual Viewport & Coordinate Expansion (`1024×768`, `1280×720`, `1920×1080`)
-1. **Screen Mode Table Patch (`text_base + 0x5533E`)**:
-   - Overwrite Mode 3 width (`768` -> host width, e.g. `1280`) and height (`512` -> host height, e.g. `720`).
-2. **Dynamic Mouse WorkArea Clamping**:
-   - Hook `MSBoundSet` (`$A077` at `text_base + 0x04FEB6`) to store host desktop boundaries.
-   - Expand `HypercallId::SxMouseSync` (`$FE81`) to clamp to host window dimensions.
-3. **Screen Query Hooks**:
-   - Intercept `GMGetScrnSize` (`$A1C4` at `text_base + 0x02F1A4`) and `WMGetDTGS` (`$A224` at `text_base + 0x0477AE`) to return host window dimensions to `SXWIN.X` and apps.
+| Table Offset | Function Pointer | Primitive Name | Description & Functional Role |
+| :---: | :---: | :--- | :--- |
+| **`+0x00`** | `text_base + 0x02921C` | `Dot` / `SetPixel` | Plots a single pixel at `(X, Y)`. |
+| **`+0x04`** | `text_base + 0x0206DC` | `Line` | Draws a line between pen location and target `(X, Y)`. |
+| **`+0x08`** | `text_base + 0x020B68` | `Rect` | Frames or fills a rectangular area (`GMFillRect`, `GMFrameRect`). |
+| **`+0x0C`** | `text_base + 0x021AD8` | `RRect` | Outlines or fills a rounded rectangle with corner radii. |
+| **`+0x10`** | `text_base + 0x021952` | `Oval` | Outlines or fills an ellipse bounded by a rectangle. |
+| **`+0x14`** | `text_base + 0x0222D6` | `Arc` | Draws or fills an elliptical arc or pie wedge. |
+| **`+0x18`** | `text_base + 0x0216D4` | `Poly` | Renders a polygon described by a vertex list. |
+| **`+0x1C`** | `text_base + 0x0229A6` | `Rgn` | Fills or inverts an arbitrary multi-boundary `Region`. |
+| **`+0x20`** | `text_base + 0x023548` | `Bits` / `CopyBits`| High-speed bitmap block transfer between surfaces. |
+| **`+0x24`** | `text_base + 0x034284` | `Text` | Renders text glyphs using active font face into bitmap. |
+| **`+0x28`** | `text_base + 0x0291A2` | `DeviceSync` | Flushes pending drawing commands to hardware rasterizer. |
+| **`+0x2C`** | `text_base + 0x02AA00` | `DeviceCustom` | Device-specific extension hook. |
 
-#### Phase 2B: Native Graph Man (`GM`) & TrueColor Framebuffer Surface
-1. **Intercept Graph Man Primitives at Vector Level**:
-   - Replace 68k drawing routines (`GMFillRect` `$A173`, `GMFrameRect` `$A172`, `GMLine` `$A170`, `GMScroll` `$A17E`, `GMCopy` `$A17F`, `GMDrawStr` `$A191`) with native hypercall stubs (`$FE88..$FE8F`).
-2. **Host Surface Redirection**:
-   - When a drawing primitive executes, read 68k coordinates from stack arguments (`A0`), and draw directly into a 32-bit RGBA texture in host memory (`wgpu` surface) with arbitrary width and arbitrary stride.
-   - Completely disable TVRAM writes and CRTC raster copy polling.
-
-#### Phase 2C: Direct GPU Composition & Host Window Integration
-1. **Rootless / Unity Multi-Window Mode**:
-   - Hook `WMSelect`, `WMCarry`, and `WMUpdate` to map individual SX-Window windows directly to host OS desktop windows (`winit` surfaces).
+If `Graph->device` (`+0x0C`) is NULL, Graph Man defaults to `text_base + 0x5549E`. If `Graph->device` is non-NULL, Graph Man dispatches through the custom table pointed to by `+0x0C`!
 
 ---
 
-## 4. Master Hook & Patch Tracking Table
+### 5.3 Low-Level Scanline Address Calculation Audit
+Disassembly of `text_base + 0x0346E2` and `text_base + 0x034724` proves conclusively how Graph Man computes pixel addresses:
+
+```m68k
+text+0x0346EC:  2248           MOVEA.L A0, A1          ; A1 = BitMap pointer
+text+0x0346EE:  9669 0004      SUB.W   4(A1), D3       ; D3 = Y - BitMap.bounds.top (+0x04)
+text+0x0346F2:  C7E9 000E      MULS.W  14(A1), D3      ; D3 = (Y - top) * BitMap.rowBytes (+0x0E)!
+text+0x0346F6:  D6A9 000A      ADD.L   10(A1), D3      ; D3 += BitMap.baseAddr (+0x0A)!
+text+0x0346FA:  2043           MOVEA.L D3, A0          ; A0 = Scanline Base Address!
+```
+
+And in the multi-type pixel offset unpacker (`text_base + 0x034724`):
+- **Type 0 (TVRAM 4-plane)**: Computes word offset `(X >> 4) * 2` and bit index `X & 15`.
+- **Type 1 (16-bit packed)**: `ext.l D2; add.w D2, D2; adda.l D2, A0` (2 bytes/pixel).
+- **Type 2 (4-bit chunky)**: `asr.w #1, D2; adda.l D2, A0` (1 byte / 2 pixels).
+- **Type 3 (8-bit chunky)**: `ext.l D2; adda.l D2, A0` (1 byte/pixel).
+- **Type 4 (16-bit direct color)**: `ext.l D2; add.w D2, D2; adda.l D2, A0` (2 bytes/pixel).
+
+> [!IMPORTANT]
+> **Definitive Architectural Proof**:
+> Graph Man's internal primitive engine is **fully generic and variable-stride aware**! It dynamically reads:
+> - `BitMap.baseAddr` at `+0x0A`
+> - `BitMap.rowBytes` at `+0x0E`
+> - `BitMap.bounds` at `+0x02..+0x08`
+>
+> It does **NOT** hardcode `$00E00000` or `128`-byte stride inside drawing primitives! The only routines in the entire kernel that hardcode `$00E00000` or 128 bytes are:
+> 1. Mode Clear loop at `text_base + 0x133D8` (CRTC multiwrite clear).
+> 2. Software mouse cursor blit at `text_base + 0x04F852`.
+> 3. Panic alert box at `text_base + 0x4BFC0`.
+> 4. CRTC hardware block transfer trigger at `text_base + 0x04732`.
+
+---
+
+### 5.4 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
+To expand SX-Window to arbitrary high resolutions (`1280x720`, `1920x1080`) and 32-bit TrueColor, we only need to hook **four minimal chokepoints**:
+
+1. **Chokepoint 1: Mode Record & `GMInitBitmap` (`$A13C` / `text_base + 0x01ECBC`)**:
+   - Patch the Active Screen Mode Record at `text_base + 0x55278`:
+     - `bounds.right` = Host width (e.g. `1920`).
+     - `bounds.bottom` = Host height (e.g. `1080`).
+     - `baseAddr` = Virtual host framebuffer in guest RAM or dedicated mapped segment.
+     - `rowBytes` = `Host width * bpp` (e.g. `1920 * 2 = 3840` for 16-bit, or `1920 * 4 = 7680` for 32-bit).
+2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
+   - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
+   - Line, Rect, Fill, BitBlt, and Text rendering commands are intercepted in Rust and rendered directly onto host `wgpu` textures with hardware acceleration!
+3. **Chokepoint 3: Bypass TVRAM Clear & CRTC Blitter**:
+   - NOP out the hardware multiwrite clear loop at `text_base + 0x133E8` and replace it with a single host GPU clear call.
+4. **Chokepoint 4: Hardware Mouse Overlay**:
+   - Disable guest software cursor rendering at `text_base + 0x04F852`.
+   - The host emulator (`crates/msx68k-app`) already receives exact cursor coordinates via `HypercallId::SxMouseSync` (`$FE81`) and renders the cursor on the host GPU overlay layer without touching guest VRAM.
+
+---
+
+## 6. Master Hook & Patch Tracking Table
 
 This living status table tracks all active and planned Mixed Mode hypercalls, module patches, and A-Line hooks across the **msx68k** project:
 
@@ -343,18 +584,22 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$FE85`** | Virtual SCSI ROM<br/>`$FC0060` | ROM Entry Point | `ScsiIocsDispatch` | **`[x] Hooked`** | **`IOCS $F5` (`_SCSIDRV`) Bridge**: Handles SCSI command packets (read, write, inquiry, capacity, ready) directly from guest space. |
 | **`$FE86`** | SCSI Block Driver<br/>`driver_addr + 0x14` | Injected Stub in RAM | `ScsiDriverStrategy` | **`[x] Hooked`** | **Block Driver Strategy**: Latches request packet pointer (`A5`) into emulator state. |
 | **`$FE87`** | SCSI Block Driver<br/>`driver_addr + 0x18` | Injected Stub in RAM | `ScsiDriverInterrupt` | **`[x] Hooked`** | **Block Driver Interrupt**: Executes Human68k commands: 0 (INIT), 1 (MEDIA CHECK), 2 (BUILD BPB), 4 (READ), 5 (MEDIA SENSE), 8/9 (WRITE). |
-| **`Patch-ModeTable`** | `SYS/FSX.X`<br/>`text_base + 0x5533E` | `03 00 02 00 00 E0 00 00 00 80` | Screen Mode Table (Mode 3) | **`[ ] Planned (Phase 2A)`** | **Hi-Res Viewport Patch**: Overwrites Mode 3 width (`768`) and height (`512`) with host display dimensions (e.g. `1280×720`). |
+| **`Patch-ModeTable`** | `SYS/FSX.X`<br/>`text_base + 0x55338` | `03 00 02 00 00 E0 00 00 00 80` | Screen Mode Table (Mode 3) | **`[ ] Planned (Phase 2A)`** | **Hi-Res Viewport Patch**: Overwrites Mode 3 width (`768`) and height (`512`) with host display dimensions (e.g. `1280×720`). |
 | **`$A077`** | `SYS/FSX.X`<br/>`text_base + 0x04FEB6` | `2F 10 61 92` | Mouse Manager: `MSBoundSet` | **`[ ] Planned (Phase 2A)`** | **Mouse Bounding Box Hook**: Intercepts guest desktop boundary configuration to maintain host aspect ratio and screen boundaries. |
 | **`$A1C4`** | `SYS/FSX.X`<br/>`text_base + 0x02F1A4` | `4E 56 FF C0` | Graph Man: `GMGetScrnSize` | **`[ ] Planned (Phase 2A)`** | **Screen Dimension Query Hook**: Returns dynamic host window dimensions `(Width, Height)` in `D0`. |
 | **`$A224`** | `SYS/FSX.X`<br/>`text_base + 0x0477AE` | `4E 56 00 00` | Window Manager: `WMGetDTGS` | **`[ ] Planned (Phase 2A)`** | **Desktop Graph Port Query Hook**: Returns desktop work area dimensions matching host viewport. |
-| **`$A130`** | `SYS/FSX.X`<br/>`text_base + 0x01EB30` | `48 E7 00 70` | Graph Man: `GMInitGraph` | **`[ ] Planned (Phase 2B)`** | **Native Graph Port Init**: Initializes RastPort bound to host native texture instead of physical TVRAM. |
-| **`$A170`** | `SYS/FSX.X`<br/>`text_base + 0x0204C2` | `4E 56 FF D0` | Graph Man: `GMLine` | **`[ ] Planned (Phase 2B)`** | **Native Line Drawing**: Hardware-accelerated line primitive rendered via `wgpu` or SIMD CPU rasterizer. |
-| **`$A172`** | `SYS/FSX.X`<br/>`text_base + 0x020A84` | `4E 56 FF C0` | Graph Man: `GMFrameRect` | **`[ ] Planned (Phase 2B)`** | **Native Rect Outline**: 1-pixel / patterned rectangle outline on host surface. |
-| **`$A173`** | `SYS/FSX.X`<br/>`text_base + 0x020A88` | `4E 56 FF C0` | Graph Man: `GMFillRect` | **`[ ] Planned (Phase 2B)`** | **Native Rect Fill**: Pattern/solid rectangle fill bypassing TVRAM plane loops. |
+| **`$A227`** | `SYS/FSX.X`<br/>`text_base + 0x047DCE` | `4E 56 00 00` | Sub-Window Manager: `WSOpen` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Allocator**: Intercepts sub-window opening, allocates host `VirtualGvramSurface`, and binds to `WSRecord`. |
+| **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
+| **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
+| **`$FE88`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
+| **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
+| **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |
+| **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554AA` | `00 02 1A D8` | Driver Table +0x0C (`RRect`) | **`[ ] Planned (Phase 2B)`** | **Native Rounded Rect Hypercall**: Antialiased GPU rounded rectangle primitive. |
+| **`$FE8C`** | `SYS/FSX.X`<br/>`text_base + 0x554AE` | `00 02 19 52` | Driver Table +0x10 (`Oval`) | **`[ ] Planned (Phase 2B)`** | **Native Oval Hypercall**: Antialiased GPU ellipse/oval primitive. |
+| **`$FE8D`** | `SYS/FSX.X`<br/>`text_base + 0x554B2` | `00 02 22 D6` | Driver Table +0x14 (`Arc`) | **`[ ] Planned (Phase 2B)`** | **Native Arc Hypercall**: GPU arc and pie wedge primitive. |
+| **`$FE8E`** | `SYS/FSX.X`<br/>`text_base + 0x554B6` | `00 02 16 D4` | Driver Table +0x18 (`Poly`) | **`[ ] Planned (Phase 2B)`** | **Native Polygon Hypercall**: GPU convex/concave polygon rasterizer. |
+| **`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x554BA` | `00 02 29 A6` | Driver Table +0x1C (`Rgn`) | **`[ ] Planned (Phase 2B)`** | **Native Region Hypercall**: Fast GPU multi-rectangle stencil/scissor region fill. |
+| **`$FE90`** | `SYS/FSX.X`<br/>`text_base + 0x554BE` | `00 02 35 48` | Driver Table +0x20 (`Bits`) | **`[ ] Planned (Phase 2B)`** | **Native BitBlt Hypercall**: GPU texture-to-texture bit-block transfer with alpha masking and scaling. |
+| **`$FE91`** | `SYS/FSX.X`<br/>`text_base + 0x554C2` | `00 03 42 84` | Driver Table +0x24 (`Text`) | **`[ ] Planned (Phase 2B)`** | **Native Text Hypercall**: High-DPI font rendering with sub-pixel antialiasing and JIS Kanji support. |
 | **`$A17E`** | `SYS/FSX.X`<br/>`text_base + 0x01D746` | `4E 56 FF 4A` | Graph Man: `GMScroll` | **`[ ] Planned (Phase 2B)`** | **Native Surface Scroll**: Instant GPU texture blit bypassing CRTC raster copy and TVRAM 128B stride. |
-| **`$A17F`** | `SYS/FSX.X`<br/>`text_base + 0x023288` | `4E 56 FF 10` | Graph Man: `GMCopy` | **`[ ] Planned (Phase 2B)`** | **Native BitMap Blit**: Alpha-blended and masked bit-block transfers on host surfaces. |
-| **`$A191`** | `SYS/FSX.X`<br/>`text_base + 0x0256FA` | `4E 56 FF 00` | Graph Man: `GMDrawStr` | **`[ ] Planned (Phase 2B)`** | **Native Text Rendering**: TrueType / high-DPI antialiased font rendering with 16/24-dot fallback. |
-| **`$A1CA`** | `SYS/FSX.X`<br/>`text_base + 0x02F1F6` | `42 A7 3F 28` | Graph Man: `GMNewBits` | **`[ ] Planned (Phase 2B)`** | **Native BitMap Allocation**: Allocates pixel buffers in host memory instead of physical VRAM. |
-| **`$A1CC`** | `SYS/FSX.X`<br/>`text_base + 0x02F2C8` | `4E 56 00 00` | Graph Man: `GMLockBits` | **`[ ] Planned (Phase 2B)`** | **Native BitMap Lock**: Returns virtual host pointer / handle for direct rendering. |
-| **`$A1CD`** | `SYS/FSX.X`<br/>`text_base + 0x02F30E` | `40 40 20 10` | Graph Man: `GMUnlockBits` | **`[ ] Planned (Phase 2B)`** | **Native BitMap Unlock**: Flushes dirty regions to host GPU texture. |
 | **`WM-Rootless`** | `SYS/FSX.X`<br/>`text_base + 0x0476D8` | Various | Window Manager Rootless Hook | **`[ ] Planned (Phase 2C)`** | **Host OS Window Decoupling**: Maps SX-Window windows directly to host OS desktop windows (`winit`). |
