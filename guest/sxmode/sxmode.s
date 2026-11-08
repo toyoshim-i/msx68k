@@ -303,6 +303,11 @@ win_is_active:
 	cmpi.w	#3, d0			; W_ININSIDE (3)
 	bne.s	post_mouse_event
 
+	* Set Port to Window before converting coordinates
+	move.l	win_ptr(pc), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+
 	* Convert global click coordinates to window-local coordinates:
 	move.l	event_where(pc), -(sp)
 	SXCALL	GMGlobalToLocal		; $A13F
@@ -454,23 +459,42 @@ draw_window_contents:
 	addq.l	#4, sp
 
 	* 4. Invert active button
+	* Set foreground color to 2 (XOR mask: 9 ^ 2 = 11, 11 ^ 2 = 9)
+	move.w	#2, -(sp)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+
+	* Set pen mode to G_XOR (3)
+	move.w	#3, -(sp)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+
 	move.w	active_mode(pc), d0
 	beq.s	invert_0
 	cmpi.w	#1, d0
 	beq.s	invert_1
-	clr.w	-(sp)			; mode = 0
-	pea	btn2_rect(pc)		; rect
+	pea	btn2_rect(pc)
 	bra.s	do_invert
 invert_0:
-	clr.w	-(sp)			; mode = 0
-	pea	btn0_rect(pc)		; rect
+	pea	btn0_rect(pc)
 	bra.s	do_invert
 invert_1:
-	clr.w	-(sp)			; mode = 0
-	pea	btn1_rect(pc)		; rect
+	pea	btn1_rect(pc)
 do_invert:
-	SXCALL	GMInvertRect		; $A1A3
-	addq.l	#6, sp
+	* Fill active button rectangle in XOR mode
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+
+	* Restore pen mode to G_PSET (0)
+	clr.w	-(sp)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+
+	* Restore foreground color to G_BLACK (11)
+	move.w	#11, -(sp)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+
 	rts
 
 * -----------------------------------------------------------------------------

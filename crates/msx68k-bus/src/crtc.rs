@@ -190,9 +190,9 @@ impl Crtc {
     fn reg_mask(reg_idx: usize) -> u16 {
         match reg_idx {
             0..=3 => 0x00FF,
-            4..=7 => 0x03FF,
+            4..=7 => 0x07FF,
             8 => 0x00FF,
-            9..=11 => 0x03FF,
+            9..=11 => 0x07FF,
             12..=13 => 0x03FF,
             14..=19 => 0x01FF,
             20 => 0x071F,
@@ -444,15 +444,15 @@ impl Crtc {
         while self.cycle_in_raster >= scanline_cycles {
             self.cycle_in_raster -= scanline_cycles;
 
-            let v_total = (self.regs[4] & 0x03FF).max(256);
+            let v_total = (self.regs[4] & 0x07FF).max(256);
             if self.current_raster >= v_total {
                 self.current_raster = 0;
             } else {
                 self.current_raster += 1;
             }
 
-            let v_disp_start = (self.regs[6] & 0x03FF).saturating_add(1);
-            let v_disp_end = (self.regs[7] & 0x03FF).saturating_add(1);
+            let v_disp_start = (self.regs[6] & 0x07FF).saturating_add(1);
+            let v_disp_end = (self.regs[7] & 0x07FF).saturating_add(1);
             let next_v_disp =
                 self.current_raster >= v_disp_start && self.current_raster < v_disp_end;
 
