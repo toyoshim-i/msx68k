@@ -36,6 +36,9 @@ fn test_scsi_hdd_generation_and_partition_table() {
 
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
+    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
+    let _ = std::fs::write(&hds_path, &hdd_image);
+
     // Diagnostic: inspect directory structure and FAT on generated hdd_image
     {
         let part_offset = 32 * 1024;
@@ -62,7 +65,102 @@ fn test_scsi_hdd_generation_and_partition_table() {
             }
         }
 
+        // Verify directory organization in generated HDD
+        let mut bin_cluster = 0u16;
+        let mut x68_cluster = 0u16;
+        let mut dic_cluster = 0u16;
+        let mut root_file_count = 0;
+        let mut root_dir_count = 0;
+        for i in 0..1024 {
+            let entry_off = root_off + i * 32;
+            let b0 = hdd_image[entry_off];
+            if b0 == 0 { break; }
+            if b0 == 0xE5 { continue; }
+            let name = &hdd_image[entry_off..entry_off + 11];
+            let attr = hdd_image[entry_off + 11];
+            let clus = u16::from_le_bytes([hdd_image[entry_off + 26], hdd_image[entry_off + 27]]);
+            if (attr & 0x10) != 0 {
+                root_dir_count += 1;
+                if name.starts_with(b"BIN") { bin_cluster = clus; }
+                if name.starts_with(b"X68") { x68_cluster = clus; }
+                if name.starts_with(b"DIC") { dic_cluster = clus; }
+            } else {
+                root_file_count += 1;
+            }
+        }
+
+        assert!(root_dir_count >= 8, "Expected subdirectories (BIN, SYS, SHELL, X68, DIC, FONT, etc.) in root");
+        assert!(root_file_count <= 10, "Root directory must not be cluttered with application files (count={})", root_file_count);
+        assert!(bin_cluster >= 2, "BIN directory must exist in root");
+        assert!(x68_cluster >= 2, "X68 directory must exist in root");
+        assert!(dic_cluster >= 2, "DIC directory must exist in root");
+
+        // Verify root directory files:
+        let mut found_root_sxmode = false;
+        for i in 0..1024 {
+            let entry_off = root_off + i * 32;
+            let b0 = hdd_image[entry_off];
+            if b0 == 0 { break; }
+            if b0 == 0xE5 { continue; }
+            let name = &hdd_image[entry_off..entry_off + 11];
+            let attr = hdd_image[entry_off + 11];
+            if (attr & 0x10) == 0 && name.starts_with(b"SXMODE") {
+                found_root_sxmode = true;
+            }
+        }
+        assert!(found_root_sxmode, "SXMODE.X must be present in root A:\\ for 1-click access");
+
+        // Verify SHELL/SXWIN.ENV contains official search path with A:\BIN and A:\X68
+        assert!(
+            hdd_image.windows(b"path=A:\\;A:\\SHELL;A:\\SYS;A:\\BIN;A:\\X68;".len()).any(|w| w == b"path=A:\\;A:\\SHELL;A:\\SYS;A:\\BIN;A:\\X68;"),
+            "SXWIN.ENV must contain official search path with A:\\BIN and A:\\X68"
+        );
+
+        // Verify ｺﾝｿｰﾙ.ENV retains original -Ccommand.x without database corruption
+        assert!(
+            hdd_image.windows(b"-Ccommand.x".len()).any(|w| w == b"-Ccommand.x"),
+            "ｺﾝｿｰﾙ.ENV must preserve original -Ccommand.x"
+        );
+
+        // Verify files in X68 directory
+        let x68_off = data_off + ((x68_cluster as usize) - 2) * 1024;
+        let mut found_sxmode = false;
+        let mut found_hdformat = false;
+        let mut x68_file_count = 0;
+        for i in 0..128 {
+            let entry_off = x68_off + i * 32;
+            let b0 = hdd_image[entry_off];
+            if b0 == 0 { break; }
+            if b0 == 0xE5 { continue; }
+            let name = &hdd_image[entry_off..entry_off + 11];
+            let attr = hdd_image[entry_off + 11];
+            if (attr & 0x10) == 0 {
+                x68_file_count += 1;
+                if name.starts_with(b"SXMODE") { found_sxmode = true; }
+                if name.starts_with(b"HD") { found_hdformat = true; }
+            }
+        }
+        assert!(x68_file_count >= 20, "X68 directory must contain applications and tools (found={})", x68_file_count);
+        assert!(found_sxmode, "SXMODE.X must be in X68 directory");
+        assert!(found_hdformat, "HDFORMAT must be in X68 directory");
+
+        // Verify dictionaries in DIC directory
+        let dic_off = data_off + ((dic_cluster as usize) - 2) * 1024;
+        let mut found_x68k_dic = false;
+        for i in 0..32 {
+            let entry_off = dic_off + i * 32;
+            let b0 = hdd_image[entry_off];
+            if b0 == 0 { break; }
+            if b0 == 0xE5 { continue; }
+            let name = &hdd_image[entry_off..entry_off + 11];
+            if name.starts_with(b"X68K") && name.ends_with(b"DIC") {
+                found_x68k_dic = true;
+            }
+        }
+        assert!(found_x68k_dic, "X68K.DIC must be located in DIC directory");
+
         // Scan SHELL directory
+        let mut found_sxcon = false;
         if shell_cluster >= 2 {
             let sh_off = data_off + ((shell_cluster as usize) - 2) * 1024;
             eprintln!("[HDD Check] SHELL directory at cluster {}, offset {}:", shell_cluster, sh_off);
@@ -76,6 +174,13 @@ fn test_scsi_hdd_generation_and_partition_table() {
                 let clus = u16::from_le_bytes([hdd_image[entry_off + 26], hdd_image[entry_off + 27]]);
                 let sz = u32::from_le_bytes(hdd_image[entry_off + 28..entry_off + 32].try_into().unwrap());
                 eprintln!("  [SHELL Entry {:2}] {:?} attr={:#02x} clus={} sz={}", i, String::from_utf8_lossy(name), attr, clus, sz);
+
+                if name.starts_with(b"SXCON") && name[8..].starts_with(b"X") {
+                    found_sxcon = true;
+                    assert_eq!(sz, 39558, "SXCON.X size must be 39,558 bytes");
+                    let file_off = data_off + ((clus as usize) - 2) * 1024;
+                    assert_eq!(&hdd_image[file_off..file_off + 2], b"HU", "SXCON.X must start with 'HU' magic");
+                }
 
                 if name.starts_with(b"SXWIN") && !name.ends_with(b"ENV") {
                     // Check FAT chain for SXWIN.X
@@ -91,6 +196,7 @@ fn test_scsi_hdd_generation_and_partition_table() {
                 }
             }
         }
+        assert!(found_sxcon, "SHELL/SXCON.X must be recovered and present in SHELL directory");
     }
     assert!(hdd_image.len() >= 32 * 1024 * 1024);
 
@@ -462,6 +568,9 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
 
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
+    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
+    let _ = std::fs::write(&hds_path, &hdd_image);
+
     let mut vm = X68kVm::new(
         VmConfig::master_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
@@ -533,6 +642,27 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         "SX-Window cursor coordinates at dynamic global vector (text_base + $549F6) must match host mouse position"
     );
 
+    assert!(
+        vm.bus.is_mouse_polling_active(),
+        "Mouse polling must be active once SX-Window desktop is running"
+    );
+
+    let vec_a44e = vm.bus.read_u32(text_base + 0x1538, true).unwrap();
+    let vec_a44f = vm.bus.read_u32(text_base + 0x153C, true).unwrap();
+    let unimpl = text_base + 0x0366;
+    eprintln!(
+        "A44E: {:#010x}, A44F: {:#010x}, unimpl: {:#010x}",
+        vec_a44e, vec_a44f, unimpl
+    );
+    assert_ne!(
+        vec_a44e, unimpl,
+        "Trap $A44E must be installed by SHELL/SXCON.X (got unimpl handler)"
+    );
+    assert_ne!(
+        vec_a44f, unimpl,
+        "Trap $A44F must be installed by SHELL/SXCON.X (got unimpl handler)"
+    );
+
     // Verify drive mapping table at $1C7E..$1C82 and boot drive at $1C15:
     // Drive A: ($1C7E) -> Physical Drive 0 (SCSI HDD)
     // Drive B: ($1C7F) -> Physical Drive 1 (Floppy Drive 0)
@@ -591,6 +721,41 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let ext_y_byte = 600 * 128 + 20 * 2; // y=600 (>512)
     let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
     assert_ne!(ext_y_word, 0, "Extended vertical area (y > 512) must contain desktop pattern");
+
+    // Verify SXMODE.X execution on the running SX-Window system:
+    let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
+    let inc_dir = workspace_root.join("guest/include");
+    let sxmode_bytes = msx68k_bus::guest_build::build_guest_x_executable(&sxmode_src, &[&inc_dir])
+        .expect("Must build SXMODE.X");
+
+    // Load SXMODE.X into high RAM (at 0x0020_0000)
+    let app_load_addr = 0x0020_0000;
+    let text_size = u32::from_be_bytes([sxmode_bytes[12], sxmode_bytes[13], sxmode_bytes[14], sxmode_bytes[15]]);
+    let text_payload = &sxmode_bytes[64..64 + text_size as usize];
+    for (i, &b) in text_payload.iter().enumerate() {
+        vm.bus.write_u8(app_load_addr + i as u32, b, true).unwrap();
+    }
+
+    // Test CLI execution: "SXMODE 2" (switch to 1024x1024)
+    let cmdline_addr = 0x0022_0000;
+    let cmd_str = b"\x012\0";
+    for (i, &b) in cmd_str.iter().enumerate() {
+        vm.bus.write_u8(cmdline_addr + i as u32, b, true).unwrap();
+    }
+
+    vm.cpu_state.a[0] = 0x0021_0000; // PSP
+    vm.cpu_state.a[2] = cmdline_addr; // Command line buffer pointer
+    vm.cpu_state.a[7] = 0x0023_0000; // Stack pointer
+    vm.cpu_state.pc = app_load_addr + 0x0020; // _start (offset 0x20 in text)
+
+    for _ in 0..500 {
+        let opcode = vm.bus.read_u16(vm.cpu_state.pc, true).unwrap_or(0);
+        if opcode == 0xFF4C {
+            break;
+        }
+        vm.step();
+    }
+    assert_eq!(vm.bus.crtc.active_resolution(), (1024, 1024), "SXMODE 2 CLI must switch to 1024x1024");
 }
 
 #[test]
@@ -787,6 +952,9 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+
+    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
+    let _ = std::fs::write(&hds_path, &hdd_image);
 
     let mut vm = X68kVm::new(
         VmConfig::master_sx()

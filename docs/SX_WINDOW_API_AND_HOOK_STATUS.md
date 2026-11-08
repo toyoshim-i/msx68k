@@ -681,11 +681,22 @@ Leverages `third_party/rhas` (HAS060-compatible MC68000 cross-assembler) and `th
 
 ### 7.3 Guest Utility: `SXMODE.X` (`guest/sxmode/sxmode.s`)
 A hybrid CLI and interactive SX-Window GUI application for querying and switching SX-Window desktop resolutions, adhering strictly to the verified binary format of `SYS/FSX.X` and `カレンダ.X`:
-- **Binary Structure & SX-Window Compatibility**:
-  - Contains mandatory 32-byte `'OBJR'` header at `.text + 0x0000` (`magic = 'OBJR'`, `text_size`, `work_size = $00001800` [6 KB], `stack_size = app_stack_top - objr_header`).
-  - Executable entry point at `.text + 0x0020` (`_start`), allowing SX-Window Process Manager (`SYS/FSX.X` offset `0x14090`) to recognize and run it directly as a cooperative GUI desktop task rather than falling back to console mode.
-- **Entry Register Preservation**:
-  - On entry, preserves `A0` (SX Task Block pointer, where `8(A0)` is Task ID) and `A1` (application base address) into `D2` and `D3`, and copies `A2` (command line buffer pointer) into `A3`.
+- **32-Byte 'OBJR' Header Structure & Dual Entry Points**:
+  - `+0x00`: `'OBJR'` magic (`4F 42 4A 52`).
+  - `+0x04`: `text_size` (32-bit big-endian).
+  - `+0x08`: `gui_entry_offset` (32-bit big-endian offset from `OBJR` where `SYS/FSX.X` task dispatcher sets initial `PC` when launched from SX-Window Filer).
+  - `+0x0C`: `stack_size` (32-bit big-endian, initial stack offset where `SYS/FSX.X` sets initial `USP`).
+  - `+0x10`: `heap_size` (32-bit big-endian extra size allocated by `SYS/FSX.X` via `MALLOC $A003`).
+  - `+0x14..+0x1C`: reserved (12 bytes, zeroes).
+  - Dual entry points:
+    - **CLI Entry Point (`exec = 0x0000_0020`)**: Used when invoked from Human68k `COMMAND.X` (`DOS _EXEC`). Jumps to `_start` to parse CLI arguments, apply resolution, and exit via `DOS _EXIT2` without launching GUI.
+    - **GUI Entry Point (`gui_entry_offset`)**: Used by SX-Window Process Manager (`SYS/FSX.X`) when double-clicked in Filer. Jumps directly to `gui_start`.
+- **System Error 2 (Address Error) Root Cause & Fix**:
+  - *Cause*: `OBJR[+0x08]` was previously set to `$00001800` (mistakenly assuming it was work area size). When double-clicked in Filer, `SYS/FSX.X` line `0x0C4F20` (`add.l 8(a1), a0; move.l a0, 0x01BC(a2)`) set initial PC to `code_base + 0x1800`, jumping into unmapped memory past the binary end and triggering 68000 Exception Vector 3 (Address Error / "システムエラー２でドクロ").
+  - *Fix*: Set `OBJR[+0x08]` to `gui_start - objr_header`. On GUI entry, `PC` starts accurately at `gui_start`, queries `TSGetID` (`$A360`), initializes via `TSInitApp` (`$A350`), and opens the window without any crash.
+- **Entry Register Handling**:
+  - Works whether entered via CLI or SX-Window Process Manager. Switches stack immediately to internal 2 KB application stack (`app_stack_top`).
+  - Obtains Task ID cleanly via `TSGetID` (`$A360`), which queries `SYS/FSX.X` kernel directly, eliminating reliance on entry pointer registers.
 - **CLI Mode**:
   - Reads command line argument buffer from `A3` (Human68k ABI: `0(A3)` is length byte, `1(A3)` is argument characters).
   - Supported CLI options:
@@ -696,9 +707,11 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
 - **Interactive GUI Mode (Launched without arguments in SX-Window)**:
   - Detects SX-Window runtime by checking Vector #10 (`Line 1010 Emulator` at `$0000_0028 < $00E0_0000`).
   - Switches stack to dedicated 2 KB application stack (`app_stack_top`).
-  - Initializes application task via `TSInitApp` (`$A350`), passing the 6 KB work buffer (`work_area: .ds.b 6144`, which `SYS/FSX.X` clears by writing 5,962 zeroes) and Task ID from `8(A0)`.
-  - Queries `TSGetID` (`$A360`).
-  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=270, right=400)` with Pascal string title (`6, "SXMODE", 0`).
+  - **Task ID Resolution & App Initialization**:
+    - When launched by SX-Window Process Manager (`SYS/FSX.X`), `%a0` points to the Task Control Block, and `8(%a0)` contains the assigned Task ID.
+    - If `8(%a0)` is not positive (or when invoked from CLI fallback), queries `TSGetID(-1)` (`$A360` with a negative word pushed on stack, matching `SYS/FSX.X`'s handler at `0x1481e` which requires `4(USP) < 0` to return the current task ID).
+    - Stores the verified Task ID in `app_task_id`, then passes it to `TSInitApp` (`$A350`) alongside the 6 KB work buffer (`work_area: .ds.b 6144`, which `SYS/FSX.X` clears by writing 5,962 zeroes).
+  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=270, right=400)` with Pascal string title (`6, "SXMODE", 0`) and `refCon = app_task_id`.
   - Sets port (`GMSetGraph` `$A131`), selects 12×13 system font (`GMFontKind` `$A18B`, `GMFontSize` `$A18E`), and renders three framed buttons using Pascal strings with `GMDrawStrL` (`$A190`):
     - Button 0 (`y=16..46, x=20..200`): `" 768 x 512 "`
     - Button 1 (`y=56..86, x=20..200`): `"1024 x 768 "`
@@ -712,7 +725,21 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
       - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit, invokes `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) to dynamically resize the desktop in real time, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
 - **Console Fallback Mode (Launched without arguments outside SX-Window)**:
   - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> 0`) and exits cleanly.
-- **SCSI HDD Injection**: Built automatically during `build_bootable_sxwin_scsi_hdd` and placed into `A:\SXMODE.X` and `A:\BIN\SXMODE.X`.
+- **SCSI HDD Installation & File Layout**:
+  - `build_bootable_sxwin_scsi_hdd` organizes files into the official Sharp `SX31_HD.INS` HDD hierarchy:
+    - Root `A:\`: contains standard system files (`HUMAN.SYS`, `COMMAND.X`, `CONFIG.SYS`, `AUTOEXEC.BAT`, `STARTUP.ENV`, `KEY.SYS`, `USKCG.SYS`, `BEEP.SYS`), `SXMODE.X` (for 1-click access), and official subdirectories.
+    - `\X68`: contains all 32 desktop applications and tools from `SXWIN312.XDF` (`カレンダ.X`, `電卓.X`, `時計.X`, `コントロ.X`, etc.), `HDフォーマット.X`, and `SXMODE.X`.
+    - `\DIC`: contains Japanese dictionary files `X68K.DIC` and `POST.DIC` from `SXWIN315.XDF`.
+    - `\SHELL`: contains shell components including recovered `SHELL\SXCON.X` (39,558 bytes), which initializes `Trap $A44E` and `Trap $A44F` (`__SXSetVector`) during `SXWIN.X` boot, enabling console execution for `ｼｬｰﾍﾟﾝ\EXCOM\CONW.EX`.
+    - `\FONT`: contains outline fonts (`*.IFM`, etc.) from `SXWIN313.XDF`.
+    - `\SAMPLE`: contains sample media files from `SXWIN314.XDF`.
+    - `\INST`: contains installation utilities from `SXWIN316.XDF`.
+    - `CONFIG.SYS`: automatically patched via byte-level replacement to `/DA:\DIC\X68K.DIC` without Shift-JIS / UTF-8 corruption.
+    - `SHELL/SXWIN.ENV`: configured with canonical search path `path=A:\;A:\SHELL;A:\SYS;A:\BIN;A:\X68;A:\ｼｬｰﾍﾟﾝ;A:\ｼｬｰﾍﾟﾝ\EXCOM;A:\FONT;A:\SAMPLE;`.
+    - `.ENV` Files (`ｼｬｰﾍﾟﾝ\ｺﾝｿｰﾙ.ENV` etc.): preserved byte-for-byte as original binary `'EdEV'` databases without offset distortion.
+  - **Mouse Startup Acceleration**:
+    - During boot and title sequences, VM executes in unpaced Burst mode until graphics desktop mode is reached and active mouse polling begins (`is_mouse_polling_active` checks `vicon` graphics display registers and `scc.poll_count() >= 8`).
+    - Once mouse polling starts, peripheral pacing locks to exact 60Hz wall-clock time (`run_burst_frame` with 166,667 10MHz ticks/frame).
 
 ### 7.4 Host Emulator Integration
 - **CLI Flag `--resolution <WxH>`**: Configures the initial screen mode (`768x512`, `1024x768`, `1024x1024`).

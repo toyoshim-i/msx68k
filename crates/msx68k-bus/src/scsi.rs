@@ -1342,6 +1342,23 @@ fn make_file_key(f: &ExtractedFile) -> FileKey {
     )
 }
 
+fn replace_ascii_case_insensitive(data: &[u8], target: &[u8], replacement: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        if i + target.len() <= data.len()
+            && data[i..i + target.len()].eq_ignore_ascii_case(target)
+        {
+            result.extend_from_slice(replacement);
+            i += target.len();
+        } else {
+            result.push(data[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Constructs a bootable all-in-one SX-Window v3.1 SCSI Hard Disk image (`.HDF` / `.HDS`).
 ///
 /// Merges all files from `human_xdf` (`HUMAN302.XDF`) and `sxwin_xdfs` (`SXWIN311.XDF`..`SXWIN316.XDF`)
@@ -1389,60 +1406,131 @@ pub fn build_bootable_sxwin_scsi_hdd(
     for f in extract_files_from_xdf(human_xdf) {
         merged_map.insert(make_file_key(&f), f);
     }
-    for (_label, xdf_bytes) in sxwin_xdfs {
-        for f in extract_files_from_xdf(xdf_bytes) {
+    for (label, xdf_bytes) in sxwin_xdfs {
+        for mut f in extract_files_from_xdf(xdf_bytes) {
+            // Organize files according to official Sharp SX31_HD.INS layout:
+            // 1) SXWIN312 contains desktop applications and tools (all in root on floppy).
+            //    Move them into \X68 on HDD.
+            if *label == "SXWIN312" && f.path_dirs.is_empty() {
+                let mut x68_dir = [b' '; 8];
+                x68_dir[..3].copy_from_slice(b"X68");
+                f.path_dirs = vec![(x68_dir, [b' '; 3], [0u8; 10])];
+            }
+            // 2) SXWIN315 contains Japanese dictionaries X68K.DIC and POST.DIC.
+            //    Move them into \DIC on HDD. Any dictionary maintenance tools go to \X68.
+            if *label == "SXWIN315" && f.path_dirs.is_empty() {
+                let ext = normalize_sjis(&f.raw_ext);
+                if ext.starts_with(b"DIC") {
+                    let mut dic_dir = [b' '; 8];
+                    dic_dir[..3].copy_from_slice(b"DIC");
+                    f.path_dirs = vec![(dic_dir, [b' '; 3], [0u8; 10])];
+                } else {
+                    let mut x68_dir = [b' '; 8];
+                    x68_dir[..3].copy_from_slice(b"X68");
+                    f.path_dirs = vec![(x68_dir, [b' '; 3], [0u8; 10])];
+                }
+            }
+            // 3) SXWIN311 has HDフォーマット.X in root. Move it into \X68.
+            if *label == "SXWIN311"
+                && f.path_dirs.is_empty()
+                && normalize_sjis(&f.raw_name).starts_with(b"HD")
+            {
+                let mut x68_dir = [b' '; 8];
+                x68_dir[..3].copy_from_slice(b"X68");
+                f.path_dirs = vec![(x68_dir, [b' '; 3], [0u8; 10])];
+            }
+            // 4) SXWIN313 has outline font files. If in root, move to \FONT (unless IFM/IVM tools in \SHELL).
+            if *label == "SXWIN313" && f.path_dirs.is_empty() {
+                let name = normalize_sjis(&f.raw_name);
+                if name.starts_with(b"IFM") || name.starts_with(b"IVM") {
+                    let mut shell_dir = [b' '; 8];
+                    shell_dir[..5].copy_from_slice(b"SHELL");
+                    f.path_dirs = vec![(shell_dir, [b' '; 3], [0u8; 10])];
+                } else {
+                    let mut font_dir = [b' '; 8];
+                    font_dir[..4].copy_from_slice(b"FONT");
+                    f.path_dirs = vec![(font_dir, [b' '; 3], [0u8; 10])];
+                }
+            }
+            // 5) SXWIN314 has sample media files in root. Move to \SAMPLE.
+            if *label == "SXWIN314" && f.path_dirs.is_empty() {
+                let mut sample_dir = [b' '; 8];
+                sample_dir[..6].copy_from_slice(b"SAMPLE");
+                f.path_dirs = vec![(sample_dir, [b' '; 3], [0u8; 10])];
+            }
+            // 6) SXWIN316 has HDフォーマット.X or installer files in root. Move HD format to \X68, installer tools to \INST.
+            if *label == "SXWIN316" && f.path_dirs.is_empty() {
+                let name = normalize_sjis(&f.raw_name);
+                if name.starts_with(b"HD") {
+                    let mut x68_dir = [b' '; 8];
+                    x68_dir[..3].copy_from_slice(b"X68");
+                    f.path_dirs = vec![(x68_dir, [b' '; 3], [0u8; 10])];
+                } else {
+                    let mut inst_dir = [b' '; 8];
+                    inst_dir[..4].copy_from_slice(b"INST");
+                    f.path_dirs = vec![(inst_dir, [b' '; 3], [0u8; 10])];
+                }
+            }
             merged_map.insert(make_file_key(&f), f);
+        }
+
+        // Recover deleted SHELL/SXCON.X from SXWIN311.XDF
+        if *label == "SXWIN311" {
+            const SXCON_OFFSET: usize = 0x25800;
+            const SXCON_SIZE: usize = 39558;
+            if xdf_bytes.len() >= SXCON_OFFSET + SXCON_SIZE
+                && &xdf_bytes[SXCON_OFFSET..SXCON_OFFSET + 2] == b"HU"
+            {
+                let mut shell_dir = [b' '; 8];
+                shell_dir[..5].copy_from_slice(b"SHELL");
+                let mut raw_name = [b' '; 8];
+                raw_name[..5].copy_from_slice(b"SXCON");
+                let mut raw_ext = [b' '; 3];
+                raw_ext[..1].copy_from_slice(b"X");
+                let f_sxcon = ExtractedFile {
+                    path_dirs: vec![(shell_dir, [b' '; 3], [0u8; 10])],
+                    raw_name,
+                    raw_ext,
+                    raw_name2: [0u8; 10],
+                    attr: 0x20,
+                    time: 0x6000,
+                    date: 0x1CF4,
+                    data: xdf_bytes[SXCON_OFFSET..SXCON_OFFSET + SXCON_SIZE].to_vec(),
+                };
+                merged_map.insert(make_file_key(&f_sxcon), f_sxcon);
+            }
         }
     }
 
     // Apply SX-Window on SCSI patches:
     for f in merged_map.values_mut() {
-        // In CONFIG.SYS, redirect /DB:\X68K.DIC to /DA:\X68K.DIC so ASK68K dictionary is found on SCSI HDD
+        // In CONFIG.SYS, redirect dictionary path to \DIC\X68K.DIC
         if f.path_dirs.is_empty()
             && normalize_sjis(&f.raw_name).starts_with(b"CONFIG")
             && normalize_sjis(&f.raw_ext).starts_with(b"SYS")
         {
-            if let Some(pos) = f.data.windows(13).position(|w| w == b"/DB:\\X68K.DIC") {
-                f.data[pos..pos + 13].copy_from_slice(b"/DA:\\X68K.DIC");
-            }
+            f.data = replace_ascii_case_insensitive(&f.data, b"/DB:\\X68K.DIC", b"/DA:\\DIC\\X68K.DIC");
+            f.data = replace_ascii_case_insensitive(&f.data, b"/DA:\\X68K.DIC", b"/DA:\\DIC\\X68K.DIC");
+            f.data = replace_ascii_case_insensitive(&f.data, b"/DA:\\ASK\\X68K.DIC", b"/DA:\\DIC\\X68K.DIC");
         }
-        // In SHELL/SXWIN.ENV, ensure path includes A:\ directories and replace B:\ with A:\
+        // In SHELL/SXWIN.ENV, ensure path includes all official application directories:
         if f.path_dirs.len() == 1
             && normalize_sjis(&f.path_dirs[0].0).starts_with(b"SHELL")
             && normalize_sjis(&f.raw_name).starts_with(b"SXWIN")
             && normalize_sjis(&f.raw_ext).starts_with(b"ENV")
         {
-            let mut i = 0;
-            while i + 3 <= f.data.len() {
-                if &f.data[i..i + 3] == b"B:\\" || &f.data[i..i + 3] == b"b:\\" {
-                    f.data[i] = b'A';
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            if let Some(pos) = f.data.windows(5).position(|w| w == b"path=") {
-                let insert_pos = pos + 5;
-                if !f.data[insert_pos..].starts_with(b"A:\\;") {
-                    let mut new_data = Vec::with_capacity(f.data.len() + 32);
-                    new_data.extend_from_slice(&f.data[..insert_pos]);
-                    new_data.extend_from_slice(b"A:\\;A:\\SHELL;A:\\SYS;A:\\BIN;");
-                    new_data.extend_from_slice(&f.data[insert_pos..]);
-                    f.data = new_data;
-                }
-            }
-            while let Some(&last) = f.data.last() {
-                if last == 0x1A || last == b'\r' || last == b'\n' || last == b' ' {
-                    f.data.pop();
-                } else {
-                    break;
-                }
-            }
-            f.data.extend_from_slice(b"\r\n");
+            const SJIS_SHARP: &[u8] = &[0xBC, 0xAC, 0xB0, 0xCD, 0xDF, 0xDD]; // ｼｬｰﾍﾟﾝ
+            let mut new_path = Vec::new();
+            new_path.extend_from_slice(b"path=A:\\;A:\\SHELL;A:\\SYS;A:\\BIN;A:\\X68;A:\\");
+            new_path.extend_from_slice(SJIS_SHARP);
+            new_path.extend_from_slice(b";A:\\");
+            new_path.extend_from_slice(SJIS_SHARP);
+            new_path.extend_from_slice(b"\\EXCOM;A:\\FONT;A:\\SAMPLE;\r\n");
+            f.data = new_path;
         }
     }
 
-    // 4b. Inject SXMODE.X built from guest/sxmode/sxmode.s
+    // 4b. Inject SXMODE.X built from guest/sxmode/sxmode.s into \BIN\SXMODE.X, \X68\SXMODE.X, and root A:\SXMODE.X
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
     let inc_dir = workspace_root.join("guest/include");
@@ -1455,9 +1543,11 @@ pub fn build_bootable_sxwin_scsi_hdd(
             let mut raw_ext = [b' '; 3];
             raw_ext[..1].copy_from_slice(b"X");
 
-            // Place in root directory A:\SXMODE.X
-            let f_root = ExtractedFile {
-                path_dirs: Vec::new(),
+            // Place in A:\X68\SXMODE.X
+            let mut x68_dir = [b' '; 8];
+            x68_dir[..3].copy_from_slice(b"X68");
+            let f_x68 = ExtractedFile {
+                path_dirs: vec![(x68_dir, [b' '; 3], [0u8; 10])],
                 raw_name,
                 raw_ext,
                 raw_name2: [0u8; 10],
@@ -1466,9 +1556,9 @@ pub fn build_bootable_sxwin_scsi_hdd(
                 date: 0x5821,
                 data: sxmode_bytes.clone(),
             };
-            merged_map.insert(make_file_key(&f_root), f_root);
+            merged_map.insert(make_file_key(&f_x68), f_x68);
 
-            // Also place in A:\BIN\SXMODE.X
+            // Place in A:\BIN\SXMODE.X
             let mut bin_dir = [b' '; 8];
             bin_dir[..3].copy_from_slice(b"BIN");
             let f_bin = ExtractedFile {
@@ -1479,9 +1569,22 @@ pub fn build_bootable_sxwin_scsi_hdd(
                 attr: 0x20,
                 time: 0x6000,
                 date: 0x5821,
-                data: sxmode_bytes,
+                data: sxmode_bytes.clone(),
             };
             merged_map.insert(make_file_key(&f_bin), f_bin);
+
+            // Also place in root A:\SXMODE.X for convenient 1-click access
+            let f_root = ExtractedFile {
+                path_dirs: Vec::new(),
+                raw_name,
+                raw_ext,
+                raw_name2: [0u8; 10],
+                attr: 0x20,
+                time: 0x6000,
+                date: 0x5821,
+                data: sxmode_bytes,
+            };
+            merged_map.insert(make_file_key(&f_root), f_root);
         }
     }
 
