@@ -233,20 +233,119 @@ impl X68kBus {
             if iocs_mouse_vec > 0x04F82A {
                 let text_base = (iocs_mouse_vec - 0x04F82A) as usize;
                 if text_base + 0x65000 <= self.main_ram.len() {
-                    let w_be = (width as u16).to_be_bytes();
-                    let h_be = (height as u16).to_be_bytes();
+                    let w_u16 = width as u16;
+                    let h_u16 = height as u16;
+                    let w_be = w_u16.to_be_bytes();
+                    let h_be = h_u16.to_be_bytes();
+
+                    // Helpers for safely reading pointers and updating kernel structures
+                    let read_ptr = |ram: &[u8], addr: usize| -> usize {
+                        if addr + 4 <= ram.len() {
+                            u32::from_be_bytes([ram[addr], ram[addr + 1], ram[addr + 2], ram[addr + 3]]) as usize
+                        } else {
+                            0
+                        }
+                    };
+
+                    let update_rect_wh = |ram: &mut [u8], addr: usize, w: u16, h: u16| {
+                        if addr + 8 <= ram.len() {
+                            ram[addr..addr + 2].copy_from_slice(&0u16.to_be_bytes());
+                            ram[addr + 2..addr + 4].copy_from_slice(&0u16.to_be_bytes());
+                            ram[addr + 4..addr + 6].copy_from_slice(&w.to_be_bytes());
+                            ram[addr + 6..addr + 8].copy_from_slice(&h.to_be_bytes());
+                        }
+                    };
+
+                    let update_bmap = |ram: &mut [u8], bmap_addr: usize, w: u16, h: u16| {
+                        if bmap_addr > 0 && bmap_addr + 10 <= ram.len() {
+                            ram[bmap_addr + 6..bmap_addr + 8].copy_from_slice(&w.to_be_bytes());
+                            ram[bmap_addr + 8..bmap_addr + 10].copy_from_slice(&h.to_be_bytes());
+                        }
+                    };
+
+                    let update_rgn_handle = |ram: &mut [u8], rgn_h_addr: usize, w: u16, h: u16, check_larger_only: bool| {
+                        let rgn_h = if rgn_h_addr + 4 <= ram.len() {
+                            u32::from_be_bytes([
+                                ram[rgn_h_addr],
+                                ram[rgn_h_addr + 1],
+                                ram[rgn_h_addr + 2],
+                                ram[rgn_h_addr + 3],
+                            ]) as usize
+                        } else {
+                            0
+                        };
+                        if rgn_h > 0 && rgn_h + 4 <= ram.len() {
+                            let rgn_ptr = u32::from_be_bytes([
+                                ram[rgn_h],
+                                ram[rgn_h + 1],
+                                ram[rgn_h + 2],
+                                ram[rgn_h + 3],
+                            ]) as usize;
+                            if rgn_ptr > 0 && rgn_ptr + 12 <= ram.len() {
+                                let size = u32::from_be_bytes([
+                                    ram[rgn_ptr],
+                                    ram[rgn_ptr + 1],
+                                    ram[rgn_ptr + 2],
+                                    ram[rgn_ptr + 3],
+                                ]);
+                                if size >= 12 {
+                                    if check_larger_only {
+                                        let cur_r = i16::from_be_bytes([ram[rgn_ptr + 8], ram[rgn_ptr + 9]]);
+                                        if cur_r > 0 && cur_r < w as i16 {
+                                            ram[rgn_ptr + 8..rgn_ptr + 10].copy_from_slice(&w.to_be_bytes());
+                                        }
+                                        let cur_b = i16::from_be_bytes([ram[rgn_ptr + 10], ram[rgn_ptr + 11]]);
+                                        if cur_b > 0 && cur_b < h as i16 {
+                                            ram[rgn_ptr + 10..rgn_ptr + 12].copy_from_slice(&h.to_be_bytes());
+                                        }
+                                    } else {
+                                        ram[rgn_ptr..rgn_ptr + 4].copy_from_slice(&12u32.to_be_bytes());
+                                        ram[rgn_ptr + 8..rgn_ptr + 10].copy_from_slice(&w.to_be_bytes());
+                                        ram[rgn_ptr + 10..rgn_ptr + 12].copy_from_slice(&h.to_be_bytes());
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    // 1. Global Screen Rects & Templates
+                    // Screen Rect at text_base + 0x54372: (0, 0, width, height)
+                    self.main_ram[text_base + 0x54372 + 4..text_base + 0x54372 + 6].copy_from_slice(&w_be);
+                    self.main_ram[text_base + 0x54372 + 6..text_base + 0x54372 + 8].copy_from_slice(&h_be);
+
+                    // Max window dimensions at text_base + 0x543B6: (width - 2, height - 24)
+                    let max_w = w_u16.saturating_sub(2);
+                    let max_h = h_u16.saturating_sub(24);
+                    self.main_ram[text_base + 0x543B6..text_base + 0x543B8].copy_from_slice(&max_w.to_be_bytes());
+                    self.main_ram[text_base + 0x543B8..text_base + 0x543BA].copy_from_slice(&max_h.to_be_bytes());
 
                     // ActiveScreenModeRecord at text_base + 0x55278
                     let active_rec = text_base + 0x55278;
                     self.main_ram[active_rec + 6..active_rec + 8].copy_from_slice(&w_be);
                     self.main_ram[active_rec + 8..active_rec + 10].copy_from_slice(&h_be);
 
+                    // Bitmap copy at text_base + 0x5528E
+                    let bmap_copy = text_base + 0x5528E;
+                    self.main_ram[bmap_copy + 6..bmap_copy + 8].copy_from_slice(&w_be);
+                    self.main_ram[bmap_copy + 8..bmap_copy + 10].copy_from_slice(&h_be);
+
+                    // Graphic Bitmap template at text_base + 0x552A4
+                    let grp_bmap = text_base + 0x552A4;
+                    self.main_ram[grp_bmap + 6..grp_bmap + 8].copy_from_slice(&w_be);
+                    self.main_ram[grp_bmap + 8..grp_bmap + 10].copy_from_slice(&h_be);
+
+                    // Default GrafPort rect template at text_base + 0x552BA
+                    let gp_tmpl = text_base + 0x552BA;
+                    self.main_ram[gp_tmpl + 4..gp_tmpl + 6].copy_from_slice(&w_be);
+                    self.main_ram[gp_tmpl + 6..gp_tmpl + 8].copy_from_slice(&h_be);
+
+                    // Mode table entries:
                     // Mode 3 (768x512) at text_base + 0x55338
                     let m3 = text_base + 0x55338;
                     self.main_ram[m3 + 6..m3 + 8].copy_from_slice(&w_be);
                     self.main_ram[m3 + 8..m3 + 10].copy_from_slice(&h_be);
 
-                    // Mode 4 (1024x424) at text_base + 0x5534E
+                    // Mode 4 (1024x424 / 1024x768) at text_base + 0x5534E
                     let m4 = text_base + 0x5534E;
                     self.main_ram[m4 + 6..m4 + 8].copy_from_slice(&w_be);
                     self.main_ram[m4 + 8..m4 + 10].copy_from_slice(&h_be);
@@ -256,8 +355,7 @@ impl X68kBus {
                     self.main_ram[m6 + 6..m6 + 8].copy_from_slice(&w_be);
                     self.main_ram[m6 + 8..m6 + 10].copy_from_slice(&h_be);
 
-                    // Physical CRT resolution table at text_base + 0x151C0
-                    // Entry 16 (CRT mode 16) at text_base + 0x15200
+                    // Physical CRT resolution table entry 16 at text_base + 0x15200
                     let crt16 = text_base + 0x15200;
                     self.main_ram[crt16..crt16 + 2].copy_from_slice(&w_be);
                     self.main_ram[crt16 + 2..crt16 + 4].copy_from_slice(&h_be);
@@ -268,100 +366,53 @@ impl X68kBus {
                     self.main_ram[text_base + 0x5525A..text_base + 0x5525E]
                         .copy_from_slice(&[0, 0, 0, 0]);
 
-                    // Desktop GrafPort pointer at text_base + 0x54384 (dtgs + 4)
-                    let dtgs = text_base + 0x54380;
-                    let gp = u32::from_be_bytes([
-                        self.main_ram[dtgs + 4],
-                        self.main_ram[dtgs + 5],
-                        self.main_ram[dtgs + 6],
-                        self.main_ram[dtgs + 7],
-                    ]) as usize;
-                    if gp > 0 && gp + 0x20 <= self.main_ram.len() {
-                        self.main_ram[gp + 4..gp + 6].copy_from_slice(&0u16.to_be_bytes());
-                        self.main_ram[gp + 6..gp + 8].copy_from_slice(&0u16.to_be_bytes());
-                        self.main_ram[gp + 8..gp + 10].copy_from_slice(&w_be);
-                        self.main_ram[gp + 10..gp + 12].copy_from_slice(&h_be);
+                    // 2. Desktop GrafPort (desktopGrafPort = *(text_base + 0x5437A))
+                    let desktop_gp = read_ptr(&self.main_ram, text_base + 0x5437A);
+                    if desktop_gp > 0 && desktop_gp + 0x20 <= self.main_ram.len() {
+                        // desktopGrafPort + 0x04..0x0C (rect): (0, 0, width, height)
+                        update_rect_wh(&mut self.main_ram, desktop_gp + 4, w_u16, h_u16);
+                        // bmap = *(desktopGrafPort + 0x00)
+                        let bmap = read_ptr(&self.main_ram, desktop_gp);
+                        update_bmap(&mut self.main_ram, bmap, w_u16, h_u16);
+                        // vis_h = *(desktopGrafPort + 0x10)
+                        update_rgn_handle(&mut self.main_ram, desktop_gp + 0x10, w_u16, h_u16, false);
+                        // clip_h = *(desktopGrafPort + 0x14)
+                        update_rgn_handle(&mut self.main_ram, desktop_gp + 0x14, w_u16, h_u16, true);
+                    }
 
-                        // Screen BitMap pointed by gp + 0:
-                        let bm = u32::from_be_bytes([
-                            self.main_ram[gp],
-                            self.main_ram[gp + 1],
-                            self.main_ram[gp + 2],
-                            self.main_ram[gp + 3],
-                        ]) as usize;
-                        if bm > 0 && bm + 10 <= self.main_ram.len() {
-                            self.main_ram[bm + 6..bm + 8].copy_from_slice(&w_be);
-                            self.main_ram[bm + 8..bm + 10].copy_from_slice(&h_be);
-                        }
+                    // 3. Desktop Window (desktopWindow = *(text_base + 0x54384))
+                    let desktop_win = read_ptr(&self.main_ram, text_base + 0x54384);
+                    if desktop_win > 0 && desktop_win + 0x90 <= self.main_ram.len() {
+                        // desktopWindow + 0x04..0x0C (rect): (0, 0, width, height)
+                        update_rect_wh(&mut self.main_ram, desktop_win + 4, w_u16, h_u16);
+                        // bmap = *(desktopWindow + 0x00)
+                        let bmap = read_ptr(&self.main_ram, desktop_win);
+                        update_bmap(&mut self.main_ram, bmap, w_u16, h_u16);
+                        // Update region handles on desktopWindow:
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x10, w_u16, h_u16, false); // visRgn
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x14, w_u16, h_u16, true);  // clipRgn
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x48, w_u16, h_u16, false); // outside
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x4C, w_u16, h_u16, false); // inside (CRITICAL!)
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x88, w_u16, h_u16, false); // rgn88
+                        update_rgn_handle(&mut self.main_ram, desktop_win + 0x8C, w_u16, h_u16, false); // rgn8C
 
-                        // visRgn handle at gp + 0x10:
-                        let vis_h = u32::from_be_bytes([
-                            self.main_ram[gp + 0x10],
-                            self.main_ram[gp + 0x11],
-                            self.main_ram[gp + 0x12],
-                            self.main_ram[gp + 0x13],
-                        ]) as usize;
-                        if vis_h > 0 && vis_h + 4 <= self.main_ram.len() {
-                            let vis_ptr = u32::from_be_bytes([
-                                self.main_ram[vis_h],
-                                self.main_ram[vis_h + 1],
-                                self.main_ram[vis_h + 2],
-                                self.main_ram[vis_h + 3],
-                            ]) as usize;
-                            if vis_ptr > 0 && vis_ptr + 12 <= self.main_ram.len() {
-                                self.main_ram[vis_ptr + 8..vis_ptr + 10].copy_from_slice(&w_be);
-                                self.main_ram[vis_ptr + 10..vis_ptr + 12].copy_from_slice(&h_be);
-                            }
-                        }
-
-                        // clipRgn handle at gp + 0x14:
-                        let clip_h = u32::from_be_bytes([
-                            self.main_ram[gp + 0x14],
-                            self.main_ram[gp + 0x15],
-                            self.main_ram[gp + 0x16],
-                            self.main_ram[gp + 0x17],
-                        ]) as usize;
-                        if clip_h > 0 && clip_h + 4 <= self.main_ram.len() {
-                            let clip_ptr = u32::from_be_bytes([
-                                self.main_ram[clip_h],
-                                self.main_ram[clip_h + 1],
-                                self.main_ram[clip_h + 2],
-                                self.main_ram[clip_h + 3],
-                            ]) as usize;
-                            if clip_ptr > 0 && clip_ptr + 12 <= self.main_ram.len() {
-                                let cur_r = i16::from_be_bytes([
-                                    self.main_ram[clip_ptr + 8],
-                                    self.main_ram[clip_ptr + 9],
-                                ]);
-                                if cur_r > 0 && cur_r < width as i16 {
-                                    self.main_ram[clip_ptr + 8..clip_ptr + 10].copy_from_slice(&w_be);
-                                }
-                                let cur_b = i16::from_be_bytes([
-                                    self.main_ram[clip_ptr + 10],
-                                    self.main_ram[clip_ptr + 11],
-                                ]);
-                                if cur_b > 0 && cur_b < height as i16 {
-                                    self.main_ram[clip_ptr + 10..clip_ptr + 12].copy_from_slice(&h_be);
-                                }
-                            }
+                        // 4. Open Window Linked List (curr = *(desktopWindow + 0x80), next = *(curr + 0x66))
+                        let mut curr_win = read_ptr(&self.main_ram, desktop_win + 0x80);
+                        let mut count = 0;
+                        while curr_win > 0 && curr_win + 0x6A <= self.main_ram.len() && count < 64 {
+                            let bmap = read_ptr(&self.main_ram, curr_win);
+                            update_bmap(&mut self.main_ram, bmap, w_u16, h_u16);
+                            curr_win = read_ptr(&self.main_ram, curr_win + 0x66);
+                            count += 1;
                         }
                     }
 
                     // Menubar GrafPort pointed by dtgs + 0x46:
-                    let menu_gp = u32::from_be_bytes([
-                        self.main_ram[dtgs + 0x46],
-                        self.main_ram[dtgs + 0x47],
-                        self.main_ram[dtgs + 0x48],
-                        self.main_ram[dtgs + 0x49],
-                    ]) as usize;
+                    let dtgs = text_base + 0x54380;
+                    let menu_gp = read_ptr(&self.main_ram, dtgs + 0x46);
                     if menu_gp > 0 && menu_gp + 0x10 <= self.main_ram.len() {
                         self.main_ram[menu_gp + 8..menu_gp + 10].copy_from_slice(&w_be);
-                        let menu_bm = u32::from_be_bytes([
-                            self.main_ram[menu_gp],
-                            self.main_ram[menu_gp + 1],
-                            self.main_ram[menu_gp + 2],
-                            self.main_ram[menu_gp + 3],
-                        ]) as usize;
+                        let menu_bm = read_ptr(&self.main_ram, menu_gp);
                         if menu_bm > 0 && menu_bm + 10 <= self.main_ram.len() {
                             self.main_ram[menu_bm + 6..menu_bm + 8].copy_from_slice(&w_be);
                         }
@@ -369,12 +420,7 @@ impl X68kBus {
 
                     // Update MouseWorkArea if pointer at text_base + 0x633CA is valid
                     let a4_ptr_addr = text_base + 0x633CA;
-                    let a4 = u32::from_be_bytes([
-                        self.main_ram[a4_ptr_addr],
-                        self.main_ram[a4_ptr_addr + 1],
-                        self.main_ram[a4_ptr_addr + 2],
-                        self.main_ram[a4_ptr_addr + 3],
-                    ]) as usize;
+                    let a4 = read_ptr(&self.main_ram, a4_ptr_addr);
                     if a4 + 0x3C <= self.main_ram.len() {
                         self.main_ram[a4 + 0x34..a4 + 0x36].copy_from_slice(&0u16.to_be_bytes());
                         self.main_ram[a4 + 0x36..a4 + 0x38].copy_from_slice(&0u16.to_be_bytes());

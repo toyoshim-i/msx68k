@@ -984,6 +984,132 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         "Mouse click on Button 2 in SXMODE GUI must switch resolution to 1024x1024"
     );
 
+    // Verify desktopWindow->inside, desktopGrafPort->visible, and SXMODE.X bmap->rect
+    let dt_win = vm.bus.read_u32(text_base + 0x54384, true).unwrap();
+    assert!(dt_win > 0);
+    let inside_h = vm.bus.read_u32(dt_win + 0x4C, true).unwrap();
+    assert!(inside_h > 0);
+    let inside_ptr = vm.bus.read_u32(inside_h, true).unwrap();
+    assert!(inside_ptr > 0);
+    assert_eq!(vm.bus.read_u16(inside_ptr + 8, true).unwrap(), 1024, "desktopWindow->inside bounds.right must be 1024");
+    assert_eq!(vm.bus.read_u16(inside_ptr + 10, true).unwrap(), 1024, "desktopWindow->inside bounds.bottom must be 1024");
+
+    let dt_gp = vm.bus.read_u32(text_base + 0x5437A, true).unwrap();
+    assert!(dt_gp > 0);
+    let vis_h = vm.bus.read_u32(dt_gp + 0x10, true).unwrap();
+    assert!(vis_h > 0);
+    let vis_ptr = vm.bus.read_u32(vis_h, true).unwrap();
+    assert!(vis_ptr > 0);
+    assert_eq!(vm.bus.read_u16(vis_ptr + 8, true).unwrap(), 1024, "desktopGrafPort->visible bounds.right must be 1024");
+    assert_eq!(vm.bus.read_u16(vis_ptr + 10, true).unwrap(), 1024, "desktopGrafPort->visible bounds.bottom must be 1024");
+
+    let top_win = vm.bus.read_u32(dt_win + 0x80, true).unwrap();
+    assert!(top_win > 0);
+    let top_bmap = vm.bus.read_u32(top_win, true).unwrap();
+    assert!(top_bmap > 0);
+    assert_eq!(vm.bus.read_u16(top_bmap + 6, true).unwrap(), 1024, "SXMODE.X window->graph.bmap->rect.right must be 1024");
+    assert_eq!(vm.bus.read_u16(top_bmap + 8, true).unwrap(), 1024, "SXMODE.X window->graph.bmap->rect.bottom must be 1024");
+
+    // Inspect regions requested by parent
+    let inspect_rgn = |name: &str, h_addr: u32, bus: &mut msx68k_bus::X68kBus| {
+        let h = bus.read_u32(h_addr, true).unwrap_or(0);
+        if h > 0 {
+            let ptr = bus.read_u32(h, true).unwrap_or(0);
+            if ptr > 0 {
+                let size = bus.read_u32(ptr, true).unwrap_or(0);
+                let l = bus.read_u16(ptr + 4, true).unwrap_or(0) as i16;
+                let t = bus.read_u16(ptr + 6, true).unwrap_or(0) as i16;
+                let r = bus.read_u16(ptr + 8, true).unwrap_or(0) as i16;
+                let b = bus.read_u16(ptr + 10, true).unwrap_or(0) as i16;
+                eprintln!("  [RGN] {}: h=0x{:08X}, ptr=0x{:08X}, size={}, bounds=({}, {}, {}, {})",
+                    name, h, ptr, size, l, t, r, b);
+                if size > 12 {
+                    let mut data_words = Vec::new();
+                    for i in 0..((size - 12) / 2).min(16) {
+                        data_words.push(bus.read_u16(ptr + 12 + i * 2, true).unwrap_or(0));
+                    }
+                    eprintln!("        data: {:04X?}", data_words);
+                }
+            } else {
+                eprintln!("  [RGN] {}: h=0x{:08X}, ptr=NULL", name, h);
+            }
+        } else {
+            eprintln!("  [RGN] {}: h=NULL", name);
+        }
+    };
+
+    eprintln!("[Desktop & Window Regions after 1024x1024 switch]:");
+    inspect_rgn("desktopGrafPort->visible", dt_gp + 0x10, &mut vm.bus);
+    inspect_rgn("desktopWindow->visRgn", dt_win + 0x10, &mut vm.bus);
+    inspect_rgn("desktopWindow->outside", dt_win + 0x48, &mut vm.bus);
+    inspect_rgn("desktopWindow->inside", dt_win + 0x4C, &mut vm.bus);
+    inspect_rgn("desktopWindow->rgn88", dt_win + 0x88, &mut vm.bus);
+    inspect_rgn("desktopWindow->rgn8C", dt_win + 0x8C, &mut vm.bus);
+    inspect_rgn("SXMODE->visRgn", top_win + 0x10, &mut vm.bus);
+    inspect_rgn("SXMODE->clipping", top_win + 0x14, &mut vm.bus);
+    inspect_rgn("SXMODE->outside", top_win + 0x48, &mut vm.bus);
+    inspect_rgn("SXMODE->inside", top_win + 0x4C, &mut vm.bus);
+
+    // Drag SXMODE.X's window to (800, 550) across the 768x512 boundary
+    vm.bus.set_host_mouse_position(Some((250, 105)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..50_000 {
+        vm.step();
+    }
+    let m_x = vm.bus.read_u16(text_base + 0x549F6, true).unwrap();
+    let m_y = vm.bus.read_u16(text_base + 0x549F8, true).unwrap();
+    eprintln!("[Drag Prep] mouse pos: ({}, {})", m_x, m_y);
+
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..100_000 {
+        vm.step();
+    }
+
+    vm.bus.set_host_mouse_position(Some((800, 550)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..200_000 {
+        vm.step();
+    }
+
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..500_000 {
+        vm.step();
+    }
+
+    eprintln!("[Regions after dragging SXMODE across 768x512 boundary]:");
+    inspect_rgn("SXMODE->visRgn", top_win + 0x10, &mut vm.bus);
+    inspect_rgn("SXMODE->outside", top_win + 0x48, &mut vm.bus);
+    inspect_rgn("SXMODE->inside", top_win + 0x4C, &mut vm.bus);
+
+    let sx_inside_h = vm.bus.read_u32(top_win + 0x4C, true).unwrap();
+    let sx_inside_ptr = vm.bus.read_u32(sx_inside_h, true).unwrap();
+    let sx_inside_l = vm.bus.read_u16(sx_inside_ptr + 4, true).unwrap() as i16;
+    let sx_inside_t = vm.bus.read_u16(sx_inside_ptr + 6, true).unwrap() as i16;
+    let sx_inside_r = vm.bus.read_u16(sx_inside_ptr + 8, true).unwrap() as i16;
+    let sx_inside_b = vm.bus.read_u16(sx_inside_ptr + 10, true).unwrap() as i16;
+    assert!(sx_inside_r > 768, "Moved window inside.right must extend beyond 768, got {sx_inside_r}");
+    assert!(sx_inside_b > 512, "Moved window inside.bottom must extend beyond 512, got {sx_inside_b}");
+    assert_eq!(sx_inside_r - sx_inside_l, 220, "Moved window inside width must be 220");
+    assert_eq!(sx_inside_b - sx_inside_t, 150, "Moved window inside height must be 150");
+
+    let sx_vis_h = vm.bus.read_u32(top_win + 0x10, true).unwrap();
+    let sx_vis_ptr = vm.bus.read_u32(sx_vis_h, true).unwrap();
+    let sx_vis_w = vm.bus.read_u16(sx_vis_ptr + 8, true).unwrap() as i16;
+    let sx_vis_h_val = vm.bus.read_u16(sx_vis_ptr + 10, true).unwrap() as i16;
+    assert_eq!(sx_vis_w, 220, "SXMODE visible region width must not be clipped, expected 220, got {sx_vis_w}");
+    assert_eq!(sx_vis_h_val, 150, "SXMODE visible region height must not be clipped, expected 150, got {sx_vis_h_val}");
+
+    // Save screenshot after moving SXMODE across the 768x512 boundary
+    let (wm, hm, rgbam) = render_bus_tvram_rgba(&vm.bus);
+    assert_eq!((wm, hm), (1024, 1024));
+    if let Ok(dir) = std::env::var("MSX68K_SCREENSHOT_DIR") {
+        let moved_path = Path::new(&dir).join("sxmode_moved_beyond_768x512.png");
+        save_rgba_to_png(wm, hm, &rgbam, moved_path.to_str().unwrap());
+        eprintln!("[Screenshot Moved] Saved moved SXMODE PNG ({}x{}) to {:?}", wm, hm, moved_path);
+    }
+
     // Verify SXMODE.X execution on the running SX-Window system:
     let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
     let inc_dir = workspace_root.join("guest/include");
@@ -1325,10 +1451,29 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 6, true).unwrap(), 1024);
     assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 8, true).unwrap(), 768);
 
+    let dt_win = vm.bus.read_u32(text_base + 0x54384, true).unwrap_or(0);
+    assert!(dt_win > 0);
+    let inside_h = vm.bus.read_u32(dt_win + 0x4C, true).unwrap_or(0);
+    assert!(inside_h > 0);
+    let inside_ptr = vm.bus.read_u32(inside_h, true).unwrap_or(0);
+    assert!(inside_ptr > 0);
+    assert_eq!(vm.bus.read_u16(inside_ptr + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(inside_ptr + 10, true).unwrap(), 768);
+
+    let dt_gp = vm.bus.read_u32(text_base + 0x5437A, true).unwrap_or(0);
+    assert!(dt_gp > 0);
+    let vis_h = vm.bus.read_u32(dt_gp + 0x10, true).unwrap_or(0);
+    assert!(vis_h > 0);
+    let vis_ptr = vm.bus.read_u32(vis_h, true).unwrap_or(0);
+    assert!(vis_ptr > 0);
+    assert_eq!(vm.bus.read_u16(vis_ptr + 8, true).unwrap(), 1024);
+    assert_eq!(vm.bus.read_u16(vis_ptr + 10, true).unwrap(), 768);
+
     // Verify TVRAM contains pixels in extended areas (>768 and >512)
     let tv = vm.bus.tvram().expect("TVRAM must be allocated");
     let ext_x_byte = 50 * 128 + 52 * 2; // y=50, x=832 (>768)
     let ext_x_word = u16::from_be_bytes([tv[ext_x_byte], tv[ext_x_byte + 1]]);
+    eprintln!("  ext_x_word: 0x{:04X}", ext_x_word);
     assert_ne!(ext_x_word, 0, "Boot-time 1024x768 desktop must draw into extended horizontal area (x > 768)");
     let ext_y_byte = 600 * 128 + 20 * 2; // y=600 (>512)
     let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
