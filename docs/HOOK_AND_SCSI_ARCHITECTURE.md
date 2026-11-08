@@ -115,3 +115,10 @@ Disassembly of `IPLROM.DAT` (`$FF0000`) and `HUMAN.SYS` v3.02 (`$00AC9C`) reveal
 - Synthesizes the `"X68SCSI1"` header at `0x0000`, pure-68000 SCSI IPL at `0x0400`, partition table at `0x1000` (`"Human68k"` active partition starting at 1024-byte sector `0x20` = byte `0x8000`), and FAT16 partition boot sector + BPB at `0x8000` with zero external binary blobs.
 - Extracts all files and multi-level Shift-JIS subdirectories (`SYS`, `BIN`, `SHELL`, `ｼｬｰﾍﾟﾝ/EXCOM`, `福袋`, etc.) while preserving Human68k's 18+3 extended filename bytes (`chunk[12..22]`).
 - Automatically updates `CONFIG.SYS` (`/DA:\X68K.DIC`) and `SHELL/SXWIN.ENV` (`path=A:\;A:\SHELL;A:\SYS;A:\BIN;...`) so SX-Window v3.1 boots directly into the full GUI desktop from a single SCSI drive (`A:`) without floppy disk swaps.
+
+---
+
+## 5. SX-Window v3.1 API Catalog & Hook Status Reference
+
+For the complete disassemblies, 16 KB A-Line dispatch table analysis, 21 manager subsystems (1,050 active APIs), TVRAM `$00E00000` / CRTC `$E80000` decoupling blueprint, and the living Master Hook & Patch Tracking Table, see:
+- [SX-Window v3.1 Kernel Architecture, A-Line ($Axxx) API Catalog, and Master Hook Tracking Reference](SX_WINDOW_API_AND_HOOK_STATUS.md)
