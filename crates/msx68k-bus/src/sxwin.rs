@@ -940,6 +940,33 @@ impl X68kBus {
                             .copy_from_slice(&cur_x.to_be_bytes());
                         self.main_ram[text_base + 0x549F8..text_base + 0x549FA]
                             .copy_from_slice(&cur_y.to_be_bytes());
+
+                        // Recalculate save_buf + 0x00 cached cursor background restore offset
+                        let save_buf = read_ptr(&self.main_ram, a4 + 0x24);
+                        let cursor_drawn = self.main_ram[a4 + 0x32] != 0;
+                        if save_buf > 0
+                            && save_buf + 8 <= self.main_ram.len()
+                            && cursor_drawn
+                            && old_row_bytes > 0
+                        {
+                            let old_off = u32::from_be_bytes([
+                                self.main_ram[save_buf],
+                                self.main_ram[save_buf + 1],
+                                self.main_ram[save_buf + 2],
+                                self.main_ram[save_buf + 3],
+                            ]) as usize;
+                            let old_y = old_off / old_row_bytes;
+                            let old_x_bytes = old_off % old_row_bytes;
+                            if old_y + 16 <= (height as usize) && old_x_bytes + 4 <= new_row_bytes {
+                                let new_off = ((old_y * new_row_bytes) + old_x_bytes) as u32;
+                                self.main_ram[save_buf..save_buf + 4]
+                                    .copy_from_slice(&new_off.to_be_bytes());
+                            } else {
+                                // Cursor background is outside new screen bounds: invalidate restore
+                                self.main_ram[a4 + 0x32] = 0;
+                                self.main_ram[save_buf..save_buf + 8].copy_from_slice(&[0u8; 8]);
+                            }
+                        }
                     }
                 }
             }

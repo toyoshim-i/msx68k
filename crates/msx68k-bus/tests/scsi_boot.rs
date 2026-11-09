@@ -1209,6 +1209,23 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     eprintln!("[1920x1080 Window Sample Pixel at (1350, 780)]: RGBA={:?}", px);
     assert_eq!(px[3], 0xFF, "Sample pixel alpha must be 0xFF");
 
+    // Verify that the old cursor background save buffer was correctly rescaled and
+    // no stale remnant exists at (1440..1472, 293..308) in 1920x1080 mode:
+    for y in 293..309 {
+        for x in 1440..1472 {
+            let idx = ((y * 1920 + x) * 4) as usize;
+            let r = rgba1080[idx];
+            let g = rgba1080[idx + 1];
+            let b = rgba1080[idx + 2];
+            let is_desktop =
+                (r == 116 && g == 125 && b == 125) || (r == 177 && g == 185 && b == 185);
+            assert!(
+                is_desktop,
+                "Stale cursor background remnant detected at ({x}, {y}): RGBA=[{r}, {g}, {b}]"
+            );
+        }
+    }
+
     if let Ok(dir) = std::env::var("MSX68K_SCREENSHOT_DIR") {
         let path1080 = Path::new(&dir).join("sxmode_1920x1080_extended.png");
         save_rgba_to_png(w1080, h1080, &rgba1080, path1080.to_str().unwrap());

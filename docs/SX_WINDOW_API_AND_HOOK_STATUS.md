@@ -1106,6 +1106,15 @@ When resolution expands live:
    - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
    - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
    - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
+   - **Cursor Save Buffer Stride Rescaling (`A4 + 0x24`, `save_buf + 0x00`)**:
+     - When `SYS/FSX.X` draws the software cursor (`0x0522F2`), it caches a 32×16 pixel background block into `save_buf = *(A4 + 0x24)` (`text_base + 0x631C2`):
+       - `A4 + 0x32`: `u8` flag (`0xFF` = cursor drawn & background saved).
+       - `save_buf + 0x00`: `u32` cached linear byte offset `(y * rowBytes + x_bytes)` into TVRAM Plane 0.
+       - `save_buf + 0x04`: `u32` restore routine descriptor pointer (`0` = skip restore).
+       - `save_buf + 0x08`: 256-byte background save buffer (4 planes × 16 scanlines × 4 bytes).
+     - When switching resolution dynamically (e.g. from 1024×1024 with `old_row_bytes = 128` to 1920×1080 with `new_row_bytes = 240`), `save_buf + 0x00` must be rescaled to `new_off = (old_y * new_row_bytes) + old_x_bytes` (where `old_y = old_off / old_row_bytes`, `old_x_bytes = old_off % old_row_bytes`).
+     - Without this recalculation, `SYS/FSX.X`'s next cursor move restores the saved 32×16 block to `new_base + old_off`, which at `new_row_bytes = 240` wraps to `y = old_off / 240, x = (old_off % 240) * 8` (e.g. creating a stale 32×16 window remnant at `(1440, 293)` for `old_off = 70,500`)!
+     - If the saved position falls outside the new screen dimensions, the emulator clears `A4 + 0x32` and `save_buf + 0x00..+0x07` to safely cancel the stale restore.
 3. **Verification via In-Process SCSI Boot, Window Dragging & Beyond 1K×1K Testing**:
    - In `crates/msx68k-bus/tests/scsi_boot.rs` (`test_sxwin31_scsi_boot_and_mouse_sync`):
      - Boots `SXWIN31.HDS`, spawns `SXMODE.X` Task 6 via `TSFock` (`$A351`), and clicks Button 2 to switch resolution to 1024×1024 live.
@@ -1116,5 +1125,5 @@ When resolution expands live:
      - Verifies `active_resolution() == (1920, 1080)`, `is_ext_tvram_active() == true`, `row_bytes == 240`, `plane_bytes == 259,200`.
      - Drags `SXMODE.X` window past the 1024×1024 boundary to `(1300, 750)`.
      - Asserts `inside.right > 1300`, `inside.bottom > 750`, `vis_w == 220`, `vis_h == 276`, and global `inside.left + vis_w > 1300` and `inside.top + vis_h > 750`.
-     - Renders 1920×1080 frame and samples window pixels at `(1350, 780)`, verifying pixel-perfect RGBA output across the 32-bit linear planar TVRAM planes without any clipping or artifacting.
+     - Renders 1920×1080 frame, verifies that `(1440..1472, 293..308)` is completely clean of any cursor background save buffer remnants, and samples window pixels at `(1350, 780)`, verifying pixel-perfect RGBA output across the 32-bit linear planar TVRAM planes without any clipping or artifacting.
      - Switches back via CLI mode to 1024×1024, verifying V-Blank advance and seamless downscaling.
