@@ -114,6 +114,63 @@ impl X68kBus {
 
     /// Handles `0xFE81` (`SxMouseSync`): updates SX-Window mouse coordinates in `MouseWorkArea` (`A4`).
     pub(crate) fn hypercall_sx_mouse_sync(&mut self, state: &mut CpuState) -> TrapResult {
+        // Sync menuGrafPort and system structures once MNInit completes
+        let (act_w, act_h) = self.crtc.active_resolution();
+        let expected_base = if self.is_ext_tvram_active() {
+            crate::bus::EXT_TVRAM_BASE
+        } else {
+            0x00E0_0000
+        };
+        if self.main_ram.len() >= 0x093C {
+            let handler_addr = u32::from_be_bytes([
+                self.main_ram[0x0938],
+                self.main_ram[0x0939],
+                self.main_ram[0x093A],
+                self.main_ram[0x093B],
+            ]);
+            if handler_addr > 0x04F82A {
+                let text_base = (handler_addr - 0x04F82A) as usize;
+                let menu_gp_ptr_addr = text_base + 0x54AE0;
+                if menu_gp_ptr_addr + 4 <= self.main_ram.len() {
+                    let menu_gp = u32::from_be_bytes([
+                        self.main_ram[menu_gp_ptr_addr],
+                        self.main_ram[menu_gp_ptr_addr + 1],
+                        self.main_ram[menu_gp_ptr_addr + 2],
+                        self.main_ram[menu_gp_ptr_addr + 3],
+                    ]) as usize;
+                    if menu_gp > 0 && menu_gp + 4 <= self.main_ram.len() {
+                        let bmap = u32::from_be_bytes([
+                            self.main_ram[menu_gp],
+                            self.main_ram[menu_gp + 1],
+                            self.main_ram[menu_gp + 2],
+                            self.main_ram[menu_gp + 3],
+                        ]) as usize;
+                        if bmap > 0 && bmap + 14 <= self.main_ram.len() {
+                            let cur_w = u16::from_be_bytes([
+                                self.main_ram[bmap + 6],
+                                self.main_ram[bmap + 7],
+                            ]) as u32;
+                            let cur_h = u16::from_be_bytes([
+                                self.main_ram[bmap + 8],
+                                self.main_ram[bmap + 9],
+                            ]) as u32;
+                            let cur_base = u32::from_be_bytes([
+                                self.main_ram[bmap + 10],
+                                self.main_ram[bmap + 11],
+                                self.main_ram[bmap + 12],
+                                self.main_ram[bmap + 13],
+                            ]);
+                            if (act_w > 768 || act_h > 512 || self.is_ext_tvram_active())
+                                && (cur_w != act_w || cur_h != act_h || cur_base != expected_base)
+                            {
+                                self.apply_screen_resolution(act_w, act_h);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let a4 = (state.a[4] & 0x00FF_FFFF) as usize;
         if a4 + 0x3C <= self.main_ram.len() {
             let min_x = i16::from_be_bytes([self.main_ram[a4 + 0x34], self.main_ram[a4 + 0x35]]);
@@ -609,6 +666,7 @@ impl X68kBus {
             } else {
                 self.sram[0x7E] = 0x80 | 0x30;
             }
+            self.sram_dirty = true;
         }
 
         // 4. Patch resident SYS/FSX.X kernel data structures if loaded in Main RAM
@@ -776,37 +834,19 @@ impl X68kBus {
                     self.main_ram[gp_tmpl + 4..gp_tmpl + 6].copy_from_slice(&w_be);
                     self.main_ram[gp_tmpl + 6..gp_tmpl + 8].copy_from_slice(&h_be);
 
-                    // Mode table presets:
-                    // Mode 3 (768x512) at text_base + 0x55338
-                    update_planar_bmap(
-                        &mut self.main_ram,
-                        text_base + 0x55338,
-                        w_u16,
-                        h_u16,
-                        new_base_addr,
-                        new_row_bytes as u16,
-                        new_plane_bytes as u32,
-                    );
-                    // Mode 4 (1024x768) at text_base + 0x5534E
-                    update_planar_bmap(
-                        &mut self.main_ram,
-                        text_base + 0x5534E,
-                        w_u16,
-                        h_u16,
-                        new_base_addr,
-                        new_row_bytes as u16,
-                        new_plane_bytes as u32,
-                    );
-                    // Mode 6 (1024x1024) at text_base + 0x5537A
-                    update_planar_bmap(
-                        &mut self.main_ram,
-                        text_base + 0x5537A,
-                        w_u16,
-                        h_u16,
-                        new_base_addr,
-                        new_row_bytes as u16,
-                        new_plane_bytes as u32,
-                    );
+                    // Mode table presets: all 7 entries at text_base + 0x552F6 (stride 22 bytes)
+                    for i in 0..7 {
+                        let preset = text_base + 0x552F6 + i * 22;
+                        update_planar_bmap(
+                            &mut self.main_ram,
+                            preset,
+                            w_u16,
+                            h_u16,
+                            new_base_addr,
+                            new_row_bytes as u16,
+                            new_plane_bytes as u32,
+                        );
+                    }
 
                     // Physical CRT resolution table entry 16 at text_base + 0x15200
                     let crt16 = text_base + 0x15200;
@@ -1035,10 +1075,51 @@ impl X68kBus {
                             .copy_from_slice(&new_base_addr.to_be_bytes());
                     }
 
+                    // Patch popup menu engine (0x049FE6) to load bounds rect from Global Screen Rect (text_base + 0x54372)
+                    let pop_patch = text_base + 0x049FE6;
+                    if pop_patch + 10 <= self.main_ram.len()
+                        && (self.main_ram[pop_patch..pop_patch + 10]
+                            == [0x2A, 0x6E, 0x00, 0x18, 0x2C, 0x15, 0x2E, 0x2D, 0x00, 0x04]
+                            || (self.main_ram[pop_patch..pop_patch + 2] == [0x4B, 0xF9]
+                                && self.main_ram[pop_patch + 6..pop_patch + 10]
+                                    == [0x2C, 0x1D, 0x2E, 0x15]))
+                    {
+                        let screen_rect_addr = (text_base as u32) + 0x54372;
+                        self.main_ram[pop_patch..pop_patch + 2].copy_from_slice(&[0x4B, 0xF9]); // lea (xxx).l, a5
+                        self.main_ram[pop_patch + 2..pop_patch + 6]
+                            .copy_from_slice(&screen_rect_addr.to_be_bytes());
+                        self.main_ram[pop_patch + 6..pop_patch + 10]
+                            .copy_from_slice(&[0x2C, 0x1D, 0x2E, 0x15]); // move.l (a5)+, d6; move.l (a5), d7
+                    }
+
+                    // Patch TMSetWrap (text_base + 0x00D840 and + 0x00D8B4) so TextEdit always wraps
+                    // dynamically at the window's destRect width instead of a fixed 96-column (768px) wall:
+                    let tm_wrap1 = text_base + 0x00D838;
+                    if tm_wrap1 + 12 <= self.main_ram.len()
+                        && (self.main_ram[tm_wrap1..tm_wrap1 + 12]
+                            == [0x0C, 0xAC, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x67, 0x00, 0x00, 0x84]
+                            || self.main_ram[tm_wrap1..tm_wrap1 + 12]
+                                == [0x0C, 0xAC, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x60, 0x00, 0x00, 0x84])
+                    {
+                        // Change BEQ.W +$84 (0x67 0x00 0x00 0x84 at 0x00D840) to BRA.W +$84 (0x60 0x00 0x00 0x84)
+                        // so TextEdit unconditionally branches to dynamic wrap setup at 0x00D8C6.
+                        self.main_ram[tm_wrap1 + 8] = 0x60;
+                    }
+                    let tm_wrap2 = text_base + 0x00D8AC;
+                    if tm_wrap2 + 10 <= self.main_ram.len()
+                        && (self.main_ram[tm_wrap2..tm_wrap2 + 10]
+                            == [0x0C, 0xAC, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x66, 0x10]
+                            || self.main_ram[tm_wrap2..tm_wrap2 + 10]
+                                == [0x0C, 0xAC, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x4E, 0x71])
+                    {
+                        // NOP out BNE.S (0x66 0x10 at 0x00D8B4) so old wrap handle at 0x86(a5) is always disposed
+                        self.main_ram[tm_wrap2 + 8..tm_wrap2 + 10].copy_from_slice(&[0x4E, 0x71]);
+                    }
+
                     // Update MouseWorkArea if pointer at text_base + 0x633CA is valid
                     let a4_ptr_addr = text_base + 0x633CA;
                     let a4 = read_ptr(&self.main_ram, a4_ptr_addr);
-                    if a4 + 0x3C <= self.main_ram.len() {
+                    if a4 > 0 && a4 + 0x3C <= self.main_ram.len() {
                         self.main_ram[a4 + 0x34..a4 + 0x36].copy_from_slice(&0u16.to_be_bytes());
                         self.main_ram[a4 + 0x36..a4 + 0x38].copy_from_slice(&0u16.to_be_bytes());
                         self.main_ram[a4 + 0x38..a4 + 0x3A].copy_from_slice(&w_be);

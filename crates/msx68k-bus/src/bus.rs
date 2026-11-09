@@ -71,6 +71,8 @@ pub struct X68kBus {
     pub(crate) sram: Vec<u8>,
     /// Write-unlock latch for SRAM (`$E8E00D == 0x31`).
     sram_write_enabled: bool,
+    /// Whether battery-backed SRAM has been modified since last persistence check.
+    pub(crate) sram_dirty: bool,
     /// Supervisor Area Set boundary (`($E86001 + 1) * 8192`).
     supervisor_area_limit: u32,
     /// Enforce supervisor protection on Main RAM below `supervisor_area_limit` and I/O space.
@@ -158,6 +160,7 @@ impl X68kBus {
             sprite_bg: None,
             sram,
             sram_write_enabled: false,
+            sram_dirty: false,
             supervisor_area_limit: 0,
             enforce_supervisor_protection: false,
             rom: vec![0xFF; ROM_WINDOW_BYTES],
@@ -278,6 +281,12 @@ impl X68kBus {
         }
     }
 
+    /// Returns the maximum desktop dimensions allocated during live resizing sessions.
+    #[inline]
+    pub fn max_desktop_size(&self) -> (u32, u32) {
+        self.max_desktop_size
+    }
+
     /// Returns `true` if an extended CRT mode ($50) or resolution beyond standard 768x512 is active.
     pub fn is_extended_crtmod_active(&self) -> bool {
         self.fullscreen_mode
@@ -313,6 +322,43 @@ impl X68kBus {
     #[inline]
     pub fn sram_mut(&mut self) -> &mut [u8] {
         &mut self.sram
+    }
+
+    /// Returns whether battery-backed SRAM has been modified since last persistence check, clearing the flag.
+    pub fn take_sram_dirty(&mut self) -> bool {
+        let d = self.sram_dirty;
+        self.sram_dirty = false;
+        d
+    }
+
+    /// Performs a hardware soft reset: resets peripherals, CRTC/VICON, extended display mode,
+    /// supervisor protection boundaries, and re-mirrors IPLROM reset vectors to `$000000`–`$000007`.
+    pub fn soft_reset(&mut self) {
+        if self.rom.len() >= ROM_WINDOW_BYTES && self.main_ram.len() >= 8 {
+            let ipl_vectors =
+                &self.rom[ROM_WINDOW_BYTES - 64 * 1024..ROM_WINDOW_BYTES - 64 * 1024 + 8];
+            if ipl_vectors != [0xFF; 8] {
+                self.main_ram[0..8].copy_from_slice(ipl_vectors);
+            }
+        }
+        self.supervisor_area_limit = 0;
+        self.enforce_supervisor_protection = false;
+        self.sram_write_enabled = false;
+
+        self.crtc = Crtc::new();
+        self.vicon = Vicon::new();
+        self.dmac.reset();
+        self.mfp.reset();
+        self.opm.reset();
+        self.scc.reset();
+        self.fdc.reset(&mut self.ioi);
+
+        self.ext_tvram = None;
+        self.ext_tvram_row_bytes = 0;
+        self.ext_tvram_plane_bytes = 0;
+        self.saved_ext_tvram = None;
+        self.max_desktop_size = (0, 0);
+        self.target_resolution = None;
     }
 
     /// Loads binary data into Main RAM starting at `dest_addr`.
@@ -823,6 +869,7 @@ impl Bus for X68kBus {
                 }
                 if self.sram_write_enabled {
                     self.sram[offset] = val;
+                    self.sram_dirty = true;
                 }
                 Ok(())
             }

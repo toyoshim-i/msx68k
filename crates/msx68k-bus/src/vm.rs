@@ -197,6 +197,7 @@ impl X68kVm {
 
     /// Resets the CPU by loading initial `SSP` and `PC` from `$000000` and `$000004`.
     pub fn reset(&mut self) -> Result<u32, BusFault> {
+        self.bus.soft_reset();
         let state = std::mem::take(&mut self.cpu_state);
         if self.is_running_burst() {
             let mut core = CpuCore::<BurstPolicy>::from_state(state);

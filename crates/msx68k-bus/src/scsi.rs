@@ -209,6 +209,8 @@ pub struct ScsiController {
     pub driver_addr: u32,
     /// Whether system boots primarily from SCSI HDD instead of floppy.
     pub boot_from_scsi: bool,
+    /// Whether HDD target 0 has been written to since last persistence check.
+    pub dirty: bool,
 }
 
 impl Default for ScsiController {
@@ -226,7 +228,15 @@ impl ScsiController {
             req_ptr: 0,
             driver_addr: 0,
             boot_from_scsi: false,
+            dirty: false,
         }
+    }
+
+    /// Returns whether SCSI HDD target 0 has been modified since last persistence check, clearing the flag.
+    pub fn take_dirty(&mut self) -> bool {
+        let d = self.dirty;
+        self.dirty = false;
+        d
     }
 
     /// Mounts a SCSI HDD disk image into `scsi_id` (`0..=7`).
@@ -292,6 +302,7 @@ impl X68kBus {
             self.sram[0x0C..0x10].copy_from_slice(&0x00BF_FFFCu32.to_be_bytes());
             self.sram[0x18..0x1A].copy_from_slice(&0x0000u16.to_be_bytes());
         }
+        self.sram_dirty = true;
     }
 
     /// Returns `true` if configured to boot from SCSI.
@@ -536,6 +547,9 @@ impl X68kBus {
                     {
                         disk[byte_offset..byte_offset + transfer_bytes]
                             .copy_from_slice(&self.main_ram[src..src + transfer_bytes]);
+                        if target == 0 {
+                            self.scsi.dirty = true;
+                        }
                         state.d[0] = 0;
                     } else {
                         state.d[0] = 0xFFFF_FFFF;
@@ -720,6 +734,7 @@ impl X68kBus {
                     {
                         disk[byte_offset..byte_offset + transfer_bytes]
                             .copy_from_slice(&self.main_ram[src..src + transfer_bytes]);
+                        self.scsi.dirty = true;
                         self.main_ram[req_ptr + 3..req_ptr + 5]
                             .copy_from_slice(&0x0000u16.to_be_bytes());
                     } else {
@@ -1161,6 +1176,23 @@ pub fn build_bootable_sxwin_scsi_hdd(
             merged_map.insert(make_file_key(&f_root), f_root);
         }
     }
+
+    // 4c. Inject SX.BAT into root A:\ matching official SX31_HD.INS installer
+    let mut raw_sx_name = [b' '; 8];
+    raw_sx_name[..2].copy_from_slice(b"SX");
+    let mut raw_sx_ext = [b' '; 3];
+    raw_sx_ext[..3].copy_from_slice(b"BAT");
+    let f_sx_bat = ExtractedFile {
+        path_dirs: Vec::new(),
+        raw_name: raw_sx_name,
+        raw_ext: raw_sx_ext,
+        raw_name2: [0u8; 10],
+        attr: 0x20,
+        time: 0x6000,
+        date: 0x5821,
+        data: b"ECHO OFF\r\nBREAK OFF\r\nFSX.X\r\nSXWIN.X\r\nFSX.X -R\r\n".to_vec(),
+    };
+    merged_map.insert(make_file_key(&f_sx_bat), f_sx_bat);
 
     // 5. Partition Boot Sector
     let fat_recs = 64u16;

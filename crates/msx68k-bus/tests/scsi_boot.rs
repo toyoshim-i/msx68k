@@ -152,6 +152,7 @@ fn test_scsi_hdd_generation_and_partition_table() {
 
         // Verify root directory files:
         let mut found_root_sxmode = false;
+        let mut found_root_sx_bat = false;
         for i in 0..1024 {
             let entry_off = root_off + i * 32;
             let b0 = hdd_image[entry_off];
@@ -159,11 +160,17 @@ fn test_scsi_hdd_generation_and_partition_table() {
             if b0 == 0xE5 { continue; }
             let name = &hdd_image[entry_off..entry_off + 11];
             let attr = hdd_image[entry_off + 11];
-            if (attr & 0x10) == 0 && name.starts_with(b"SXMODE") {
-                found_root_sxmode = true;
+            if (attr & 0x10) == 0 {
+                if name.starts_with(b"SXMODE") {
+                    found_root_sxmode = true;
+                }
+                if name.starts_with(b"SX      BAT") {
+                    found_root_sx_bat = true;
+                }
             }
         }
         assert!(found_root_sxmode, "SXMODE.X must be present in root A:\\ for 1-click access");
+        assert!(found_root_sx_bat, "SX.BAT must be present in root A:\\ to match official installer");
 
         // Verify SHELL/SXWIN.ENV contains official search path with A:\BIN and A:\X68
         assert!(
@@ -1410,6 +1417,40 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         vm.step();
     }
     assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768), "SXMODE 1024x768 via gui_start must switch to 1024x768");
+
+    // Verify Fix 1 patch: Popup menu engine bounds patched to Global Screen Rect (text_base + 0x54372)
+    assert_eq!(
+        vm.bus.read_u16(text_base + 0x049FE6, true).unwrap(),
+        0x4BF9,
+        "Popup menu bounds patch must use LEA (xxx).L"
+    );
+    assert_eq!(
+        vm.bus.read_u32(text_base + 0x049FE8, true).unwrap(),
+        text_base + 0x54372,
+        "Popup menu bounds patch must point to Global Screen Rect"
+    );
+
+    // Verify Fix 2 patch: TMSetWrap patched for dynamic line wrapping
+    assert_eq!(
+        vm.bus.read_u8(text_base + 0x00D838 + 8, true).unwrap(),
+        0x60,
+        "TMSetWrap branch must be patched to BRA.W"
+    );
+    assert_eq!(
+        vm.bus.read_u16(text_base + 0x00D8AC + 8, true).unwrap(),
+        0x4E71,
+        "TMSetWrap conditional branch must be NOPed out"
+    );
+
+    // Verify Fix 3: soft_reset resets CRTC, extended modes, and re-mirrors IPLROM vectors
+    vm.bus.soft_reset();
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    assert!(!vm.bus.is_ext_tvram_active());
+    assert_eq!(vm.bus.max_desktop_size(), (0, 0));
+    assert_eq!(
+        &vm.bus.main_ram()[0..8],
+        &ipl_data[ipl_data.len() - 64 * 1024..][..8]
+    );
 }
 
 #[test]
@@ -1621,13 +1662,13 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     vm.bus.load_cgrom(&cgrom_data);
     vm.bus.load_ipl_rom(&ipl_data);
 
-    // Pre-configure initial resolution to 1024x768 (as if passed via CLI --resolution 1024x768)
-    vm.bus.apply_screen_resolution(1024, 768);
-
     assert!(vm.bus.insert_scsi_hdd(0, hdd_image));
     vm.bus.set_boot_from_scsi(true);
 
     vm.reset().unwrap();
+
+    // Pre-configure initial resolution to 1024x768 (as if passed via CLI --resolution 1024x768)
+    vm.bus.apply_screen_resolution(1024, 768);
 
     // Boot until SX-Window reaches desktop
     for _chunk in 1..=90 {
@@ -1679,4 +1720,29 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     let ext_y_byte = 600 * 128 + 20 * 2; // y=600 (>512)
     let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
     assert_ne!(ext_y_word, 0, "Boot-time 1024x768 desktop must draw into extended vertical area (y > 512)");
+
+    // Verify popup menu clamping patch in FSX.X
+    let pop_patch = (text_base + 0x049FE6) as usize;
+    assert_eq!(&vm.bus.main_ram()[pop_patch..pop_patch + 2], &[0x4B, 0xF9]);
+    assert_eq!(&vm.bus.main_ram()[pop_patch + 6..pop_patch + 10], &[0x2C, 0x1D, 0x2E, 0x15]);
+
+    // Verify TextEdit TMSetWrap dynamic line wrapping patch
+    assert_eq!(vm.bus.main_ram()[(text_base + 0x00D840) as usize], 0x60);
+    assert_eq!(&vm.bus.main_ram()[(text_base + 0x00D8B4) as usize..(text_base + 0x00D8B6) as usize], &[0x4E, 0x71]);
+
+    // Verify all 7 preset mode table entries are synchronized
+    for i in 0..7 {
+        let preset = (text_base + 0x552F6 + i * 22) as usize;
+        let w = u16::from_be_bytes([vm.bus.main_ram()[preset + 6], vm.bus.main_ram()[preset + 7]]);
+        let h = u16::from_be_bytes([vm.bus.main_ram()[preset + 8], vm.bus.main_ram()[preset + 9]]);
+        assert_eq!((w, h), (1024, 768), "Preset {i} mode table must be synchronized to 1024x768");
+    }
+
+    // Verify soft reset restores vectors and resets extended resolution
+    vm.bus.soft_reset();
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    assert!(!vm.bus.is_ext_tvram_active());
+    assert_eq!(vm.bus.max_desktop_size(), (0, 0));
+    assert!(vm.bus.target_resolution.is_none());
+    assert_eq!(&vm.bus.main_ram()[0..8], &ipl_data[ipl_data.len() - 64 * 1024..][..8]);
 }

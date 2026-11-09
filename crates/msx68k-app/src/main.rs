@@ -111,6 +111,7 @@ struct AppArgs {
     fd0_path: Option<PathBuf>,
     fd1_path: Option<PathBuf>,
     hdd0_path: Option<PathBuf>,
+    sram_path: PathBuf,
     speed_mode: CpuSpeedMode,
     ram_mb: usize,
     scale: u32,
@@ -129,12 +130,22 @@ impl Default for AppArgs {
         let fd0_path = std::env::var_os("MSX68K_FD0").map(PathBuf::from);
         let fd1_path = std::env::var_os("MSX68K_FD1").map(PathBuf::from);
         let hdd0_path = std::env::var_os("MSX68K_HDD0").map(PathBuf::from);
+        let sram_path = std::env::var_os("MSX68K_SRAM")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                if Path::new("disks").is_dir() {
+                    PathBuf::from("disks/SRAM.DAT")
+                } else {
+                    PathBuf::from("SRAM.DAT")
+                }
+            });
         Self {
             ipl_path,
             cgrom_path,
             fd0_path,
             fd1_path,
             hdd0_path,
+            sram_path,
             speed_mode: CpuSpeedMode::Mhz10,
             ram_mb: 4,
             scale: 1,
@@ -173,6 +184,11 @@ impl AppArgs {
                 "--hdd0" => {
                     if let Some(p) = args.next() {
                         cfg.hdd0_path = Some(PathBuf::from(p));
+                    }
+                }
+                "--sram" => {
+                    if let Some(p) = args.next() {
+                        cfg.sram_path = PathBuf::from(p);
                     }
                 }
                 "--speed" => {
@@ -231,6 +247,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
+                           --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
@@ -249,11 +266,11 @@ impl AppArgs {
 }
 
 struct GpuWindowState {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-    compositor: ViconGpuCompositor,
     presenter: ViconSurfacePresenter,
+    compositor: ViconGpuCompositor,
+    surface_config: wgpu::SurfaceConfiguration,
+    surface: wgpu::Surface<'static>,
+    window: Arc<Window>,
 }
 
 struct Msx68kApp {
@@ -295,6 +312,20 @@ impl Msx68kApp {
 
         vm.bus.load_cgrom(&cgrom);
         vm.bus.load_ipl_rom(&ipl);
+
+        if args.sram_path.exists() {
+            if let Ok(sram_data) = std::fs::read(&args.sram_path) {
+                if sram_data.len() == 16 * 1024 {
+                    vm.bus.sram_mut().copy_from_slice(&sram_data);
+                    let ram_end = ((args.ram_mb * 1024 * 1024) as u32).to_be_bytes();
+                    vm.bus.sram_mut()[8..12].copy_from_slice(&ram_end);
+                    println!(
+                        "Loaded battery-backed SRAM from '{}'",
+                        args.sram_path.display()
+                    );
+                }
+            }
+        }
 
         if let Some(fd0) = &args.fd0_path {
             match std::fs::read(fd0) {
@@ -412,6 +443,34 @@ impl Msx68kApp {
         }
     }
 
+    fn flush_persistent_storage(&mut self, force: bool) {
+        if force || self.vm.bus.take_sram_dirty() {
+            if let Some(parent) = self.args.sram_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            if let Err(e) = std::fs::write(&self.args.sram_path, self.vm.bus.sram()) {
+                eprintln!(
+                    "Warning: Failed to flush SRAM to '{}': {e}",
+                    self.args.sram_path.display()
+                );
+            }
+        }
+        if force || self.vm.bus.scsi.take_dirty() {
+            if let (Some(hdd0_path), Some(hdd_data)) =
+                (&self.args.hdd0_path, self.vm.bus.scsi.hdd_data(0))
+            {
+                if let Err(e) = std::fs::write(hdd0_path, hdd_data) {
+                    eprintln!(
+                        "Warning: Failed to flush HDD 0 to '{}': {e}",
+                        hdd0_path.display()
+                    );
+                }
+            }
+        }
+    }
+
     fn step_vm_one_frame(&mut self) {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
@@ -420,11 +479,11 @@ impl Msx68kApp {
                     // clock to exact 1/60s frame time (166,667 10MHz ticks) so guest timers
                     // (Timer C, V-Blank, double-click speed) match real wall-clock time.
                     const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
-                    self.vm.run_burst_frame(250_000, TARGET_TICKS_60HZ);
+                    self.vm.run_burst_frame(1_000_000, TARGET_TICKS_60HZ);
                 } else {
                     // Fast-forward through boot and splash screen timer waits until the
                     // desktop starts polling the mouse.
-                    self.vm.run_steps(250_000);
+                    self.vm.run_steps(1_000_000);
                 }
             }
             mode => {
@@ -526,11 +585,11 @@ impl ApplicationHandler for Msx68kApp {
         let presenter = compositor.create_surface_presenter(format);
 
         self.gpu = Some(GpuWindowState {
-            window,
-            surface,
-            surface_config,
-            compositor,
             presenter,
+            compositor,
+            surface_config,
+            surface,
+            window,
         });
         self.next_frame_deadline = Instant::now();
     }
@@ -543,6 +602,11 @@ impl ApplicationHandler for Msx68kApp {
     ) {
         match event {
             WindowEvent::CloseRequested => {
+                self.flush_persistent_storage(true);
+                if let Some(gpu) = &self.gpu {
+                    let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
+                }
+                self.gpu = None;
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
@@ -648,6 +712,7 @@ impl ApplicationHandler for Msx68kApp {
                                 return;
                             }
                             KeyCode::F12 => {
+                                self.flush_persistent_storage(true);
                                 let _ = self.vm.reset();
                                 println!("Reset X68000 VM");
                                 return;
@@ -757,6 +822,7 @@ impl ApplicationHandler for Msx68kApp {
                             "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
                             self.vm.cpu_state.pc
                         ));
+                        self.flush_persistent_storage(false);
                     }
                 }
             }
@@ -774,6 +840,16 @@ impl ApplicationHandler for Msx68kApp {
             }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
+    }
+}
+
+impl Drop for Msx68kApp {
+    fn drop(&mut self) {
+        self.flush_persistent_storage(true);
+        if let Some(gpu) = &self.gpu {
+            let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
+        }
+        self.gpu = None;
     }
 }
 

@@ -193,6 +193,7 @@ graph TD
 | **Text Manager** | `TXM` / `TM` | `$A30A`–`$A49D` | 114 | Multi-line text editor widgets, cursor navigation, line-wrapping, selection highlighting. |
 | **Task Manager** | `TKM` / `TS` | `$A34C`–`$A4C0` | 157 | Cooperative process scheduler, IPC messages, inter-task drag-and-drop (`TSPutDrag`). |
 | **Print Manager** | `PRM` | `$A4E0`–`$A4FE` | 31 | Hardcopy printer drivers, raster spooling, page layout. |
+| **Font Manager** | `IFM` / `FM` | `$A500`–`$A516` | 23 | Outline font engine (`IFM.X`): Bezier curve evaluation, polygon triangulation, font caching, and `$A198` `GMDrawText` interception. |
 | **Semaphore Manager** | `SMM` | `$A5F0`–`$A5F3` | 4 | Inter-task synchronization semaphores and critical section locks. |
 | **Color Manager** | `CLM` | `$A600`–`$A61F` | 31 | 16-color / 256-color palette allocation, color lookup tables, color dialogs. |
 | **Kernel Internal / Private** | `SYS` | Various | 204 | Private kernel routines embedded within the table for inter-subsystem dispatch. |
@@ -1115,6 +1116,29 @@ When resolution expands live:
      - When switching between extended and standard resolutions (e.g. `1920×1080 -> 768×512 -> 1920×1080`), `X68kBus.saved_ext_tvram` preserves the highest watermark extended framebuffer.
      - When re-entering an extended mode, `saved_ext_tvram` is restored before applying active scanline copies.
      - During desktop stipple fill in Step 5, a 16-bit `keep_mask` is computed for each column intersecting any visible window in `open_window_outside_rects`, preserving window frames and client pixels in the extended desktop area.
+   - **Popup Menu Bounds Patch (`text_base + 0x049FE6`)**:
+     - In `SYS/FSX.X`, the popup menu engine at `0x049F2A` is invoked by `MNSelect` (`$A268`), `MMPopUp` (`$A26A`), `MMPopUp2` (`$A26C`), and recursive submenus (`0x04A282`).
+     - Callers of `MMPopUp` or submenus pass a bounds rect pointer in parameter `24(A6)` that defaults to `(0, 0, 768, 512)`. At `text_base + 0x049FE6`, the original code loaded `bounds.topleft` (`D6`) and `bounds.botright` (`D7`) from `24(A6)`:
+       ```m68k
+       00049fe6: 2a6e 0018      movea.l 24(a6), a5   ; Parameter 5: bounds rect pointer
+       00049fea: 2c15           move.l  (a5), d6     ; bounds.topleft
+       00049fec: 2e2d 0004      move.l  4(a5), d7    ; bounds.botright
+       ```
+     - This caused `GMAdjustRect` at `0x04A002` to clamp popup menu positions inside `(0, 0, 768, 512)`, preventing popup menus from appearing in extended screen space when right-clicking past `x = 768` or `y = 512`.
+     - `apply_screen_resolution` patches `text_base + 0x049FE6..0x049FF0` (10 bytes: `lea (text_base + 0x54372).l, a5; move.l (a5)+, d6; move.l (a5), d7`) to directly load the clamping bounds from the Global Screen Rect (`text_base + 0x54372`), enabling popup menus anywhere across the extended desktop.
+   - **TextEdit Dynamic Line-Wrapping Patch (`TMSetWrap` at `text_base + 0x00D840` and `0x00D8B4`)**:
+     - In `SYS/FSX.X` TextEdit, sentinel value `0x04000400` (`te->wrapRecord == NULL`) indicates that text wraps dynamically to match the window's `destRect.right` width.
+     - However, applications like `シャーペン.X` call `TMSetWrap(te, 768)` (`Trap $A488` at `text_base + 0x00D80E`) with their 96-column (768 px) default ruler setting, enforcing a rigid 768-pixel right margin regardless of how wide the window is resized.
+     - `apply_screen_resolution` patches `TMSetWrap`:
+       - At `text_base + 0x00D840`: converts conditional branch `beq.w +$84` (`[0x67, 0x00, 0x00, 0x84]`) to unconditional branch `bra.w +$84` (`[0x60, 0x00, 0x00, 0x84]`), routing all wrap requests to dynamic wrap setup at `0x00D8C6`.
+       - At `text_base + 0x00D8B4`: NOPs out `bne.s` (`0x66 0x10` -> `[0x4E, 0x71]`) so existing fixed wrap handles at `0x86(A5)` are safely disposed when windows resize.
+   - **Font Manager (`IFM.X`) Vector Table (`$A500..$A516`, `$A198`) & Burst Frame Pacing**:
+     - `IFM.X` installs 23 A-line trap vectors (`$A500` through `$A516`) for outline font handling (font open/close, metrics, Bezier curve evaluation, polygon triangulation, and glyph caching) and hooks `$A198` (`GMDrawText`) to intercept and render outline fonts into any active `GrafPort`.
+     - Outline font path rendering performs intensive floating-point and fixed-point Bezier subdivision. In `msx68k-app`, `CpuSpeedMode::Burst` executes up to `1,000,000` instructions per 1/60s frame while maintaining exact `TARGET_TICKS_60HZ` (166,667 cycles) peripheral pacing, accelerating `IFM.X` font rendering by 4×–5× without breaking V-Blank or timer IRQ accuracy.
+   - **Soft Reset vs. CPU Peripheral Reset & Storage Persistence**:
+     - On standard 68000 systems, executing the `RESET` opcode (`0x4E70`) asserts the external peripheral reset pin (resetting DMAC, MFP, OPM, SCC, and FDC) but preserves CPU registers, memory mapping, CRTC geometry, and extended framebuffer state.
+     - Cold/soft reboots (`X68kBus.soft_reset()`, invoked on `F12` or emulator reset) re-mirror IPLROM vectors to `$000000..$000007`, reset CRTC/VICON, and reset extended desktop configuration.
+     - Persistent storage modifications (battery-backed SRAM `$ED0000..$ED3FFF` and SCSI hard disk writes) are tracked via `sram_dirty` and `scsi.dirty` flags, auto-flushing to `SRAM.DAT` and `*.HDS` images on disk during periodic title updates, on soft reset (`F12`), on window close, and on application exit.
    - **Font Path Redirection in SCSI Image Generation (`IFM.LB` & `IFM.X`)**:
      - Hardcoded font paths in `IFM.LB` (`D:\FONT\`) and `IFM.X` (`B:\FONT\`) on `SXWIN316.XDF` are patched to `A:\FONT\` during SCSI HDD generation, ensuring outline and image fonts load reliably from the boot partition.
    - **Cursor Save Buffer Stride Rescaling (`A4 + 0x24`, `save_buf + 0x00`)**:
