@@ -378,9 +378,9 @@ draw_btn_loop:
 	addq.l	#2, sp
 
 	move.w	d3, d0
-	lsl.w	#2, d0
-	lea	btn_rect_ptrs(pc), a0
-	move.l	0(a0, d0.w), -(sp)
+	lsl.w	#3, d0			; d0 = d3 * 8 (8 bytes per Rect)
+	lea	btn0_rect(pc), a0
+	pea	0(a0, d0.w)		; pushes runtime address of btn[d3]_rect!
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 
@@ -390,9 +390,9 @@ draw_btn_loop:
 	addq.l	#2, sp
 
 	move.w	d3, d0
-	lsl.w	#2, d0
-	lea	btn_rect_ptrs(pc), a0
-	move.l	0(a0, d0.w), -(sp)
+	lsl.w	#3, d0			; d0 = d3 * 8 (8 bytes per Rect)
+	lea	btn0_rect(pc), a0
+	pea	0(a0, d0.w)		; pushes runtime address of btn[d3]_rect!
 	SXCALL	GMFrameRect		; $A172
 	addq.l	#4, sp
 
@@ -412,9 +412,9 @@ draw_btn_loop:
 
 	* Draw text string
 	move.w	d3, d0
-	lsl.w	#2, d0
-	lea	btn_str_ptrs(pc), a0
-	move.l	0(a0, d0.w), -(sp)
+	lsl.w	#4, d0			; d0 = d3 * 16 (16 bytes per string)
+	lea	str_mode0(pc), a0
+	pea	0(a0, d0.w)		; pushes runtime address of str_mode[d3]!
 	SXCALL	GMDrawStrL		; $A190
 	addq.l	#4, sp
 
@@ -433,9 +433,9 @@ draw_btn_loop:
 
 	move.w	active_mode(pc), d0
 	andi.w	#7, d0
-	lsl.w	#2, d0
-	lea	btn_rect_ptrs(pc), a0
-	move.l	0(a0, d0.w), -(sp)
+	lsl.w	#3, d0			; d0 = active_mode * 8
+	lea	btn0_rect(pc), a0
+	pea	0(a0, d0.w)		; pushes runtime address of btn[active_mode]_rect!
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 
@@ -708,14 +708,6 @@ btn6_rect:
 btn7_rect:
 	.dc.w	20, 236, 200, 258
 
-btn_rect_ptrs:
-	.dc.l	btn0_rect, btn1_rect, btn2_rect, btn3_rect
-	.dc.l	btn4_rect, btn5_rect, btn6_rect, btn7_rect
-
-btn_str_ptrs:
-	.dc.l	str_mode0, str_mode1, str_mode2, str_mode3
-	.dc.l	str_mode4, str_mode5, str_mode6, str_mode7
-
 btn_text_x:
 	.dc.w	48, 48, 44, 48, 48, 44, 44, 44
 
@@ -730,29 +722,21 @@ preset_d2_table:
 	.dc.l	$00000000	; 7: Native Full (D2.L = 0)
 
 str_mode0:
-	.dc.b	11, " 768 x 512 ", 0
-	.even
+	.dc.b	11, " 768 x 512 ", 0, 0, 0, 0
 str_mode1:
-	.dc.b	11, "1024 x 768 ", 0
-	.even
+	.dc.b	11, "1024 x 768 ", 0, 0, 0, 0
 str_mode2:
-	.dc.b	11, "1024 x 1024", 0
-	.even
+	.dc.b	11, "1024 x 1024", 0, 0, 0, 0
 str_mode3:
-	.dc.b	11, "1280 x 720 ", 0
-	.even
+	.dc.b	11, "1280 x 720 ", 0, 0, 0, 0
 str_mode4:
-	.dc.b	11, "1280 x 960 ", 0
-	.even
+	.dc.b	11, "1280 x 960 ", 0, 0, 0, 0
 str_mode5:
-	.dc.b	11, "1600 x 1200", 0
-	.even
+	.dc.b	11, "1600 x 1200", 0, 0, 0, 0
 str_mode6:
-	.dc.b	11, "1920 x 1080", 0
-	.even
+	.dc.b	11, "1920 x 1080", 0, 0, 0, 0
 str_mode7:
-	.dc.b	11, "Native Full", 0
-	.even
+	.dc.b	11, "Native Full", 0, 0, 0, 0
 
 str_cfg_w:
 	.dc.b	"SCREEN_WIDTH=", 0

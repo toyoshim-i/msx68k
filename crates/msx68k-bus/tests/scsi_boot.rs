@@ -900,6 +900,37 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         eprintln!("[Screenshot 1] Saved before-click PNG ({}x{}) to {:?}", w0, h0, before_path);
     }
 
+    // Verify that all 8 resolution buttons inside the SXMODE.X window are rendered properly:
+    // Window content starts at (180, 120). Buttons span x = 200..380, height 22, stride 28.
+    for i in 0..8 {
+        let btn_y1 = 120 + 40 + i * 28;
+        let btn_y2 = btn_y1 + 22;
+        let mut dark_count = 0usize;
+        let mut light_count = 0usize;
+        for y in btn_y1..btn_y2 {
+            for x in 200..380 {
+                let idx = ((y * w0 + x) * 4) as usize;
+                let r = rgba0[idx];
+                let g = rgba0[idx + 1];
+                let b = rgba0[idx + 2];
+                if r < 50 && g < 50 && b < 50 {
+                    dark_count += 1;
+                } else if r > 150 && g > 150 && b > 150 {
+                    light_count += 1;
+                }
+            }
+        }
+        assert!(
+            dark_count > 20,
+            "Button {i} must render dark frame/text pixels, found {dark_count}"
+        );
+        assert!(
+            light_count > 50,
+            "Button {i} must render light background pixels, found {light_count}"
+        );
+        eprintln!("[SXMODE Button {i}] dark_pixels={}, light_pixels={}", dark_count, light_count);
+    }
+
     // 2. Simulate mouse movement and click targeting Button 2 ("1024 x 1024"):
     // In WMOpen, win_bounds (180, 120, 400, 270) specifies the content port rectangle
     // (local (0,0) = global (180, 120)).
