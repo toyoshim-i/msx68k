@@ -9,7 +9,9 @@ use msx68k_cpu::Bus;
 
 fn render_bus_tvram_rgba(bus: &msx68k_bus::X68kBus) -> (u32, u32, Vec<u8>) {
     let (width, height) = bus.crtc.active_resolution();
-    let tvram = bus.tvram().expect("TVRAM must be allocated");
+    let tvram = bus.active_tvram().expect("TVRAM must be allocated");
+    let row_bytes = bus.active_tvram_row_bytes();
+    let plane_bytes = bus.active_tvram_plane_bytes();
     let tx_pal = bus.vicon.text_palette();
     let contrast = (bus.sysport.contrast & 0x0F).max(1) as u32;
 
@@ -27,14 +29,14 @@ fn render_bus_tvram_rgba(bus: &msx68k_bus::X68kBus) -> (u32, u32, Vec<u8>) {
     let mut rgba = vec![0u8; (width * height * 4) as usize];
     for y in 0..height {
         for x in 0..width {
-            let tx = (x + bus.crtc.text_scroll_x() as u32) & 1023;
-            let ty = (y + bus.crtc.text_scroll_y() as u32) & 1023;
-            let in_plane = ((ty * 128) + (tx >> 3)) as usize;
+            let tx = (x + bus.crtc.text_scroll_x() as u32) % width;
+            let ty = (y + bus.crtc.text_scroll_y() as u32) % height;
+            let in_plane = ((ty as usize) * row_bytes) + ((tx >> 3) as usize);
             let bit = 7 - (tx & 7);
             let b0 = ((tvram[in_plane] >> bit) & 1) as usize;
-            let b1 = ((tvram[131072 + in_plane] >> bit) & 1) as usize;
-            let b2 = ((tvram[262144 + in_plane] >> bit) & 1) as usize;
-            let b3 = ((tvram[393216 + in_plane] >> bit) & 1) as usize;
+            let b1 = ((tvram[plane_bytes + in_plane] >> bit) & 1) as usize;
+            let b2 = ((tvram[plane_bytes * 2 + in_plane] >> bit) & 1) as usize;
+            let b3 = ((tvram[plane_bytes * 3 + in_plane] >> bit) & 1) as usize;
             let idx = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
             let color = grbi_to_rgba(tx_pal[idx]);
             let off = ((y * width + x) * 4) as usize;
@@ -1092,22 +1094,94 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     assert!(sx_inside_r > 768, "Moved window inside.right must extend beyond 768, got {sx_inside_r}");
     assert!(sx_inside_b > 512, "Moved window inside.bottom must extend beyond 512, got {sx_inside_b}");
     assert_eq!(sx_inside_r - sx_inside_l, 220, "Moved window inside width must be 220");
-    assert_eq!(sx_inside_b - sx_inside_t, 150, "Moved window inside height must be 150");
+    assert_eq!(sx_inside_b - sx_inside_t, 276, "Moved window inside height must be 276");
 
     let sx_vis_h = vm.bus.read_u32(top_win + 0x10, true).unwrap();
     let sx_vis_ptr = vm.bus.read_u32(sx_vis_h, true).unwrap();
     let sx_vis_w = vm.bus.read_u16(sx_vis_ptr + 8, true).unwrap() as i16;
     let sx_vis_h_val = vm.bus.read_u16(sx_vis_ptr + 10, true).unwrap() as i16;
     assert_eq!(sx_vis_w, 220, "SXMODE visible region width must not be clipped, expected 220, got {sx_vis_w}");
-    assert_eq!(sx_vis_h_val, 150, "SXMODE visible region height must not be clipped, expected 150, got {sx_vis_h_val}");
+    assert_eq!(sx_vis_h_val, 276, "SXMODE visible region height must not be clipped, expected 276, got {sx_vis_h_val}");
 
-    // Save screenshot after moving SXMODE across the 768x512 boundary
+    // Save screenshot after moving SXMODE across the 768x512 boundary in 1024x1024
     let (wm, hm, rgbam) = render_bus_tvram_rgba(&vm.bus);
     assert_eq!((wm, hm), (1024, 1024));
     if let Ok(dir) = std::env::var("MSX68K_SCREENSHOT_DIR") {
         let moved_path = Path::new(&dir).join("sxmode_moved_beyond_768x512.png");
         save_rgba_to_png(wm, hm, &rgbam, moved_path.to_str().unwrap());
         eprintln!("[Screenshot Moved] Saved moved SXMODE PNG ({}x{}) to {:?}", wm, hm, moved_path);
+    }
+
+    // Verify A:\SYS\MSX68K.CFG was created on the SCSI disk by SXMODE.X
+    let hdd_data = vm.bus.scsi.hdd_data(0).expect("SCSI HDD 0 must be present");
+    let has_cfg = hdd_data.windows(b"SCREEN_WIDTH=".len()).any(|w| w == b"SCREEN_WIDTH=");
+    assert!(has_cfg, "A:\\SYS\\MSX68K.CFG must be persisted on SCSI HDD by SXMODE.X");
+    assert_eq!(vm.bus.sram()[0x7E], 0x80 | 0x30, "SRAM crtmode must be $B0 (extended)");
+
+    // Switch to Beyond 1K×1K (1920x1080) via IOCS _CRTMOD Mode $50
+    vm.cpu_state.d[0] = 0x10;
+    vm.cpu_state.d[1] = 0x0150;
+    vm.cpu_state.d[2] = (1920 << 16) | 1080;
+    let trap_res = vm.bus.handle_iocs_crtmod(&mut vm.cpu_state);
+    assert!(matches!(trap_res, msx68k_cpu::TrapResult::Handled { .. }));
+
+    assert_eq!(vm.bus.crtc.active_resolution(), (1920, 1080), "Resolution must switch to 1920x1080");
+    assert!(vm.bus.is_ext_tvram_active(), "ext_tvram must be active at 1920x1080");
+    assert_eq!(vm.bus.active_tvram_row_bytes(), 240, "active_tvram_row_bytes must be 240 for 1920");
+    assert_eq!(vm.bus.active_tvram_plane_bytes(), 240 * 1080, "active_tvram_plane_bytes must be 240 * 1080");
+
+    // Drag SXMODE.X window out to (1300, 750) well beyond 1024x1024
+    vm.bus.set_host_mouse_position(Some((sx_inside_l + 50, sx_inside_t - 8)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..50_000 {
+        vm.step();
+    }
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..100_000 {
+        vm.step();
+    }
+    vm.bus.set_host_mouse_position(Some((1300 + 50, 750 - 8)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..200_000 {
+        vm.step();
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..500_000 {
+        vm.step();
+    }
+
+    let sx_inside_h2 = vm.bus.read_u32(top_win + 0x4C, true).unwrap();
+    let sx_inside_ptr2 = vm.bus.read_u32(sx_inside_h2, true).unwrap();
+    let sx_inside_l2 = vm.bus.read_u16(sx_inside_ptr2 + 4, true).unwrap() as i16;
+    let sx_inside_t2 = vm.bus.read_u16(sx_inside_ptr2 + 6, true).unwrap() as i16;
+    let sx_inside_r2 = vm.bus.read_u16(sx_inside_ptr2 + 8, true).unwrap() as i16;
+    let sx_inside_b2 = vm.bus.read_u16(sx_inside_ptr2 + 10, true).unwrap() as i16;
+    assert!(sx_inside_r2 > 1300, "Moved window inside.right must extend beyond 1300, got {sx_inside_r2}");
+    assert!(sx_inside_b2 > 750, "Moved window inside.bottom must extend beyond 750, got {sx_inside_b2}");
+
+    let sx_vis_h2 = vm.bus.read_u32(top_win + 0x10, true).unwrap();
+    let sx_vis_ptr2 = vm.bus.read_u32(sx_vis_h2, true).unwrap();
+    let vis_w2 = vm.bus.read_u16(sx_vis_ptr2 + 8, true).unwrap() as i16;
+    let vis_h_val2 = vm.bus.read_u16(sx_vis_ptr2 + 10, true).unwrap() as i16;
+    assert_eq!(vis_w2, 220, "SXMODE visible width must not be clipped, expected 220, got {vis_w2}");
+    assert_eq!(vis_h_val2, 276, "SXMODE visible height must not be clipped, expected 276, got {vis_h_val2}");
+    assert!(sx_inside_l2 + vis_w2 > 1300, "Global visible right must extend beyond 1300");
+    assert!(sx_inside_t2 + vis_h_val2 > 750, "Global visible bottom must extend beyond 750");
+
+    // Render 1920x1080 frame and check rendered window pixels at x > 1300, y > 750
+    let (w1080, h1080, rgba1080) = render_bus_tvram_rgba(&vm.bus);
+    assert_eq!((w1080, h1080), (1920, 1080));
+    let sample_idx = ((780 * 1920 + 1350) * 4) as usize;
+    let px = &rgba1080[sample_idx..sample_idx + 4];
+    eprintln!("[1920x1080 Window Sample Pixel at (1350, 780)]: RGBA={:?}", px);
+    assert_eq!(px[3], 0xFF, "Sample pixel alpha must be 0xFF");
+
+    if let Ok(dir) = std::env::var("MSX68K_SCREENSHOT_DIR") {
+        let path1080 = Path::new(&dir).join("sxmode_1920x1080_extended.png");
+        save_rgba_to_png(w1080, h1080, &rgba1080, path1080.to_str().unwrap());
+        eprintln!("[Screenshot 1920x1080] Saved 1920x1080 PNG to {:?}", path1080);
     }
 
     // Verify SXMODE.X execution on the running SX-Window system:
@@ -1331,7 +1405,7 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
     let sram_vmode = vm.bus.read_u8(0x00ED_007C, true).unwrap();
     let sram_crtmode = vm.bus.read_u8(0x00ED_007E, true).unwrap();
     assert_eq!(sram_vmode, (4 << 4) | 0x03);
-    assert_eq!(sram_crtmode, 0x80 | 16);
+    assert_eq!(sram_crtmode, 0x80 | 0x30);
 
     // Check patched resident structures
     assert_eq!(vm.bus.read_u16(active_rec + 6, true).unwrap(), 1024);
@@ -1353,6 +1427,7 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
     assert_eq!(vm.bus.crtc.active_resolution(), (1024, 1024));
     let sram_vmode2 = vm.bus.read_u8(0x00ED_007C, true).unwrap();
     assert_eq!(sram_vmode2, (6 << 4) | 0x03);
+    assert_eq!(vm.bus.read_u8(0x00ED_007E, true).unwrap(), 0x80 | 0x30);
     assert_eq!(vm.bus.read_u16(active_rec + 8, true).unwrap(), 1024);
     assert_eq!(vm.bus.read_u16(a4 + 0x3A, true).unwrap(), 1024);
 
@@ -1367,6 +1442,7 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
     assert_eq!(vm.cpu_state.d[1], 768);
     assert_eq!(vm.cpu_state.d[2], 512);
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    assert_eq!(vm.bus.read_u8(0x00ED_007E, true).unwrap(), 0x80 | 16);
     assert_eq!(vm.bus.read_u16(a4 + 0x38, true).unwrap(), 768);
     assert_eq!(vm.bus.read_u16(a4 + 0x3A, true).unwrap(), 512);
     // Mouse coords must have been clamped to (767, 511)

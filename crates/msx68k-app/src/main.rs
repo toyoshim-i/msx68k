@@ -115,6 +115,7 @@ struct AppArgs {
     ram_mb: usize,
     scale: u32,
     resolution: Option<(u32, u32)>,
+    fullscreen: bool,
 }
 
 impl Default for AppArgs {
@@ -138,6 +139,7 @@ impl Default for AppArgs {
             ram_mb: 4,
             scale: 1,
             resolution: None,
+            fullscreen: false,
         }
     }
 }
@@ -197,19 +199,26 @@ impl AppArgs {
                         cfg.scale = v.clamp(1, 4);
                     }
                 }
+                "--fullscreen" | "-f" => {
+                    cfg.fullscreen = true;
+                }
                 "--resolution" => {
                     if let Some(s) = args.next() {
-                        let parts: Vec<&str> = s.split(['x', 'X', '*']).collect();
-                        if parts.len() == 2 {
-                            if let (Ok(w), Ok(h)) =
-                                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-                            {
-                                cfg.resolution = Some((w, h));
+                        if s.eq_ignore_ascii_case("native") || s.eq_ignore_ascii_case("fullscreen") {
+                            cfg.fullscreen = true;
+                        } else {
+                            let parts: Vec<&str> = s.split(['x', 'X', '*']).collect();
+                            if parts.len() == 2 {
+                                if let (Ok(w), Ok(h)) =
+                                    (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                                {
+                                    cfg.resolution = Some((w, h));
+                                }
+                            } else if s == "1024" {
+                                cfg.resolution = Some((1024, 1024));
+                            } else if s == "768" {
+                                cfg.resolution = Some((768, 512));
                             }
-                        } else if s == "1024" {
-                            cfg.resolution = Some((1024, 1024));
-                        } else if s == "768" {
-                            cfg.resolution = Some((768, 512));
                         }
                     }
                 }
@@ -225,7 +234,8 @@ impl AppArgs {
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
-                           --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024)\n\n\
+                           --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
+                           --fullscreen, -f     Start in host native fullscreen 1:1 mode\n\n\
                          Hotkeys:\n  \
                            F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F5: Cycle Resolution | F12: Reset"
                     );
@@ -257,6 +267,7 @@ struct Msx68kApp {
     mouse_left: bool,
     mouse_right: bool,
     last_resolution: (u32, u32),
+    last_fullscreen: bool,
 }
 
 impl Msx68kApp {
@@ -369,11 +380,15 @@ impl Msx68kApp {
         }
 
         vm.reset().expect("Failed to reset X68000 VM");
+        if args.fullscreen {
+            vm.bus.fullscreen_mode = true;
+        }
         if let Some((w, h)) = args.resolution {
             vm.bus.apply_screen_resolution(w, h);
             println!("Configured initial screen resolution: {}x{}", w, h);
         }
         let initial_res = vm.bus.crtc.active_resolution();
+        let initial_fs = vm.bus.fullscreen_mode;
         println!(
             "Initialized X68000 VM ({:?}, {} MB RAM, initial PC=${:06X})",
             vm.speed_mode(),
@@ -393,6 +408,7 @@ impl Msx68kApp {
             mouse_left: false,
             mouse_right: false,
             last_resolution: initial_res,
+            last_fullscreen: initial_fs,
         }
     }
 
@@ -445,6 +461,18 @@ impl ApplicationHandler for Msx68kApp {
                 .create_window(attrs)
                 .expect("Failed to create window"),
         );
+
+        if let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) {
+            let msize = monitor.size();
+            let nw = ((msize.width.clamp(768, 3840) + 15) & !15).clamp(768, 3840);
+            let nh = msize.height.clamp(512, 2160);
+            self.vm.bus.host_native_resolution = (nw, nh);
+        }
+        if self.vm.bus.fullscreen_mode {
+            let (nw, nh) = self.vm.bus.host_native_resolution;
+            self.vm.bus.apply_screen_resolution(nw, nh);
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -610,8 +638,11 @@ impl ApplicationHandler for Msx68kApp {
                                 let (next_w, next_h) = match (cur_w, cur_h) {
                                     (768, 512) => (1024, 768),
                                     (1024, 768) => (1024, 1024),
+                                    (1024, 1024) => (1280, 960),
+                                    (1280, 960) => (1920, 1080),
                                     _ => (768, 512),
                                 };
+                                self.vm.bus.fullscreen_mode = false;
                                 self.vm.bus.apply_screen_resolution(next_w, next_h);
                                 println!("F5: Switched resolution to {}x{}", next_w, next_h);
                                 return;
@@ -640,23 +671,37 @@ impl ApplicationHandler for Msx68kApp {
                 self.step_vm_one_frame();
 
                 let active_res = self.vm.bus.crtc.active_resolution();
-                if active_res != self.last_resolution {
+                let active_fs = self.vm.bus.fullscreen_mode;
+                if active_res != self.last_resolution || active_fs != self.last_fullscreen {
                     self.last_resolution = active_res;
+                    self.last_fullscreen = active_fs;
                     if let Some(gpu) = &mut self.gpu {
-                        let new_w = active_res.0 * self.args.scale;
-                        let new_h = active_res.1 * self.args.scale;
-                        let applied = gpu
-                            .window
-                            .request_inner_size(PhysicalSize::new(new_w, new_h))
-                            .unwrap_or(PhysicalSize::new(new_w, new_h));
-                        gpu.surface_config.width = applied.width.max(1);
-                        gpu.surface_config.height = applied.height.max(1);
-                        gpu.surface
-                            .configure(gpu.compositor.device(), &gpu.surface_config);
-                        println!(
-                            "Auto-resized window to {}x{} (Guest resolution {}x{})",
-                            applied.width, applied.height, active_res.0, active_res.1
-                        );
+                        if active_fs {
+                            gpu.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                            gpu.surface_config.width = active_res.0.max(1);
+                            gpu.surface_config.height = active_res.1.max(1);
+                            gpu.surface.configure(gpu.compositor.device(), &gpu.surface_config);
+                            println!(
+                                "Configured fullscreen mode for {}x{}",
+                                active_res.0, active_res.1
+                            );
+                        } else {
+                            gpu.window.set_fullscreen(None);
+                            let new_w = active_res.0 * self.args.scale;
+                            let new_h = active_res.1 * self.args.scale;
+                            let applied = gpu
+                                .window
+                                .request_inner_size(PhysicalSize::new(new_w, new_h))
+                                .unwrap_or(PhysicalSize::new(new_w, new_h));
+                            gpu.surface_config.width = applied.width.max(1);
+                            gpu.surface_config.height = applied.height.max(1);
+                            gpu.surface
+                                .configure(gpu.compositor.device(), &gpu.surface_config);
+                            println!(
+                                "Auto-resized window to {}x{} (Guest resolution {}x{})",
+                                applied.width, applied.height, active_res.0, active_res.1
+                            );
+                        }
                     }
                 }
 

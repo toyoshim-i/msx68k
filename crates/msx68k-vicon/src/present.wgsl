@@ -15,8 +15,8 @@ struct ViconUniforms {
     r1_priority: u32,
     r2_display: u32,
     contrast: u32,
-    _pad0: u32,
-    _pad1: u32,
+    tvram_row_bytes: u32,
+    tvram_plane_bytes: u32,
 };
 
 @group(0) @binding(0)

@@ -139,7 +139,7 @@ impl Crtc {
     pub fn active_resolution(&self) -> (u32, u32) {
         let h_cols = self.regs[3].saturating_sub(self.regs[2]) as u32;
         let width = match h_cols * 8 {
-            w if (256..=1024).contains(&w) => w,
+            w if (256..=4096).contains(&w) => w,
             _ => match self.regs[20] & 0x0003 {
                 0 => 256,
                 1 => 512,
@@ -147,7 +147,7 @@ impl Crtc {
             },
         };
         let v_lines = self.regs[7].saturating_sub(self.regs[6]) as u32;
-        let height = if (128..=1024).contains(&v_lines) {
+        let height = if (128..=4096).contains(&v_lines) {
             let v_res = (self.regs[20] >> 2) & 0x03;
             let high_res = (self.regs[20] & 0x0010) != 0;
             if high_res && v_res == 0 {
@@ -190,7 +190,7 @@ impl Crtc {
     fn reg_mask(reg_idx: usize) -> u16 {
         match reg_idx {
             0..=3 => 0x00FF,
-            4..=7 => 0x07FF,
+            4..=7 => 0x0FFF,
             8 => 0x00FF,
             9..=11 => 0x07FF,
             12..=13 => 0x03FF,
@@ -294,10 +294,9 @@ impl Crtc {
         }
     }
 
-    /// Writes a byte to TVRAM (`$E00000`–`$E7FFFF`), applying CRTC `R21` simultaneous multi-plane
-    /// write and `R23` bitmask rules.
-    pub fn write_tvram_u8(&self, tvram: &mut [u8], addr: u32, val: u8) {
-        let offset = (addr as usize) & (TVRAM_BYTES - 1);
+    /// Writes a byte to a planar VRAM buffer of 4 bitplanes with `plane_bytes` stride,
+    /// applying CRTC `R21` simultaneous multi-plane write and `R23` bitmask rules.
+    pub fn write_planar_vram_u8(&self, buf: &mut [u8], plane_bytes: usize, offset: usize, val: u8) {
         let r21 = self.regs[21];
         let use_mask = (r21 & 0x0200) != 0;
         let sim_access = (r21 & 0x0100) != 0;
@@ -312,24 +311,26 @@ impl Crtc {
             0x00
         };
 
-        if sim_access {
-            let in_plane = offset & (TVRAM_PLANE_BYTES - 1);
+        if sim_access && plane_bytes > 0 {
+            let in_plane = offset % plane_bytes;
             let plane_bits = (r21 >> 4) & 0x0F;
             for plane in 0..4 {
                 if (plane_bits & (1 << plane)) != 0 {
-                    let idx = plane * TVRAM_PLANE_BYTES + in_plane;
-                    tvram[idx] = (tvram[idx] & mask) | (val & !mask);
+                    let idx = plane * plane_bytes + in_plane;
+                    if idx < buf.len() {
+                        buf[idx] = (buf[idx] & mask) | (val & !mask);
+                    }
                 }
             }
-        } else {
-            tvram[offset] = (tvram[offset] & mask) | (val & !mask);
+        } else if offset < buf.len() {
+            buf[offset] = (buf[offset] & mask) | (val & !mask);
         }
     }
 
-    /// Writes a 16-bit big-endian word to TVRAM (`$E00000`–`$E7FFFF`), applying CRTC `R21`
-    /// simultaneous multi-plane write and `R23` 16-bit bitmask rules.
-    pub fn write_tvram_u16(&self, tvram: &mut [u8], addr: u32, val: u16) {
-        let offset = (addr as usize) & (TVRAM_BYTES - 2);
+    /// Writes a 16-bit big-endian word to a planar VRAM buffer of 4 bitplanes with `plane_bytes` stride,
+    /// applying CRTC `R21` simultaneous multi-plane write and `R23` 16-bit bitmask rules.
+    pub fn write_planar_vram_u16(&self, buf: &mut [u8], plane_bytes: usize, offset: usize, val: u16) {
+        let offset = offset & !1;
         let r21 = self.regs[21];
         let use_mask = (r21 & 0x0200) != 0;
         let sim_access = (r21 & 0x0100) != 0;
@@ -347,20 +348,38 @@ impl Crtc {
         let val_hi = (val >> 8) as u8;
         let val_lo = val as u8;
 
-        if sim_access {
-            let in_plane = offset & (TVRAM_PLANE_BYTES - 2);
+        if sim_access && plane_bytes > 0 {
+            let in_plane = offset % plane_bytes;
             let plane_bits = (r21 >> 4) & 0x0F;
             for plane in 0..4 {
                 if (plane_bits & (1 << plane)) != 0 {
-                    let idx = plane * TVRAM_PLANE_BYTES + in_plane;
-                    tvram[idx] = (tvram[idx] & mask_hi) | (val_hi & !mask_hi);
-                    tvram[idx + 1] = (tvram[idx + 1] & mask_lo) | (val_lo & !mask_lo);
+                    let idx = plane * plane_bytes + in_plane;
+                    if idx + 1 < buf.len() {
+                        buf[idx] = (buf[idx] & mask_hi) | (val_hi & !mask_hi);
+                        buf[idx + 1] = (buf[idx + 1] & mask_lo) | (val_lo & !mask_lo);
+                    }
                 }
             }
-        } else {
-            tvram[offset] = (tvram[offset] & mask_hi) | (val_hi & !mask_hi);
-            tvram[offset + 1] = (tvram[offset + 1] & mask_lo) | (val_lo & !mask_lo);
+        } else if offset + 1 < buf.len() {
+            buf[offset] = (buf[offset] & mask_hi) | (val_hi & !mask_hi);
+            buf[offset + 1] = (buf[offset + 1] & mask_lo) | (val_lo & !mask_lo);
         }
+    }
+
+    /// Writes a byte to TVRAM (`$E00000`–`$E7FFFF`), applying CRTC `R21` simultaneous multi-plane
+    /// write and `R23` bitmask rules.
+    #[inline]
+    pub fn write_tvram_u8(&self, tvram: &mut [u8], addr: u32, val: u8) {
+        let offset = (addr as usize) & (TVRAM_BYTES - 1);
+        self.write_planar_vram_u8(tvram, TVRAM_PLANE_BYTES, offset, val);
+    }
+
+    /// Writes a 16-bit big-endian word to TVRAM (`$E00000`–`$E7FFFF`), applying CRTC `R21`
+    /// simultaneous multi-plane write and `R23` 16-bit bitmask rules.
+    #[inline]
+    pub fn write_tvram_u16(&self, tvram: &mut [u8], addr: u32, val: u16) {
+        let offset = (addr as usize) & (TVRAM_BYTES - 2);
+        self.write_planar_vram_u16(tvram, TVRAM_PLANE_BYTES, offset, val);
     }
 
     /// Executes a hardware 4-scanline (`512`-byte) raster copy from `R22` high byte (`src`)
@@ -444,15 +463,15 @@ impl Crtc {
         while self.cycle_in_raster >= scanline_cycles {
             self.cycle_in_raster -= scanline_cycles;
 
-            let v_total = (self.regs[4] & 0x07FF).max(256);
+            let v_total = (self.regs[4] & 0x0FFF).max(256);
             if self.current_raster >= v_total {
                 self.current_raster = 0;
             } else {
                 self.current_raster += 1;
             }
 
-            let v_disp_start = (self.regs[6] & 0x07FF).saturating_add(1);
-            let v_disp_end = (self.regs[7] & 0x07FF).saturating_add(1);
+            let v_disp_start = (self.regs[6] & 0x0FFF).saturating_add(1);
+            let v_disp_end = (self.regs[7] & 0x0FFF).saturating_add(1);
             let next_v_disp =
                 self.current_raster >= v_disp_start && self.current_raster < v_disp_end;
 

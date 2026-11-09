@@ -18,6 +18,8 @@ pub const MAX_MAIN_RAM_BYTES: usize = 12 * 1024 * 1024;
 pub const GVRAM_BYTES: usize = 512 * 1024;
 /// TVRAM physical capacity (`512 KB`).
 pub const TVRAM_BYTES: usize = 512 * 1024;
+/// Extended Planar Framebuffer Base Address (`$1000_0000`) for Beyond 1K×1K modes.
+pub const EXT_TVRAM_BASE: u32 = 0x1000_0000;
 /// Sprite / PCG / BG window capacity (`64 KB`, `$EB0000`–`$EBFFFF`).
 pub const SPRITE_WINDOW_BYTES: usize = 64 * 1024;
 /// Core I/O window capacity (`128 KB`, `$E80000`–`$E9FFFF`).
@@ -60,9 +62,9 @@ pub struct X68kBus {
     /// raise a hardware Bus Error (`Vector 2`), matching real X68000 memory sizing probes.
     pub(crate) main_ram: Vec<u8>,
     /// Lazily allocated GVRAM (`512 KB`).
-    gvram: Option<Box<[u8]>>,
+    pub(crate) gvram: Option<Box<[u8]>>,
     /// Lazily allocated TVRAM (`512 KB`, `$E00000`–`$E7FFFF`).
-    tvram: Option<Box<[u8]>>,
+    pub(crate) tvram: Option<Box<[u8]>>,
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
     sprite_bg: Option<Box<[u8]>>,
     /// Battery-backed SRAM (`$ED0000`–`$ED3FFF`, 16 KB).
@@ -111,6 +113,14 @@ pub struct X68kBus {
     pub host_mouse_pos: Option<(i16, i16)>,
     /// Configured display target resolution `(width, height)` across reboots and mode switches.
     pub target_resolution: Option<(u32, u32)>,
+    /// Extended planar framebuffer at `0x1000_0000` (Approach B: Beyond 1K×1K).
+    pub(crate) ext_tvram: Option<Vec<u8>>,
+    pub(crate) ext_tvram_row_bytes: usize,
+    pub(crate) ext_tvram_plane_bytes: usize,
+    /// Host OS native display resolution for fullscreen 1:1 mode.
+    pub host_native_resolution: (u32, u32),
+    /// Whether host native fullscreen mode is active.
+    pub fullscreen_mode: bool,
 }
 
 impl X68kBus {
@@ -164,6 +174,11 @@ impl X68kBus {
             scsi: crate::scsi::ScsiController::new(),
             host_mouse_pos: None,
             target_resolution: None,
+            ext_tvram: None,
+            ext_tvram_row_bytes: 0,
+            ext_tvram_plane_bytes: 0,
+            host_native_resolution: (1920, 1080),
+            fullscreen_mode: false,
         }
     }
 
@@ -219,6 +234,49 @@ impl X68kBus {
     pub fn tvram_mut(&mut self) -> &mut [u8] {
         self.tvram
             .get_or_insert_with(|| vec![0u8; TVRAM_BYTES].into_boxed_slice())
+    }
+
+    /// Returns `true` if the extended planar TVRAM at `0x1000_0000` is active.
+    #[inline]
+    pub fn is_ext_tvram_active(&self) -> bool {
+        self.ext_tvram.is_some() && self.ext_tvram_plane_bytes > 0
+    }
+
+    /// Returns the currently active planar TVRAM buffer (extended TVRAM if active, else standard TVRAM).
+    #[inline]
+    pub fn active_tvram(&self) -> Option<&[u8]> {
+        if self.is_ext_tvram_active() {
+            self.ext_tvram.as_deref()
+        } else {
+            self.tvram.as_deref()
+        }
+    }
+
+    /// Returns the scanline row bytes of the active planar TVRAM (128 for standard TVRAM).
+    #[inline]
+    pub fn active_tvram_row_bytes(&self) -> usize {
+        if self.is_ext_tvram_active() {
+            self.ext_tvram_row_bytes
+        } else {
+            128
+        }
+    }
+
+    /// Returns the plane byte stride of the active planar TVRAM (128 KB for standard TVRAM).
+    #[inline]
+    pub fn active_tvram_plane_bytes(&self) -> usize {
+        if self.is_ext_tvram_active() {
+            self.ext_tvram_plane_bytes
+        } else {
+            crate::crtc::TVRAM_PLANE_BYTES
+        }
+    }
+
+    /// Returns `true` if an extended CRT mode ($50) or resolution beyond standard 768x512 is active.
+    pub fn is_extended_crtmod_active(&self) -> bool {
+        self.fullscreen_mode
+            || self.target_resolution.is_some_and(|(w, h)| (w, h) != (768, 512))
+            || (self.sram.get(0x7E).copied().unwrap_or(0) & 0x3F) == 0x30
     }
 
     /// Direct slice access to GVRAM (`512 KB`, `$C00000`–`$DFFFFF`) if allocated.
@@ -408,6 +466,10 @@ impl Bus for X68kBus {
     }
 
     fn read_u8(&mut self, addr: u32, supervisor: bool) -> Result<u8, BusFault> {
+        if addr >= EXT_TVRAM_BASE {
+            let off = (addr - EXT_TVRAM_BASE) as usize;
+            return Ok(self.ext_tvram.as_ref().and_then(|b| b.get(off).copied()).unwrap_or(0));
+        }
         let a = addr & 0x00FF_FFFF;
         let region = MemoryRegion::from_addr(a);
         self.record_region_access(region);
@@ -533,6 +595,15 @@ impl Bus for X68kBus {
     }
 
     fn read_u16(&mut self, addr: u32, supervisor: bool) -> Result<u16, BusFault> {
+        if addr >= EXT_TVRAM_BASE {
+            let off = (addr - EXT_TVRAM_BASE) as usize;
+            if let Some(ref b) = self.ext_tvram {
+                if off + 1 < b.len() {
+                    return Ok(((b[off] as u16) << 8) | (b[off + 1] as u16));
+                }
+            }
+            return Ok(0);
+        }
         let a = addr & 0x00FF_FFFF;
         // Fast path for Main RAM aligned 16-bit read
         if a < 0x00C0_0000 {
@@ -565,6 +636,17 @@ impl Bus for X68kBus {
     }
 
     fn write_u8(&mut self, addr: u32, val: u8, supervisor: bool) -> Result<(), BusFault> {
+        if addr >= EXT_TVRAM_BASE {
+            self.access_flags.tvram_accessed = true;
+            let off = (addr - EXT_TVRAM_BASE) as usize;
+            let plane_bytes = self.ext_tvram_plane_bytes;
+            if let Some(ref mut b) = self.ext_tvram {
+                if plane_bytes > 0 {
+                    self.crtc.write_planar_vram_u8(b, plane_bytes, off, val);
+                }
+            }
+            return Ok(());
+        }
         let a = addr & 0x00FF_FFFF;
         let region = MemoryRegion::from_addr(a);
         self.record_region_access(region);
@@ -756,6 +838,17 @@ impl Bus for X68kBus {
     }
 
     fn write_u16(&mut self, addr: u32, val: u16, supervisor: bool) -> Result<(), BusFault> {
+        if addr >= EXT_TVRAM_BASE {
+            self.access_flags.tvram_accessed = true;
+            let off = (addr - EXT_TVRAM_BASE) as usize;
+            let plane_bytes = self.ext_tvram_plane_bytes;
+            if let Some(ref mut b) = self.ext_tvram {
+                if plane_bytes > 0 {
+                    self.crtc.write_planar_vram_u16(b, plane_bytes, off, val);
+                }
+            }
+            return Ok(());
+        }
         let a = addr & 0x00FF_FFFF;
         if a < 0x00C0_0000 {
             if self.enforce_supervisor_protection && !supervisor && a < self.supervisor_area_limit {

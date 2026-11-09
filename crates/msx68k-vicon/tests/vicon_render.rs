@@ -206,3 +206,60 @@ fn test_sxwin31_boot_and_vicon_render() {
         assert_eq!(cpu_frame.rgba8, gpu_frame.rgba8);
     }
 }
+
+#[test]
+fn test_vicon_high_res_ext_tvram_rendering() {
+    let mut vm = X68kVm::new_app_vm();
+
+    // Switch to 1920x1080 native resolution
+    vm.bus.apply_screen_resolution(1920, 1080);
+    assert!(vm.bus.is_ext_tvram_active());
+    assert_eq!(vm.bus.crtc.active_resolution(), (1920, 1080));
+
+    // Configure Text Palette entries
+    vm.bus.write_u16(0x00E8_2200, 0x0000, true).unwrap(); // Text #0: Transparent
+    vm.bus.write_u16(0x00E8_2202, 0xFFFE, true).unwrap(); // Text #1: White
+    vm.bus.write_u16(0x00E8_2204, 0x07C0, true).unwrap(); // Text #2: Red
+    vm.bus.write_u16(0x00E8_2206, 0xF800, true).unwrap(); // Text #3: Green
+
+    // Enable Text display: R2 bit 5 -> 0x0020
+    vm.bus.write_u16(0x00E8_2600, 0x0020, true).unwrap();
+
+    // Write a pixel pattern at (x=100, y=100) using EXT_TVRAM_BASE
+    // row_bytes = ((1920 + 15) / 16) * 2 = 240
+    // in_plane = 100 * 240 + (100 / 8) = 24012
+    let row_bytes = vm.bus.active_tvram_row_bytes();
+    let plane_bytes = vm.bus.active_tvram_plane_bytes();
+    let byte_off = 100 * row_bytes + (100 / 8);
+    let bit = 7 - (100 % 8);
+
+    // Plane 0 bit set (color bit 0)
+    let addr_p0 = msx68k_bus::EXT_TVRAM_BASE + (byte_off as u32);
+    // Plane 1 bit set (color bit 1)
+    let addr_p1 = msx68k_bus::EXT_TVRAM_BASE + (plane_bytes as u32) + (byte_off as u32);
+
+    vm.bus.write_u8(addr_p0, 1 << bit, true).unwrap();
+    vm.bus.write_u8(addr_p1, 1 << bit, true).unwrap();
+
+    let cpu_frame = render_bus_frame_cpu(&vm.bus);
+    assert_eq!(cpu_frame.width, 1920);
+    assert_eq!(cpu_frame.height, 1080);
+    assert!(cpu_frame.count_lit_pixels() > 0);
+
+    // Verify pixel at (100, 100) is green (Color #3 = 0xF800 -> G=31, R=0, B=0)
+    let px_idx = (100 * 1920 + 100) * 4;
+    let r = cpu_frame.rgba8[px_idx];
+    let g = cpu_frame.rgba8[px_idx + 1];
+    let b = cpu_frame.rgba8[px_idx + 2];
+    assert!(g > 200, "Green channel should be bright, got {}", g);
+    assert_eq!(r, 0);
+    assert_eq!(b, 0);
+
+    // If GPU compositor is available, verify GPU vs CPU parity at 1920x1080
+    if let Some(mut gpu) = ViconGpuCompositor::new() {
+        let gpu_frame = gpu.render_bus_frame(&vm.bus);
+        assert_eq!(gpu_frame.width, 1920);
+        assert_eq!(gpu_frame.height, 1080);
+        assert_eq!(gpu_frame.rgba8[px_idx..px_idx + 4], [0, g, 0, 0xFF]);
+    }
+}

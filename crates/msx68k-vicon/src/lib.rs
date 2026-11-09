@@ -11,9 +11,13 @@
 use bytemuck::{Pod, Zeroable};
 use msx68k_bus::{X68kBus, GVRAM_BYTES, TVRAM_BYTES, TVRAM_PLANE_BYTES};
 
-/// Maximum framebuffer dimension (`1024 × 1024`).
-pub const MAX_FB_WIDTH: u32 = 1024;
-pub const MAX_FB_HEIGHT: u32 = 1024;
+/// Maximum framebuffer dimension (`3840 × 2160`).
+pub const MAX_FB_WIDTH: u32 = 3840;
+pub const MAX_FB_HEIGHT: u32 = 2160;
+
+/// Maximum TVRAM buffer bytes (4 bitplanes for 3840×2160 = 4,147,200 bytes).
+pub const MAX_TVRAM_BUF_BYTES: usize =
+    4 * ((MAX_FB_WIDTH as usize / 8) * (MAX_FB_HEIGHT as usize));
 
 /// Uniform parameters uploaded to the WGSL VICON compositor shader.
 #[repr(C)]
@@ -29,8 +33,8 @@ pub struct ViconUniforms {
     pub r1_priority: u32,
     pub r2_display: u32,
     pub contrast: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub tvram_row_bytes: u32,
+    pub tvram_plane_bytes: u32,
 }
 
 impl ViconUniforms {
@@ -49,8 +53,8 @@ impl ViconUniforms {
             r1_priority: bus.vicon.r1_priority() as u32,
             r2_display: bus.vicon.r2_display() as u32,
             contrast: (bus.sysport.contrast & 0x0F) as u32,
-            _pad0: 0,
-            _pad1: 0,
+            tvram_row_bytes: bus.active_tvram_row_bytes() as u32,
+            tvram_plane_bytes: bus.active_tvram_plane_bytes() as u32,
         }
     }
 }
@@ -158,7 +162,7 @@ impl ViconGpuCompositor {
 
         let tvram_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vicon_tvram_buf"),
-            size: TVRAM_BYTES as u64,
+            size: MAX_TVRAM_BUF_BYTES as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -424,8 +428,9 @@ impl ViconGpuCompositor {
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        if let Some(tvram) = bus.tvram() {
-            self.queue.write_buffer(&self.tvram_buf, 0, tvram);
+        if let Some(tvram) = bus.active_tvram() {
+            let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
+            self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
         }
 
         if let Some(gvram) = bus.gvram() {
@@ -528,8 +533,9 @@ impl ViconGpuCompositor {
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        if let Some(tvram) = bus.tvram() {
-            self.queue.write_buffer(&self.tvram_buf, 0, tvram);
+        if let Some(tvram) = bus.active_tvram() {
+            let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
+            self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
         } else {
             let zero = vec![0u8; TVRAM_BYTES];
             self.queue.write_buffer(&self.tvram_buf, 0, &zero);
@@ -611,7 +617,9 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let gr_rank = (params.r1_priority >> 10) & 3;
     let text_above_gr = tx_rank <= gr_rank;
 
-    let tvram = bus.tvram();
+    let tvram = bus.active_tvram();
+    let row_bytes = params.tvram_row_bytes as usize;
+    let plane_bytes = params.tvram_plane_bytes as usize;
     let gvram = bus.gvram();
     let tx_pal = bus.vicon.text_palette();
     let gr_pal = bus.vicon.graphic_palette();
@@ -633,15 +641,20 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             let mut tx_idx = 0usize;
             if text_enabled {
                 if let Some(tv) = tvram {
-                    let tx = (x + params.text_scroll_x) & 1023;
-                    let ty = (y + params.text_scroll_y) & 1023;
-                    let in_plane = ((ty * 128) + (tx >> 3)) as usize;
-                    let bit = 7 - (tx & 7);
-                    let b0 = ((tv[in_plane] >> bit) & 1) as usize;
-                    let b1 = ((tv[TVRAM_PLANE_BYTES + in_plane] >> bit) & 1) as usize;
-                    let b2 = ((tv[2 * TVRAM_PLANE_BYTES + in_plane] >> bit) & 1) as usize;
-                    let b3 = ((tv[3 * TVRAM_PLANE_BYTES + in_plane] >> bit) & 1) as usize;
-                    tx_idx = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+                    let (tx, ty) = if row_bytes == 128 && plane_bytes == TVRAM_PLANE_BYTES {
+                        ((x + params.text_scroll_x) & 1023, (y + params.text_scroll_y) & 1023)
+                    } else {
+                        (x, y)
+                    };
+                    let in_plane = (ty as usize) * row_bytes + ((tx as usize) >> 3);
+                    if 3 * plane_bytes + in_plane < tv.len() {
+                        let bit = 7 - (tx & 7);
+                        let b0 = ((tv[in_plane] >> bit) & 1) as usize;
+                        let b1 = ((tv[plane_bytes + in_plane] >> bit) & 1) as usize;
+                        let b2 = ((tv[2 * plane_bytes + in_plane] >> bit) & 1) as usize;
+                        let b3 = ((tv[3 * plane_bytes + in_plane] >> bit) & 1) as usize;
+                        tx_idx = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+                    }
                 }
             }
 
@@ -699,7 +712,7 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
 /// Decodes visible 8×16 ANK ASCII text lines from TVRAM by matching 8×16 cells against the
 /// X68000 CGROM 8×16 font at `$F3A800` (offset `0x03A800` in `bus.rom()`).
 pub fn decode_tvram_ank_lines(bus: &X68kBus, max_cols: usize, max_rows: usize) -> Vec<String> {
-    let Some(tvram) = bus.tvram() else {
+    let Some(tvram) = bus.active_tvram() else {
         return Vec::new();
     };
     let rom = bus.rom();
@@ -709,6 +722,8 @@ pub fn decode_tvram_ank_lines(bus: &X68kBus, max_cols: usize, max_rows: usize) -
     }
 
     let scroll_y = bus.crtc.text_scroll_y() as usize;
+    let plane_bytes = bus.active_tvram_plane_bytes();
+    let row_bytes = bus.active_tvram_row_bytes();
     let cols = max_cols.min(96);
     let rows = max_rows.min(32);
     let mut lines = Vec::with_capacity(rows);
@@ -719,16 +734,22 @@ pub fn decode_tvram_ank_lines(bus: &X68kBus, max_cols: usize, max_rows: usize) -
             let mut cell = [0u8; 16];
             let mut any_bits = false;
             for (dy, slot) in cell.iter_mut().enumerate() {
-                let y = (scroll_y + row * 16 + dy) & 1023;
-                let off = y * 128 + col;
-                // Combine planes 0..3 so text drawn in any foreground color (1..15) is matched
-                let combined = tvram[off]
-                    | tvram[TVRAM_PLANE_BYTES + off]
-                    | tvram[2 * TVRAM_PLANE_BYTES + off]
-                    | tvram[3 * TVRAM_PLANE_BYTES + off];
-                *slot = combined;
-                if combined != 0 {
-                    any_bits = true;
+                let y = if row_bytes == 128 && plane_bytes == TVRAM_PLANE_BYTES {
+                    (scroll_y + row * 16 + dy) & 1023
+                } else {
+                    row * 16 + dy
+                };
+                let off = y * row_bytes + col;
+                if 3 * plane_bytes + off < tvram.len() {
+                    // Combine planes 0..3 so text drawn in any foreground color (1..15) is matched
+                    let combined = tvram[off]
+                        | tvram[plane_bytes + off]
+                        | tvram[2 * plane_bytes + off]
+                        | tvram[3 * plane_bytes + off];
+                    *slot = combined;
+                    if combined != 0 {
+                        any_bits = true;
+                    }
                 }
             }
 

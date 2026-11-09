@@ -324,6 +324,20 @@ mod tests {
                     _ => panic!("Unhandled mock SXCALL: 0x{:04X}", opcode),
                 }
             }
+
+            fn on_trap(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                trap_no: u8,
+                _pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                if trap_no == 15 && (state.d[0] & 0xFF) == 0x10 {
+                    bus.handle_iocs_crtmod(state)
+                } else {
+                    msx68k_cpu::TrapResult::PassToVector
+                }
+            }
         }
 
         let cmd_addr: u32 = 0x0001_2000;
@@ -490,6 +504,20 @@ mod tests {
                         msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
                     }
                     _ => panic!("Unhandled mock SXCALL: 0x{:04X}", opcode),
+                }
+            }
+
+            fn on_trap(
+                &mut self,
+                state: &mut msx68k_cpu::CpuState,
+                bus: &mut crate::bus::X68kBus,
+                trap_no: u8,
+                _pc: u32,
+            ) -> msx68k_cpu::TrapResult {
+                if trap_no == 15 && (state.d[0] & 0xFF) == 0x10 {
+                    bus.handle_iocs_crtmod(state)
+                } else {
+                    msx68k_cpu::TrapResult::PassToVector
                 }
             }
         }

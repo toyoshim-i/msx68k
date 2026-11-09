@@ -47,50 +47,26 @@ skip_dos_spaces:
 
 	* First non-whitespace argument character found!
 	subq.l	#1, a1
-
-	cmpi.b	#'0', (a1)
-	beq.s	set_dos_mode_0
-	cmpi.b	#'7', (a1)
-	beq.s	set_dos_mode_0
-
-	cmpi.b	#'1', (a1)
-	bne.s	check_dos_2
-
-	cmpi.b	#'0', 1(a1)
-	bne.s	set_dos_mode_1		; '1' -> Mode 1 (1024x768)
-
-	* '1024'
-	cmpi.b	#'x', 4(a1)
-	beq.s	set_dos_mode_1
-	cmpi.b	#'X', 4(a1)
-	beq.s	set_dos_mode_1
-	bra.s	set_dos_mode_2		; '1024' without x -> Mode 2 (1024x1024)
-
-check_dos_2:
-	cmpi.b	#'2', (a1)
-	beq.s	set_dos_mode_2
-	bra.s	set_dos_mode_0
-
-set_dos_mode_0:
-	moveq.l	#0, d1
+	bsr	parse_cli_arg
 	bra.s	apply_dos_mode
-
-set_dos_mode_1:
-	moveq.l	#1, d1
-	bra.s	apply_dos_mode
-
-set_dos_mode_2:
-	moveq.l	#2, d1
-
-apply_dos_mode:
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
-	move.w	d0, -(sp)
-	DOS	_EXIT2
 
 no_dos_args:
 	* Plain Human68k console fallback: cycle mode 0 -> 1 -> 2 -> 0
-	moveq.l	#-1, d1
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
+	moveq.l	#$10, d0
+	move.w	#$0150, d1
+	moveq.l	#-1, d2
+	trap	#15
+	* Find current mode index:
+	clr.w	d0
+	lea	preset_d2_table(pc), a2
+find_cycle_loop:
+	cmp.l	(a2)+, d1
+	beq.s	found_cycle
+	addq.w	#1, d0
+	cmpi.w	#3, d0
+	bcs.s	find_cycle_loop
+	clr.w	d0
+found_cycle:
 	addq.w	#1, d0
 	cmpi.w	#3, d0
 	bcs.s	apply_dos_cycled
@@ -98,9 +74,13 @@ no_dos_args:
 
 apply_dos_cycled:
 	move.w	d0, d1
-	ext.l	d1
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
-	move.w	d0, -(sp)
+	* Fall through to apply_dos_mode
+
+apply_dos_mode:
+	move.w	d1, -(sp)		; Save target mode_idx for _EXIT2
+	bsr	apply_mode_by_index
+	bsr	save_config_file
+	move.w	(sp)+, -(sp)
 	DOS	_EXIT2
 
 gui_start:
@@ -130,42 +110,11 @@ skip_gui_spaces:
 
 	* First non-whitespace character found in GUI launch arguments!
 	subq.l	#1, a1
-
-	cmpi.b	#'0', (a1)
-	beq.s	set_gui_mode_0
-	cmpi.b	#'7', (a1)
-	beq.s	set_gui_mode_0
-
-	cmpi.b	#'1', (a1)
-	bne.s	check_gui_2
-
-	cmpi.b	#'0', 1(a1)
-	bne.s	set_gui_mode_1
-
-	cmpi.b	#'x', 4(a1)
-	beq.s	set_gui_mode_1
-	cmpi.b	#'X', 4(a1)
-	beq.s	set_gui_mode_1
-	bra.s	set_gui_mode_2
-
-check_gui_2:
-	cmpi.b	#'2', (a1)
-	beq.s	set_gui_mode_2
-	bra.s	no_gui_cli_args
-
-set_gui_mode_0:
-	moveq.l	#0, d1
-	bra.s	apply_gui_cli_mode
-
-set_gui_mode_1:
-	moveq.l	#1, d1
-	bra.s	apply_gui_cli_mode
-
-set_gui_mode_2:
-	moveq.l	#2, d1
+	bsr	parse_cli_arg
 
 apply_gui_cli_mode:
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
+	bsr	apply_mode_by_index
+	bsr	save_config_file
 	clr.l	-(sp)
 	SXCALL	TSExit			; $A352
 	clr.w	-(sp)
@@ -179,7 +128,7 @@ no_gui_cli_args:
 	move.l	d0, (a1)
 
 	* Open SXMODE Window:
-	* bounds: left=180, top=120, right=400, bottom=270 (w=220, h=150)
+	* bounds: left=180, top=120, right=400, bottom=396 (w=220, h=276)
 	* WMOpen arguments (pushed right-to-left, total 26 bytes):
 	move.l	app_task_id(pc), -(sp)	; 8: refCon (long, Task ID)
 	move.w	#-1, -(sp)		; 7: goAwayFlag (word, TRUE = -1)
@@ -323,33 +272,33 @@ win_is_active:
 	cmpi.w	#200, d2
 	bge.s	post_mouse_event
 
-	* Button 0: top=40..bottom=62
+	* Check vertical bounds: top=40, bottom=258
 	cmpi.w	#40, d3
 	blt.s	post_mouse_event
-	cmpi.w	#62, d3
-	bge.s	check_btn_1
-	moveq.l	#0, d1
-	bra.s	apply_gui_mode
-
-check_btn_1:
-	* Button 1: top=68..bottom=90
-	cmpi.w	#68, d3
-	blt.s	post_mouse_event
-	cmpi.w	#90, d3
-	bge.s	check_btn_2
-	moveq.l	#1, d1
-	bra.s	apply_gui_mode
-
-check_btn_2:
-	* Button 2: top=96..bottom=118
-	cmpi.w	#96, d3
-	blt.s	post_mouse_event
-	cmpi.w	#118, d3
+	cmpi.w	#258, d3
 	bge.s	post_mouse_event
-	moveq.l	#2, d1
+
+	* Determine which of the 8 buttons was clicked (height 22, spacing 6, stride 28)
+	sub.w	#40, d3
+	clr.w	d4
+check_click_loop:
+	cmpi.w	#22, d3
+	bge.s	next_click_btn
+	* Inside button d4!
+	move.w	d4, d1
+	bra.s	apply_gui_mode
+
+next_click_btn:
+	sub.w	#28, d3
+	bmi.s	post_mouse_event	; Click in 6px gap between buttons
+	addq.w	#1, d4
+	cmpi.w	#8, d4
+	bcs.s	check_click_loop
+	bra.s	post_mouse_event
 
 apply_gui_mode:
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
+	bsr	apply_mode_by_index
+	bsr	save_config_file
 	bsr	draw_window_contents
 
 post_mouse_event:
@@ -384,117 +333,348 @@ draw_window_contents:
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
 
-	* Query current screen mode
-	moveq.l	#-1, d1
-	HYPERCALL HYPER_SX_SET_SCREEN_MODE
+	* Query current screen mode via IOCS _CRTMOD
+	moveq.l	#$10, d0
+	move.w	#$0150, d1
+	moveq.l	#-1, d2
+	trap	#15
+	* D1.L = (cur_w << 16) | cur_h, D2.L = fullscreen (1 or 0)
+
+	clr.w	d4
+	tst.l	d2
+	bne.s	is_fs_active
+	lea	preset_d2_table(pc), a2
+	clr.w	d3
+find_mode_loop:
+	cmp.l	(a2)+, d1
+	beq.s	found_active_mode
+	addq.w	#1, d3
+	cmpi.w	#7, d3
+	bcs.s	find_mode_loop
+	bra.s	store_active_mode
+found_active_mode:
+	move.w	d3, d4
+	bra.s	store_active_mode
+is_fs_active:
+	moveq.l	#7, d4
+store_active_mode:
 	lea	active_mode(pc), a1
-	move.w	d0, (a1)
+	move.w	d4, (a1)
 
 	* 0. Draw Title Label ("Screen Resolution:")
-	move.l	#$00140012, -(sp)	; x=20 ($0014), y=18 ($0012)
+	move.l	#$00140012, -(sp)	; x=20, y=18
 	SXCALL	GMMove			; $A16E
 	addq.l	#4, sp
 	pea	str_label(pc)
 	SXCALL	GMDrawStrL		; $A190
 	addq.l	#4, sp
 
-	* 1. Draw Button 0 (" 768 x 512 ")
+	* Draw all 8 buttons (stride 28)
+	clr.w	d3
+draw_btn_loop:
+	* FillRect background
 	move.w	#$0100, -(sp)		; GMPenMode(G_BACK << 8 | G_PSET)
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	pea	btn0_rect(pc)
+
+	move.w	d3, d0
+	lsl.w	#2, d0
+	lea	btn_rect_ptrs(pc), a0
+	move.l	0(a0, d0.w), -(sp)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
+
+	* FrameRect outline
 	clr.w	-(sp)			; GMPenMode(G_FORE << 8 | G_PSET)
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	pea	btn0_rect(pc)
+
+	move.w	d3, d0
+	lsl.w	#2, d0
+	lea	btn_rect_ptrs(pc), a0
+	move.l	0(a0, d0.w), -(sp)
 	SXCALL	GMFrameRect		; $A172
 	addq.l	#4, sp
-	move.l	#$0030002D, -(sp)	; LPoint: x=48 ($0030), y=45 ($002D)
+
+	* Move to text pos: x = btn_text_x[d3], y = 45 + d3 * 28
+	move.w	d3, d0
+	mulu.w	#28, d0
+	add.w	#45, d0			; y
+	move.w	d3, d1
+	add.w	d1, d1			; d3 * 2
+	lea	btn_text_x(pc), a0
+	move.w	0(a0, d1.w), d1		; x
+	swap	d1
+	move.w	d0, d1			; (x << 16) | y
+	move.l	d1, -(sp)
 	SXCALL	GMMove			; $A16E
 	addq.l	#4, sp
-	pea	str_mode0(pc)
+
+	* Draw text string
+	move.w	d3, d0
+	lsl.w	#2, d0
+	lea	btn_str_ptrs(pc), a0
+	move.l	0(a0, d0.w), -(sp)
 	SXCALL	GMDrawStrL		; $A190
 	addq.l	#4, sp
 
-	* 2. Draw Button 1 ("1024 x 768 ")
-	move.w	#$0100, -(sp)		; GMPenMode(G_BACK << 8 | G_PSET)
-	SXCALL	GMPenMode		; $A144
-	addq.l	#2, sp
-	pea	btn1_rect(pc)
-	SXCALL	GMFillRect		; $A173
-	addq.l	#4, sp
-	clr.w	-(sp)			; GMPenMode(G_FORE << 8 | G_PSET)
-	SXCALL	GMPenMode		; $A144
-	addq.l	#2, sp
-	pea	btn1_rect(pc)
-	SXCALL	GMFrameRect		; $A172
-	addq.l	#4, sp
-	move.l	#$00300049, -(sp)	; LPoint: x=48 ($0030), y=73 ($0049)
-	SXCALL	GMMove			; $A16E
-	addq.l	#4, sp
-	pea	str_mode1(pc)
-	SXCALL	GMDrawStrL		; $A190
-	addq.l	#4, sp
+	addq.w	#1, d3
+	cmpi.w	#8, d3
+	bcs.s	draw_btn_loop
 
-	* 3. Draw Button 2 ("1024 x 1024")
-	move.w	#$0100, -(sp)		; GMPenMode(G_BACK << 8 | G_PSET)
-	SXCALL	GMPenMode		; $A144
-	addq.l	#2, sp
-	pea	btn2_rect(pc)
-	SXCALL	GMFillRect		; $A173
-	addq.l	#4, sp
-	clr.w	-(sp)			; GMPenMode(G_FORE << 8 | G_PSET)
-	SXCALL	GMPenMode		; $A144
-	addq.l	#2, sp
-	pea	btn2_rect(pc)
-	SXCALL	GMFrameRect		; $A172
-	addq.l	#4, sp
-	move.l	#$002C0065, -(sp)	; LPoint: x=44 ($002C), y=101 ($0065)
-	SXCALL	GMMove			; $A16E
-	addq.l	#4, sp
-	pea	str_mode2(pc)
-	SXCALL	GMDrawStrL		; $A190
-	addq.l	#4, sp
-
-	* 4. Invert active button
-	* Set foreground color to 2 (XOR mask: 9 ^ 2 = 11, 11 ^ 2 = 9)
-	move.w	#2, -(sp)
+	* Invert active button
+	move.w	#2, -(sp)		; GMForeColor(2) (XOR mask)
 	SXCALL	GMForeColor		; $A147
 	addq.l	#2, sp
 
-	* Set pen mode to G_XOR (3)
-	move.w	#3, -(sp)
+	move.w	#3, -(sp)		; GMPenMode(3) (G_XOR)
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
 
 	move.w	active_mode(pc), d0
-	beq.s	invert_0
-	cmpi.w	#1, d0
-	beq.s	invert_1
-	pea	btn2_rect(pc)
-	bra.s	do_invert
-invert_0:
-	pea	btn0_rect(pc)
-	bra.s	do_invert
-invert_1:
-	pea	btn1_rect(pc)
-do_invert:
-	* Fill active button rectangle in XOR mode
+	andi.w	#7, d0
+	lsl.w	#2, d0
+	lea	btn_rect_ptrs(pc), a0
+	move.l	0(a0, d0.w), -(sp)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 
-	* Restore pen mode to G_PSET (0)
-	clr.w	-(sp)
+	clr.w	-(sp)			; GMPenMode(0) (G_PSET)
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
 
-	* Restore foreground color to G_BLACK (11)
-	move.w	#11, -(sp)
+	move.w	#11, -(sp)		; GMForeColor(11) (G_BLACK)
 	SXCALL	GMForeColor		; $A147
 	addq.l	#2, sp
 
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: apply_mode_by_index
+* Input: D1.W = mode index (0..7)
+* -----------------------------------------------------------------------------
+apply_mode_by_index:
+	movem.l	d0-d2/a0, -(sp)
+	andi.w	#7, d1
+	lsl.w	#2, d1
+	lea	preset_d2_table(pc), a0
+	move.l	0(a0, d1.w), d2		; D2.L = target D2 for _CRTMOD
+	moveq.l	#$10, d0		; IOCS _CRTMOD ($10)
+	move.w	#$0150, d1		; Extended mode $50
+	trap	#15
+	movem.l	(sp)+, d0-d2/a0
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: save_config_file
+* Saves A:\SYS\MSX68K.CFG with SCREEN_WIDTH, SCREEN_HEIGHT, FULLSCREEN
+* -----------------------------------------------------------------------------
+save_config_file:
+	movem.l	d0-d4/a0-a1, -(sp)
+
+	* If DOS exception vector at $002C is NULL, skip DOS file I/O
+	move.l	$002C.w, d0
+	beq	save_cfg_done
+
+	* Query active resolution and fullscreen flag via IOCS _CRTMOD
+	moveq.l	#$10, d0
+	move.w	#$0150, d1
+	moveq.l	#-1, d2
+	trap	#15
+	* D1.L = (w << 16) | h, D2.L = fullscreen (1 or 0)
+
+	lea	cfg_buf(pc), a0
+
+	* 1. Write "SCREEN_WIDTH="
+	lea	str_cfg_w(pc), a1
+copy_cfg_w:
+	move.b	(a1)+, (a0)+
+	bne.s	copy_cfg_w
+	subq.l	#1, a0
+
+	* Format width (D1 high word)
+	move.l	d1, d0
+	swap	d0
+	bsr	format_dec_u16
+
+	* Append \r\n
+	move.b	#13, (a0)+
+	move.b	#10, (a0)+
+
+	* 2. Write "SCREEN_HEIGHT="
+	lea	str_cfg_h(pc), a1
+copy_cfg_h:
+	move.b	(a1)+, (a0)+
+	bne.s	copy_cfg_h
+	subq.l	#1, a0
+
+	* Format height (D1 low word)
+	move.w	d1, d0
+	bsr	format_dec_u16
+
+	* Append \r\n
+	move.b	#13, (a0)+
+	move.b	#10, (a0)+
+
+	* 3. Write "FULLSCREEN="
+	lea	str_cfg_fs(pc), a1
+copy_cfg_fs:
+	move.b	(a1)+, (a0)+
+	bne.s	copy_cfg_fs
+	subq.l	#1, a0
+
+	* Format fullscreen flag (0 or 1)
+	move.b	d2, d0
+	andi.b	#1, d0
+	addi.b	#'0', d0
+	move.b	d0, (a0)+
+
+	* Append \r\n
+	move.b	#13, (a0)+
+	move.b	#10, (a0)+
+
+	* Total length = a0 - cfg_buf
+	lea	cfg_buf(pc), a1
+	move.l	a0, d3
+	sub.l	a1, d3			; D3.L = length to write
+
+	* Open/create A:\SYS\MSX68K.CFG using DOS _CREATE ($FF3C)
+	move.w	#$0020, -(sp)		; mode: archive/write
+	pea	cfg_path(pc)		; path
+	DOS	_CREATE			; $FF3C
+	addq.l	#6, sp
+
+	tst.l	d0
+	bmi	save_cfg_done		; If failed (D0 < 0), return
+	move.w	d0, d4			; D4.W = file handle
+
+	* Write buffer using DOS _WRITE ($FF40)
+	move.l	d3, -(sp)		; len
+	pea	cfg_buf(pc)		; buf
+	move.w	d4, -(sp)		; handle
+	DOS	_WRITE			; $FF40
+	lea	10(sp), sp
+
+	* Close handle using DOS _CLOSE ($FF3E)
+	move.w	d4, -(sp)		; handle
+	DOS	_CLOSE			; $FF3E
+	addq.l	#2, sp
+
+save_cfg_done:
+	movem.l	(sp)+, d0-d4/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: format_dec_u16
+* Formats unsigned 16-bit number in D0.W into ASCII decimal at (A0)+
+* -----------------------------------------------------------------------------
+format_dec_u16:
+	movem.l	d1-d3, -(sp)
+	clr.w	d3			; digit count
+fmt_dec_div_loop:
+	andi.l	#$FFFF, d0
+	divu.w	#10, d0
+	swap	d0			; remainder in low word
+	move.w	d0, -(sp)
+	addq.w	#1, d3
+	clr.w	d0
+	swap	d0			; quotient in low word
+	tst.w	d0
+	bne.s	fmt_dec_div_loop
+
+fmt_dec_pop_loop:
+	move.w	(sp)+, d1
+	addi.b	#'0', d1
+	move.b	d1, (a0)+
+	subq.w	#1, d3
+	bne.s	fmt_dec_pop_loop
+
+	movem.l	(sp)+, d1-d3
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: parse_cli_arg
+* Input: A1 = pointer to first non-whitespace character
+* Output: D1.W = mode index (0..7)
+* -----------------------------------------------------------------------------
+parse_cli_arg:
+	cmpi.b	#'0', (a1)
+	beq	arg_mode_0
+	cmpi.b	#'7', (a1)
+	bne	arg_not_7
+	cmpi.b	#'6', 1(a1)
+	beq	arg_mode_0		; "768" -> Mode 0
+	bra	arg_mode_7		; "7" -> Mode 7
+arg_not_7:
+	cmpi.b	#'f', (a1)
+	beq	arg_mode_7
+	cmpi.b	#'F', (a1)
+	beq	arg_mode_7
+
+	cmpi.b	#'1', (a1)
+	bne	arg_check_2_to_6
+
+	* Starts with '1':
+	cmpi.b	#'0', 1(a1)
+	bne	arg_check_12_or_16_or_19
+
+	* Starts with "10" (1024):
+	cmpi.b	#'x', 4(a1)
+	beq	arg_mode_1		; 1024x768 -> Mode 1
+	cmpi.b	#'X', 4(a1)
+	beq	arg_mode_1
+	bra	arg_mode_2		; 1024 without x -> Mode 2
+
+arg_check_12_or_16_or_19:
+	cmpi.b	#'2', 1(a1)		; "1280"
+	bne	arg_check_16_or_19
+	cmpi.b	#'7', 5(a1)		; "1280x720"
+	beq	arg_mode_3
+	bra	arg_mode_4		; "1280x960"
+
+arg_check_16_or_19:
+	cmpi.b	#'6', 1(a1)		; "1600"
+	beq	arg_mode_5
+	cmpi.b	#'9', 1(a1)		; "1920"
+	beq	arg_mode_6
+	bra	arg_mode_1		; "1" -> Mode 1
+
+arg_check_2_to_6:
+	cmpi.b	#'2', (a1)
+	beq	arg_mode_2
+	cmpi.b	#'3', (a1)
+	beq	arg_mode_3
+	cmpi.b	#'4', (a1)
+	beq	arg_mode_4
+	cmpi.b	#'5', (a1)
+	beq	arg_mode_5
+	cmpi.b	#'6', (a1)
+	beq	arg_mode_6
+	bra	arg_mode_0
+
+arg_mode_0:
+	moveq.l	#0, d1
+	rts
+arg_mode_1:
+	moveq.l	#1, d1
+	rts
+arg_mode_2:
+	moveq.l	#2, d1
+	rts
+arg_mode_3:
+	moveq.l	#3, d1
+	rts
+arg_mode_4:
+	moveq.l	#4, d1
+	rts
+arg_mode_5:
+	moveq.l	#5, d1
+	rts
+arg_mode_6:
+	moveq.l	#6, d1
+	rts
+arg_mode_7:
+	moveq.l	#7, d1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -505,7 +685,7 @@ win_title:
 	.even
 
 win_bounds:
-	.dc.w	180, 120, 400, 270	; left, top, right, bottom (w=220, h=150)
+	.dc.w	180, 120, 400, 396	; left, top, right, bottom (w=220, h=276)
 
 str_label:
 	.dc.b	18, "Screen Resolution:", 0
@@ -513,23 +693,79 @@ str_label:
 
 btn0_rect:
 	.dc.w	20, 40, 200, 62		; left, top, right, bottom
-
 btn1_rect:
-	.dc.w	20, 68, 200, 90		; left, top, right, bottom
-
+	.dc.w	20, 68, 200, 90
 btn2_rect:
-	.dc.w	20, 96, 200, 118	; left, top, right, bottom
+	.dc.w	20, 96, 200, 118
+btn3_rect:
+	.dc.w	20, 124, 200, 146
+btn4_rect:
+	.dc.w	20, 152, 200, 174
+btn5_rect:
+	.dc.w	20, 180, 200, 202
+btn6_rect:
+	.dc.w	20, 208, 200, 230
+btn7_rect:
+	.dc.w	20, 236, 200, 258
+
+btn_rect_ptrs:
+	.dc.l	btn0_rect, btn1_rect, btn2_rect, btn3_rect
+	.dc.l	btn4_rect, btn5_rect, btn6_rect, btn7_rect
+
+btn_str_ptrs:
+	.dc.l	str_mode0, str_mode1, str_mode2, str_mode3
+	.dc.l	str_mode4, str_mode5, str_mode6, str_mode7
+
+btn_text_x:
+	.dc.w	48, 48, 44, 48, 48, 44, 44, 44
+
+preset_d2_table:
+	.dc.l	$03000200	; 0: 768 x 512
+	.dc.l	$04000300	; 1: 1024 x 768
+	.dc.l	$04000400	; 2: 1024 x 1024
+	.dc.l	$050002D0	; 3: 1280 x 720
+	.dc.l	$050003C0	; 4: 1280 x 960
+	.dc.l	$064004B0	; 5: 1600 x 1200
+	.dc.l	$07800438	; 6: 1920 x 1080
+	.dc.l	$00000000	; 7: Native Full (D2.L = 0)
 
 str_mode0:
 	.dc.b	11, " 768 x 512 ", 0
 	.even
-
 str_mode1:
 	.dc.b	11, "1024 x 768 ", 0
 	.even
-
 str_mode2:
 	.dc.b	11, "1024 x 1024", 0
+	.even
+str_mode3:
+	.dc.b	11, "1280 x 720 ", 0
+	.even
+str_mode4:
+	.dc.b	11, "1280 x 960 ", 0
+	.even
+str_mode5:
+	.dc.b	11, "1600 x 1200", 0
+	.even
+str_mode6:
+	.dc.b	11, "1920 x 1080", 0
+	.even
+str_mode7:
+	.dc.b	11, "Native Full", 0
+	.even
+
+str_cfg_w:
+	.dc.b	"SCREEN_WIDTH=", 0
+str_cfg_h:
+	.dc.b	"SCREEN_HEIGHT=", 0
+str_cfg_fs:
+	.dc.b	"FULLSCREEN=", 0
+cfg_path:
+	.dc.b	"A:\\SYS\\MSX68K.CFG", 0
+	.even
+
+cfg_buf:
+	.ds.b	128
 	.even
 
 win_ptr:

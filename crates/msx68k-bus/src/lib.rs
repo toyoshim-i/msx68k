@@ -15,7 +15,7 @@ pub mod vm;
 
 pub use msx68k_cpu::{Bus, BusFault, NoopTrapHandler, TrapHandler};
 pub use bus::{
-    HardwareAccessFlags, X68kBus, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
+    HardwareAccessFlags, X68kBus, EXT_TVRAM_BASE, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
     ROM_WINDOW_BYTES, SPRITE_WINDOW_BYTES, TVRAM_BYTES,
 };
 pub use crtc::{Crtc, CrtcSyncEvents, RASTER_BLOCK_BYTES, TVRAM_PLANE_BYTES};

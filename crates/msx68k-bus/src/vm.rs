@@ -28,6 +28,20 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
     ) -> msx68k_cpu::TrapResult {
         bus.handle_hypercall(state, opcode, pc)
     }
+
+    #[inline]
+    fn on_trap(
+        &mut self,
+        state: &mut CpuState,
+        bus: &mut X68kBus,
+        trap_no: u8,
+        _pc: u32,
+    ) -> msx68k_cpu::TrapResult {
+        if trap_no == 15 && (state.d[0] & 0xFF) == 0x10 {
+            return bus.handle_iocs_crtmod(state);
+        }
+        msx68k_cpu::TrapResult::PassToVector
+    }
 }
 
 /// Configuration for spawning a Master SX-Window VM or an Isolated Application VM.

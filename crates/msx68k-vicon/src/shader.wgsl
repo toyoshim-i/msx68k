@@ -17,8 +17,8 @@ struct ViconUniforms {
     r1_priority: u32,
     r2_display: u32,
     contrast: u32,
-    _pad0: u32,
-    _pad1: u32,
+    tvram_row_bytes: u32,
+    tvram_plane_bytes: u32,
 };
 
 @group(0) @binding(0)
@@ -68,15 +68,21 @@ fn grbi_to_packed_rgba8(grbi: u32, contrast: u32) -> u32 {
 }
 
 fn sample_tvram_index(x: u32, y: u32) -> u32 {
-    let tx = (x + params.text_scroll_x) & 1023u;
-    let ty = (y + params.text_scroll_y) & 1023u;
-    let in_plane_byte = (ty * 128u) + (tx >> 3u);
+    let row_bytes = params.tvram_row_bytes;
+    let plane_bytes = params.tvram_plane_bytes;
+    var tx = x;
+    var ty = y;
+    if (row_bytes == 128u && plane_bytes == 0x20000u) {
+        tx = (x + params.text_scroll_x) & 1023u;
+        ty = (y + params.text_scroll_y) & 1023u;
+    }
+    let in_plane_byte = (ty * row_bytes) + (tx >> 3u);
     let bit_pos = 7u - (tx & 7u);
 
-    let b0 = (read_tvram_byte(0x00000u + in_plane_byte) >> bit_pos) & 1u;
-    let b1 = (read_tvram_byte(0x20000u + in_plane_byte) >> bit_pos) & 1u;
-    let b2 = (read_tvram_byte(0x40000u + in_plane_byte) >> bit_pos) & 1u;
-    let b3 = (read_tvram_byte(0x60000u + in_plane_byte) >> bit_pos) & 1u;
+    let b0 = (read_tvram_byte(0u * plane_bytes + in_plane_byte) >> bit_pos) & 1u;
+    let b1 = (read_tvram_byte(1u * plane_bytes + in_plane_byte) >> bit_pos) & 1u;
+    let b2 = (read_tvram_byte(2u * plane_bytes + in_plane_byte) >> bit_pos) & 1u;
+    let b3 = (read_tvram_byte(3u * plane_bytes + in_plane_byte) >> bit_pos) & 1u;
 
     return b0 | (b1 << 1u) | (b2 << 2u) | (b3 << 3u);
 }
