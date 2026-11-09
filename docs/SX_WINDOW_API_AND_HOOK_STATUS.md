@@ -206,15 +206,15 @@ SX-Window decouples the **Virtual Desktop Size (仮想画面サイズ)** from th
 
 | Address | Size | Name | Description & Bit Layout |
 | :---: | :---: | :--- | :--- |
-| **`$ED0072..$ED0073`** | 2 B | `sram_magic` | ASCII signature `"SX"` (`$5358`). Validated on boot (`cmpi.w #$5358, $00ED0072`). If absent, restored from default template at `text_base + 0x02FD5A`. |
+| **`$ED0072..$ED0073`** | 2 B | `sram_magic` | ASCII signature `"SX"` (`$5358`). Validated on boot by `__SXSRAMVer` (`$A435` at `text_base + 0x2FCA8` via `cmpi.w #$5358, ($00ED0072).L`). If absent, restored from default template at `text_base + 0x02FD5A`. |
 | **`$ED0074`** | 1 B | `display_flags` | Display settings and double-click timing multiplier (`* 10 -> global $54A88`). |
 | **`$ED0075`** | 1 B | `mouse_speed` | Mouse acceleration curve index passed to `$A072` (`MSCurSpeed`). |
 | **`$ED0076..$ED0077`** | 2 B | `palette_tcolor0` | 16-bit RGB 5-5-5 for text palette entry 0. |
 | **`$ED0078..$ED007A`** | 3 B | `palette_defaults` | 16-bit RGB 5-5-5 desktop colors (read by `text_base + 0x1E9BC` and `0x3C142` via `IOCS $12` `_TCOLOR`). |
 | **`$ED007B`** | 1 B | `printer_port` | Hardcopy printer driver index (read by `text_base + 0x3DA2C` to load `"PRTD"` resource). |
-| **`$ED007C`** | 1 B | **`virtual_screen_mode`** | **Virtual Desktop Screen Mode (仮想画面モード)**:<br/>• **Upper nibble (`val >> 4`)**: Virtual Screen Mode Index (0..6 from Screen Mode Table at `text_base + 0x552F6`).<br/>• **Bit 1 (`val & $02`)**: Display option flag (read by `$A3FA`, written by `$A3FB`).<br/>• **Bit 0 (`val & $01`)**: Display option flag (read by `$A364`, written by `$A365`). |
+| **`$ED007C`** | 1 B | **`virtual_screen_mode`** | **Virtual Desktop Screen Mode (仮想画面モード)**:<br/>• **Upper nibble (`val >> 4`)**: Virtual Screen Mode Index (0..6 from Screen Mode Table at `text_base + 0x552F6`).<br/>• **Bit 1 (`val & $02`)**: Display option flag (read by `__TSGetDtopMode` `$A3FA`, written by `__TSSetDtopMode` `$A3FB`).<br/>• **Bit 0 (`val & $01`)**: Display option flag (read by `__TSGetStartMode` `$A364`, written by `__TSSetStartMode` `$A365`). |
 | **`$ED007D`** | 1 B | `wallpaper_id` | Desktop background pattern / wallpaper ID (read by `text_base + 0x426DE` to load `"PICT"` resource). |
-| **`$ED007E`** | 1 B | **`physical_crt_mode`** | **Physical Monitor CRT Mode & Virtual Scroll (実画面モード & スクロール)**:<br/>• **Bits 0..4 (`val & $1F`)**: Physical Monitor CRT Mode ID (0..19 from table at `text_base + 0x151C0`, e.g. `16` = `768×512`, `17` = `1024×424`, `18` = `1024×848`, `19` = `640×480`).<br/>• **Bit 6 (`val & $40`)**: **Virtual Screen Scroll Enable Flag (仮想画面スクロール許可)** (1 = scroll enabled when mouse reaches viewport edge, 0 = disabled).<br/>• **Bit 7 (`val & $80`)**: Configured flag (1 = custom configured, 0 = default to mode 16 `768×512`). |
+| **`$ED007E`** | 1 B | **`physical_crt_mode`** | **Physical Monitor CRT Mode & Virtual Scroll (実画面モード & スクロール)**:<br/>• **Bits 0..4 (`val & $1F`)**: Physical Monitor CRT Mode ID (0..19 from table at `text_base + 0x151C0`, e.g. `16` = `768×512`, `17` = `1024×424`, `18` = `1024×848`, `19` = `640×480`).<br/>• **Bit 5 (`val & $20`)**: Reserved by Sharp; utilized by msx68k as Extended Mode flag (`$B0`). Ignored by `SYS/FSX.X`'s `ANDI.W #$1F` mask!<br/>• **Bit 6 (`val & $40`)**: **Virtual Screen Scroll Enable Flag (仮想画面スクロール許可)** (1 = scroll enabled when mouse reaches viewport edge, 0 = disabled).<br/>• **Bit 7 (`val & $80`)**: Configured flag (1 = custom configured, 0 = default to mode 16 `768×512`). |
 | **`$ED007F..$ED0089`** | 11 B | `reserved` | Reserved desktop parameters; `$ED0080` and `$ED0084` store wallpaper geometry (`text_base + 0x426E8`). |
 
 #### Hardware Write-Protection Protocol (`$E8E00D`):
@@ -271,7 +271,166 @@ When SX-Window initializes, it copies the selected 22-byte entry from the mode t
 
 ---
 
-### 3.3 Control Panel (`コントロール.X` / `コントロール.LB`) User Configuration Interface
+### 3.3 `SYS/FSX.X` SRAM & Screen Mode Routines Disassembly
+
+Disassembly of `SYS/FSX.X` reveals the exact routines governing SRAM reading, writing, and startup resolution decisions:
+
+#### 1. `__SXSRAMVer` (`$A435`, `text_base + 0x2FCA8`):
+Validates the `"SX"` signature at `$00ED0072` and returns the virtual screen mode:
+```m68k
+text+0x2FCA8:  0C79 5358 00ED 0072  CMPI.W  #$5358, ($00ED0072).L  ; Valid "SX" signature?
+text+0x2FCB0:  660A                 BNE.S   sram_uninit
+text+0x2FCB2:  1039 00ED 007C       MOVE.B  ($00ED007C).L, D0      ; Virtual screen mode byte
+text+0x2FCB8:  E808                 LSR.B   #4, D0                 ; Extract upper nibble (mode 0..6)
+text+0x2FCBA:  4E75                 RTS
+sram_uninit:
+text+0x2FCBC:  70FF                 MOVEQ   #-1, D0                ; Return -1 if SRAM uninitialized
+text+0x2FCBE:  4E75                 RTS
+```
+
+#### 2. `__TSGetDtopMode` / `__TSSetDtopMode` (`$A3FA` / `$A3FB`, `text_base + 0x150BC` / `0x150CC`):
+Reads and writes Bit 1 of `$00ED007C` (Desktop Display Option flag):
+```m68k
+text+0x150BC:  7000                 MOVEQ   #0, D0
+text+0x150BE:  0839 0001 00ED 007C  BTST    #1, ($00ED007C).L      ; Test Bit 1
+text+0x150C6:  56C0                 SNE     D0                     ; $FF if set, $00 if clear
+text+0x150C8:  4E75                 RTS
+
+text+0x150CC:  13FC 0031 00E8 E00D  MOVE.B  #$31, ($E8E00D).L      ; Unlock SRAM
+text+0x150D4:  4A2F 0004            TST.B   4(SP)
+text+0x150D8:  6708                 BEQ.S   clear_dtop_bit1
+text+0x150DA:  08F9 0001 00ED 007C  BSET    #1, ($00ED007C).L
+text+0x150E2:  6006                 BRA.S   dtop_done
+clear_dtop_bit1:
+text+0x150E4:  08B9 0001 00ED 007C  BCLR    #1, ($00ED007C).L
+dtop_done:
+text+0x150EC:  13FC 0000 00E8 E00D  MOVE.B  #$00, ($E8E00D).L      ; Lock SRAM
+text+0x150F4:  4E75                 RTS
+```
+
+#### 3. `__TSGetStartMode` / `__TSSetStartMode` (`$A364` / `$A365`, `text_base + 0x150F4` / `0x15102`):
+Reads and writes Bit 0 of `$00ED007C` (Startup Mode flag) with identical `$E8E00D` lock sequences.
+
+#### 4. `__TSSetGraphMode` (`$A430`, `text_base + 0x15134`) & `__TSGetGraphMode` (`$A431`, `text_base + 0x15160`):
+Encodes and decodes the physical CRT configuration byte at `$00ED007E`:
+```m68k
+text+0x15160:  7000                 MOVEQ   #0, D0
+text+0x15162:  1039 00ED 007E       MOVE.B  ($00ED007E).L, D0      ; Read physical CRT byte
+text+0x15168:  0800 0007            BTST    #7, D0                 ; Test Bit 7 (configured flag)
+text+0x1516C:  6712                 BEQ.S   return_default_16      ; If not configured, return Mode 16
+text+0x1516E:  0800 0006            BTST    #6, D0                 ; Test Bit 6 (virtual scroll flag)
+text+0x15172:  57C1                 SEQ     D1                     ; D1 = scroll flag ($FF / $00)
+text+0x15174:  23C1 0001 5368       MOVE.L  D1, (0x15368, text)    ; Save scroll flag in kernel global
+text+0x15178:  0240 001F            ANDI.W  #$001F, D0             ; MASK BITS 4..0 ONLY!
+text+0x1517C:  4E75                 RTS
+return_default_16:
+text+0x1517E:  7010                 MOVEQ   #16, D0                ; Default: Mode 16 (768x512)
+text+0x15180:  4E75                 RTS
+```
+> [!IMPORTANT]
+> **Bit 5 Mask Invariance**: Note instruction `ANDI.W #$001F, D0` at `0x15178`. `SYS/FSX.X` isolates the mode index strictly using `ANDI.W #$1F`, completely ignoring **Bit 5 (`$20`)**! This provides the exact mathematical foundation for msx68k's extended mode encoding (`$B0 = $80 | $20 | 16`), which sets Bit 5 to signify extended capabilities while preserving `16` (`768×512`) under `SYS/FSX.X`'s 5-bit mask.
+
+#### 5. `__SXGetDispRect` (`$A432`, `text_base + 0x15196`):
+Queries the active CRT display resolution rectangle:
+```m68k
+text+0x15196:  48E7 2000            MOVEM.L D2, -(SP)
+text+0x1519A:  72FF                 MOVEQ   #-1, D1                ; D1 = -1 (query active mode)
+text+0x1519C:  7010                 MOVEQ   #$10, D0               ; IOCS $10: _CRTMOD
+text+0x1519E:  4E4F                 TRAP    #15                    ; Execute _CRTMOD(-1) -> D0 = current mode
+text+0x151A6:  0240 001F            ANDI.W  #$001F, D0             ; Mask lower 5 bits (0..31)!
+text+0x151AA:  E540                 LSL.W   #2, D0                 ; Index into 32-entry table (stride 4)
+text+0x151AC:  41FA 0012            LEA     $0012(PC, D0.W), A0    ; Pointer into CRT Table at text + 0x151C0
+text+0x151B0:  2010                 MOVE.L  (A0), D0               ; D0 = (width << 16) | height
+text+0x151B2:  4CDF 0004            MOVEM.L (SP)+, D2
+text+0x151B6:  4E75                 RTS
+```
+Entry 16 in the table at `text_base + 0x151C0` is located at `text_base + 0x15200` (`0x0300 0x0200` = `768 × 512`).
+
+#### 6. Startup Mode Switcher (`text_base + 0x13334`, called from `0x12F2A` in `TSInitTaskM`):
+During SX-Window kernel initialization, `TSInitTaskM` synchronizes the active CRT mode with SRAM settings:
+1. Calls `IOCS $10` (`_CRTMOD(-1)`) to query current hardware monitor mode.
+2. Calls `__TSGetGraphMode` (`$A431`) to query SRAM `$00ED007E`.
+3. Consults the 28-entry monitor frequency matching table at `text_base + 0x133BC` and remap table at `text_base + 0x13384` to ensure monitor horizontal scanning compatibility (15kHz vs 24kHz vs 31kHz).
+4. If a mode switch is required, calls `IOCS $10` (`_CRTMOD(mode | $0100)`) with Bit 8 (`$0100`) set to prevent clearing text/graphics VRAM.
+
+---
+
+### 3.4 `IPLROM.DAT` `IOCS _CRTMOD` (`$10`) Analysis & Mode Reservation Table
+
+Disassembly of the official Sharp `IPLROM.DAT` (`$FF0000`, vector at `$000440` -> `$00FF638E`) establishes how the firmware executes `_CRTMOD`:
+
+```m68k
+FF638E:  48E7 3800            MOVEM.L D2-D4, -(SP)
+FF6392:  7000                 MOVEQ   #0, D0
+FF6394:  4A41                 TST.W   D1                     ; Test requested mode in D1.W
+FF6396:  6B28                 BMI.S   query_mode             ; If D1.W < 0 (i.e. -1), query active mode!
+FF6398:  0C41 0013            CMPI.W  #19, D1                ; On IPLROM 1.2: maximum mode is 19!
+FF639C:  622C                 BHI.S   invalid_mode           ; If D1 > 19, reject!
+...
+query_mode:
+FF63C0:  1039 0000 093C       MOVE.B  ($0000_093C).L, D0     ; Return active mode from IOCS variable $093C
+FF63C6:  4CDF 001C            MOVEM.L (SP)+, D2-D4
+FF63CA:  4E75                 RTS
+```
+
+#### Complete `_CRTMOD` Mode Reservation Hierarchy across X68000 Systems:
+
+| Mode Range | Hex Range | System / Origin | Description & Capabilities |
+| :---: | :---: | :--- | :--- |
+| **00..15** | `$00..$0F` | **Sharp IPLROM 1.0–1.1** (Standard X68000) | Standard 15kHz / 31kHz modes: 256×256, 512×512, 16/256 colors. |
+| **16..19** | `$10..$13` | **Sharp IPLROM 1.2** (XVI / Compact) | High-resolution modes: `16` = 768×512 (31.5kHz), `17` = 1024×424 (24.8kHz), `18` = 1024×848 (31.5kHz interlaced), `19` = 640×480 VGA. |
+| **20..27** | `$14..$1B` | **Sharp IPLROM 1.3** (X68030) | X68030 modes: high-density 31kHz and truecolor 65,536-color modes. |
+| **28..73** | `$1C..$49` | **XEiJ (`IPLROM 1.6` / `crtmod16.x`)** | Community emulator extensions: 800×600, 1024×768, 1280×720, 1280×1024, 1920×1080 fixed raster modes. |
+| **74..79** | `$4A..$4F` | *Unallocated* | Guard band. |
+| **80** | **`$50`** | **msx68k Extended Mode** | Single dynamic mode supporting arbitrary resolutions, 1:1 windowed, and host fullscreen! |
+
+---
+
+### 3.5 msx68k Extended Screen Mode Specification (`_CRTMOD` Mode `$50`)
+
+To eliminate collisions with Sharp firmware (`0..27`) and XEiJ emulator extensions (`28..73`) while maintaining 100% binary compatibility with legacy applications that mask with `ANDI.W #$1F`, msx68k introduces the **Extended Screen Mode Architecture**:
+
+#### 1. The Single Reserved Mode Number: `$50` (`80` Decimal):
+- **Collision Immunity**: Mode `$50` (`80`) sits safely beyond XEiJ's maximum allocation (`73`).
+- **Legacy Compatibility Mask**:
+  $$\$50 \pmod{\$20} = \$50 \text{ AND } \$1F = \$10 \quad (16 \text{ decimal})$$
+  Because `SYS/FSX.X` routines (such as `__TSGetGraphMode` `$A431` and `__SXGetDispRect` `$A432`) apply `ANDI.W #$1F`, Mode `$50` cleanly collapses to **Mode 16 (`768×512`)** in legacy tables, preventing index overflow crashes!
+
+#### 2. Register Interface on `IOCS $10` (`_CRTMOD`):
+- **Call Parameters**: `D0.L = $10` (`_CRTMOD`), `D1.W = $50` (or `$0150` with bit 8 no-clear flag).
+- **Sub-commands passed in `D2.L`**:
+  - **`D2.L = -1` (Extended Query)**:
+    - Returns active mode number in `D0.L` (`$50`).
+    - Returns current guest desktop resolution in `D1.L`: `(width << 16) | height` (e.g. `$04000300` for 1024×768, `$04000400` for 1024×1024).
+    - Returns display mode flags in `D2.L`: `0` = 1:1 Windowed Mode, `1` = Host Native Fullscreen 1:1 Mode.
+    - Returns host physical monitor native resolution in `D3.L`: `(native_w << 16) | native_h` (e.g. `$0F000870` for 3840×2160, `$0A0005A0` for 2560×1440).
+  - **`D2.L = 0` (Host Native Fullscreen 1:1 Mode)**:
+    - Automatically matches guest display resolution to host monitor native resolution (`D3`), enabling zero-scaling fullscreen productivity.
+  - **`D2.L = (width << 16) | height` (Arbitrary 1:1 Windowed Mode)**:
+    - Switches guest resolution to specified `(width, height)` dynamically in real time.
+
+#### 3. Battery-Backed SRAM `$00ED007E` Encoding:
+- **Standard SX-Window 768×512**: `$90` (`0x80 | 16`, lower 6 bits = `$10`).
+- **msx68k Extended Mode**: **`$B0` (`0x80 | 0x20 | 16`, lower 6 bits = `$30`)**.
+  - **Bit 7 (`0x80`)**: Configured flag (read by `__TSGetGraphMode` `$A431`).
+  - **Bit 5 (`0x20`)**: msx68k Extended Mode indicator flag. Ignored by `SYS/FSX.X`'s `ANDI.W #$1F` mask!
+  - **Bits 0..4 (`16`)**: Preserves base CRT Mode 16 identity for all unpatched firmware paths.
+
+#### 4. Disk-Based Extended Configuration File (`A:\SYS\MSX68K.CFG`):
+Because the SX-Window SRAM partition contains only 16 bytes (`$ED0072..$ED0081`), detailed settings (custom resolutions like 1920×1080, fullscreen preference, integer scaling vs bilinear filtering, audio latency) are stored in an ASCII configuration file on the boot drive at **`A:\SYS\MSX68K.CFG`**:
+```ini
+[display]
+mode=extended
+width=1024
+height=1024
+fullscreen=0
+aspect_ratio=1:1
+```
+This guarantees that resolution preferences persist cleanly across cold boots without crowding SRAM or altering standard Human68k system files.
+
+---
+
+### 3.6 Control Panel (`コントロール.X` / `コントロール.LB`) User Configuration Interface
 
 The user configures Virtual Screen and Physical Monitor settings through the official SX-Window Control Panel:
 - **Executable**: `コントロール.X` (13,532 bytes, root directory of `SXWIN312.XDF` and `SXWIN31.HDS`).
@@ -304,7 +463,7 @@ When the user clicks `実行`:
 
 ---
 
-### 3.4 Virtual Desktop Hardware Scrolling Mechanics & `$A42E` / `$A42F`
+### 3.7 Virtual Desktop Hardware Scrolling Mechanics & `$A42E` / `$A42F`
 
 When **Virtual Desktop Size > Physical CRT Size** (e.g. Virtual = `1024×1024`, CRT = `768×512`, Scroll Enable = `1`):
 
@@ -339,7 +498,7 @@ When **Virtual Desktop Size > Physical CRT Size** (e.g. Virtual = `1024×1024`, 
 
 ---
 
-### 3.5 CRTC & VICON High-Resolution Verification & Full Non-Scrolling 1024×1024 Mode
+### 3.8 CRTC & VICON High-Resolution Verification & Full Non-Scrolling 1024×1024 Mode
 
 A critical question is how **msx68k**'s compositor handles virtual desktop scrolling and how users can achieve a **Full Non-Scrolling 1024×1024 View**:
 
@@ -366,7 +525,7 @@ A critical question is how **msx68k**'s compositor handles virtual desktop scrol
 
 ---
 
-### 3.6 SX-Window Startup Splash Logo Sequence (`TITLE.SX` vs `TITLE.X`)
+### 3.9 SX-Window Startup Splash Logo Sequence (`TITLE.SX` vs `TITLE.X`)
 
 During boot (`CONFIG.SYS`), two distinct splash screens are rendered in sequence into **TVRAM** (`$00E00000`):
 
@@ -503,26 +662,25 @@ graph TD
 ## 5. Graph Man (`GM`) Internals for Phase 2B (Breaking the 1024×1024 TVRAM Limit)
 
 ### 5.1 Structure Layouts: `BitMap` and `Graph` (`RastPort`)
-Disassembly of `GMInitGraph` (`text_base + 0x01EB30`), `GMInitBitmap` (`text_base + 0x01ECBC`), and `GMSetBitmap` (`text_base + 0x01EE2C`) reveals the exact binary layouts of Graph Man's core data structures:
+Disassembly of `GMCalcBitmap` (`text_base + 0x2F120`), `GMNewBits` (`text_base + 0x2F1F6`), `GMInitGraph` (`text_base + 0x01EB30`), `GMInitBitmap` (`text_base + 0x01ECBC`), and `GMSetBitmap` (`text_base + 0x01EE2C`) reveals the exact binary layouts of Graph Man's core data structures:
 
-#### `BitMap` Structure Layout (22 bytes for screen modes, 18 bytes for off-screen):
+#### Verified `BitMap` Structure Layout (22 bytes):
 ```text
-Offset +0x00 (2B): Type / Color Depth Mode:
-                   0 = Standard 4-plane TVRAM (Packed planar)
-                   1 = 1-bit Monochrome / 16-bit Packed
-                   2 = 4-bit Chunky (16 colors, 2 pixels/byte)
-                   3 = 8-bit Chunky (256 colors, 1 byte/pixel)
-                   4 = 16-bit Direct Color (65,536 colors, 2 bytes/pixel)
-Offset +0x02 (2B): bounds.left   (Window / surface left coordinate)
-Offset +0x04 (2B): bounds.top    (Window / surface top coordinate)
-Offset +0x06 (2B): bounds.right  (Window / surface right coordinate; width = right - left)
-Offset +0x08 (2B): bounds.bottom (Window / surface bottom coordinate; height = bottom - top)
-Offset +0x0A (4B): baseAddr      (32-bit Framebuffer / Memory Pointer, e.g. $00E00000)
-Offset +0x0E (2B): rowBytes      (Scanline byte stride, e.g. 128 for TVRAM, 1024 for GVRAM)
-Offset +0x10 (2B): planes        (Plane count, 2 for TVRAM, 16 for GVRAM)
-Offset +0x12 (2B): modeFlags     (Mode attributes)
-Offset +0x14 (2B): modeIndex     (Mode ID: 0..7)
+Offset +0x00 (2B): type         (bmKind: 0 = Planar 16-color, 1 = Chunky 16-bit,
+                                         2 = Chunky 4-bit, 3 = Chunky 8-bit, 4 = Text 16-bit)
+Offset +0x02 (2B): bounds.left  (Window / surface left coordinate)
+Offset +0x04 (2B): bounds.top   (Window / surface top coordinate)
+Offset +0x06 (2B): bounds.right (Window / surface right coordinate; width = right - left)
+Offset +0x08 (2B): bounds.bottom(Window / surface bottom coordinate; height = bottom - top)
+Offset +0x0A (4B): baseAddr     (32-bit Framebuffer / Plane 0 pointer, e.g. $00E00000)
+Offset +0x0E (2B): rowBytes     (Bytes per scanline per plane: ((width + 15) / 16) * 2 for Type 0)
+Offset +0x10 (4B): planeSize    (32-bit byte stride between planes = rowBytes * height,
+                                 e.g. $00020000 [131,072 bytes] for 128 * 1024)
+Offset +0x14 (2B): planeMask    (Active planes mask, e.g. $000F for 4 planes)
 ```
+
+> [!NOTE]
+> Previously, offsets `+0x10..+0x15` were hypothesized to be three 16-bit fields (`planes`, `modeFlags`, `modeIndex`). Complete disassembly of `GMCalcBitmap` (`0x2F120`) and inner planar rasterizers (e.g. `0x37212`) confirms that offset `+0x10` is a **32-bit longword (`planeSize`)** representing the exact memory offset between consecutive bit planes, and offset `+0x14` is a **16-bit word (`planeMask`)**.
 
 #### `Graph` (`RastPort`) Structure Layout (64 bytes):
 ```text
@@ -553,7 +711,59 @@ Offset +0x3C (4B): reserved
 
 ---
 
-### 5.2 Graphic Device Driver Table (`text_base + 0x5549E`)
+### 5.2 Dynamic `rowBytes` & `planeSize` Across All `SYS/FSX.X` Primitives
+
+A comprehensive audit of the entire 367,372-byte `SYS/FSX.X` kernel binary revealed fundamental architectural properties of the Graph Man drawing engine:
+
+#### 1. Zero Hardcoded Secondary Plane Addresses:
+Addresses `$00E20000` (Plane 1), `$00E40000` (Plane 2), and `$00E60000` (Plane 3) have **exactly 0 hardcoded occurrences** anywhere in `SYS/FSX.X`!
+- Every single drawing routine steps through bit planes dynamically using the 32-bit `planeSize` longword at `BitMap + 0x10`.
+- For example, in the inner planar rectangle rasterizer (`text_base + 0x20B68` -> `0x37212`):
+  ```m68k
+  text+0x37212:  226E 000A            MOVEA.L 10(A6), A1     ; A1 = BitMap.baseAddr (+0x0A)
+                 ...
+  plane_loop:
+  text+0x37234:  D3EE 0010            ADDA.L  16(A6), A1     ; A1 += BitMap.planeSize (+0x10)!
+                 51CB FFE0            DBF     D3, plane_loop ; Step across all active planes!
+  ```
+- Similarly, `CopyBits` (`text_base + 0x23548`), `Text` (`text_base + 0x34284` -> `0x38040`), `GMScroll` (`text_base + 0x1D746`), and the Mouse Cursor ISR (`text_base + 0x04F852` -> `0x522F2..0x5237A`) all dynamically load `baseAddr` (`+0x0A`), `rowBytes` (`+0x0E`), and `planeSize` (`+0x10`).
+
+#### 2. Universal Chunky Mode Support in Drawing Primitives vs. Planar Cursor Restriction:
+- All primary drawing primitives (`Dot` `0x2921C`, `Line` `0x206DC`, `Rect` `0x20B68`, `Rgn` `0x229A6`, `Bits`/`CopyBits` `0x23548`, `Text` `0x34284`) implement dedicated paths for **Type 2 (4-bit chunky)** and **Type 3 (8-bit chunky)**!
+- In contrast, the software Mouse Cursor ISR at `text_base + 0x521C6` explicitly verifies:
+  ```m68k
+  text+0x521C6:  4A68 0000            TST.W   0(A0)          ; Test portBits.type (+0x00)
+  text+0x521CA:  6600 06D0            BNE     cursor_stub_rts; If type != 0, branch to RTS at 0x5289C!
+  ```
+  The mouse cursor blitter only natively supports Type 0 (planar), making host cursor synchronization (`$FE81` `SxMouseSync`) and native cursor overlay essential for chunky/high-color display modes.
+
+#### 3. Complete Inventory of `$00E00000` & CRTC R21 (`$00E8002A`) in `SYS/FSX.X`:
+There are **exactly 13 occurrences of `$00E00000`** and **3 occurrences of `$00E8002A`** in the entire `SYS/FSX.X` kernel:
+
+| Location / File Offset | Role / Context in `SYS/FSX.X` | Disassembly / Memory Context |
+| :---: | :--- | :--- |
+| **`text_base + 0x133E3`** | Fast TVRAM Screen Clear | `LEA ($00E00000).L, A0` inside CRTC simultaneous multi-write clear loop. |
+| **`text_base + 0x2F22B`** | `GMCalcBitmap` (`0x2F120`) | Default TVRAM Plane 0 base pointer assigned to `BitMap.baseAddr` (+0x0A). |
+| **`text_base + 0x2F31F`** | `GMNewBits` (`0x2F1F6`) | Default TVRAM Plane 0 base pointer assigned to newly created screen BitMaps. |
+| **`text_base + 0x4C011`** | Panic Alert Box (`0x4BFC0`) | Emergency crash dialog writer targeting Plane 0 framebuffer directly. |
+| **`text_base + 0x55282`** | `ActiveScreenModeRecord` | Mode 3 (`768×512`) active screen `baseAddr` in data segment (`0x55278 + 0x0A`). |
+| **`text_base + 0x55298`** | Default Screen `Bitmap` | Master screen BitMap template `baseAddr` (`0x5528E + 0x0A`). |
+| **`text_base + 0x55300`** | Virtual Screen Mode 0 | 256×256 Low-Res TVRAM `baseAddr` in mode table (`0x552F6 + 0x0A`). |
+| **`text_base + 0x55316`** | Virtual Screen Mode 1 | 512×512 Standard TVRAM `baseAddr` in mode table (`0x5530C + 0x0A`). |
+| **`text_base + 0x5532C`** | Virtual Screen Mode 2 | 640×480 VGA TVRAM `baseAddr` in mode table (`0x55322 + 0x0A`). |
+| **`text_base + 0x55342`** | Virtual Screen Mode 3 | 768×512 Default Desktop `baseAddr` in mode table (`0x55338 + 0x0A`). |
+| **`text_base + 0x55358`** | Virtual Screen Mode 4 | 1024×424 Wide TVRAM `baseAddr` in mode table (`0x5534E + 0x0A`). |
+| **`text_base + 0x5536E`** | Virtual Screen Mode 5 | 1024×848 Interlaced `baseAddr` in mode table (`0x55364 + 0x0A`). |
+| **`text_base + 0x55384`** | Virtual Screen Mode 6 | 1024×1024 Full Virtual `baseAddr` in mode table (`0x5537A + 0x0A`). |
+
+The **3 occurrences of `$00E8002A`** (CRTC Register R21: Text Simultaneous Multi-plane Write & Palette Mask) are clustered entirely within the fast screen-clear routine at `text_base + 0x133D4`:
+1. **`text_base + 0x133D5`**: `MOVE.W ($00E8002A).L, D2` (Save previous CRTC R21 register value).
+2. **`text_base + 0x133DD`**: `MOVE.W #$01F0, ($00E8002A).L` (Enable simultaneous 4-plane multi-write mask).
+3. **`text_base + 0x13403`**: `MOVE.W D2, ($00E8002A).L` (Restore previous CRTC R21 register value after clearing 16,384 double-words).
+
+---
+
+### 5.3 Graphic Device Driver Table (`text_base + 0x5549E`)
 A crucial discovery is that all Graph Man drawing primitives dispatch through an internal **Device Driver Dispatch Table** at **`text_base + 0x5549E`** containing 12 function pointers:
 
 | Table Offset | Function Pointer | Primitive Name | Description & Functional Role |
@@ -575,7 +785,7 @@ If `Graph->device` (`+0x0C`) is NULL, Graph Man defaults to `text_base + 0x5549E
 
 ---
 
-### 5.3 Low-Level Scanline Address Calculation Audit
+### 5.4 Low-Level Scanline Address Calculation Audit
 Disassembly of `text_base + 0x0346E2` and `text_base + 0x034724` proves conclusively how Graph Man computes pixel addresses:
 
 ```m68k
@@ -598,22 +808,24 @@ And in the multi-type pixel offset unpacker (`text_base + 0x034724`):
 > Graph Man's internal primitive engine is **fully generic and variable-stride aware**! It dynamically reads:
 > - `BitMap.baseAddr` at `+0x0A`
 > - `BitMap.rowBytes` at `+0x0E`
+> - `BitMap.planeSize` at `+0x10`
 > - `BitMap.bounds` at `+0x02..+0x08`
 >
-> It does **NOT** hardcode `$00E00000` or `128`-byte stride inside drawing primitives! The only routines in the entire kernel that hardcode `$00E00000` or 128 bytes are:
-> 1. Mode Clear loop at `text_base + 0x133D8` (CRTC multiwrite clear).
-> 2. Software mouse cursor blit at `text_base + 0x04F852`.
-> 3. Panic alert box at `text_base + 0x4BFC0`.
-> 4. CRTC hardware block transfer trigger at `text_base + 0x04732`.
+> It does **NOT** hardcode secondary planes `$00E20000`, `$00E40000`, or `$00E60000` anywhere in the kernel!
 
 ---
 
-### 5.4 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
+### 5.5 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
 Because the original X68000 24-bit (`16 MB`) physical address space (`$000000`–`$FFFFFF`) has no room for an extended guest VRAM and the 24-bit `HD63450` DMAC cannot address above `$FFFFFF`, **msx68k** bypasses guest VRAM completely for high-resolution modes and renders directly to a **host-native `wgpu` surface** by hooking four minimal chokepoints:
 
 1. **Chokepoint 1: `IOCS $10` (`_CRTMOD`), Mode Record & `GMInitBitmap` (`$A13C` / `text_base + 0x01ECBC`)**:
    - Extend `IOCS $10` (`_CRTMOD`) and patch the Active Screen Mode Record at `text_base + 0x55278`:
      - `bounds.right` = Host width (e.g. `1280` or `1920`).
+     - `bounds.bottom` = Host height (e.g. `720` or `1080`).
+2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
+   - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
+   - Line, Rect, Fill, BitBlt, and Text rendering commands are intercepted in Rust and rendered directly onto host `wgpu` textures with hardware acceleration!
+3. **Chokepoint 3: Bypass TVRAM Clear & CRTC Blitter**:
      - `bounds.bottom` = Host height (e.g. `720` or `1080`).
 2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
    - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
@@ -746,17 +958,70 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
 - **Hotkey `F5`**: Dynamically cycles display resolutions at runtime (`768x512` -> `1024x768` -> `1024x1024` -> `768x512`).
 - **Dynamic Window Resizing**: Host emulator window automatically resizes to match the emulator's active CRTC display resolution when modes change.
 
-### 7.5 Live Desktop Resize & Boot-Time Persistence Mechanism
+### 7.5 Window Clipping, Desktop Region Hierarchy & Live Resolution Switching
+
+When switching SX-Window desktop resolutions dynamically (e.g. from `768×512` to `1024×768` or `1024×1024`) or booting directly with an extended resolution, simply expanding CRTC timings and TVRAM memory tiling is insufficient. Without updating internal kernel Window Manager structures, windows dragged or resized beyond `(768, 512)` were clipped to the original 768×512 boundary.
+
+Reverse-engineering of `SYS/FSX.X` window management (`text_base + 0x41484..0x41630`, `0x15A34`, `0x4175E..0x41A28`) revealed the exact desktop region hierarchy, window traversal mechanics, and clipping algorithms.
+
+#### 1. Desktop GrafPort (`0x5437A`) vs. Desktop Window (`0x54384`) Kernel Architecture:
+Inside `SYS/FSX.X`, two distinct global pointers define the root drawing and window hierarchy:
+- **`desktopGrafPort` (`*(text_base + 0x5437A)`)**: A standard `Graph` record representing the global screen port (`portRect = [0, 0, width, height]`, `bmap = text_base + 0x5528E`, `visible = visRgn handle`).
+- **`desktopWindow` (`*(text_base + 0x54384)`)**: A full `Window` record (size 144+ bytes) representing the desktop window itself. Crucially, because `struct Window` embeds a `Graph` record starting at `+0x00`:
+  - `desktopWindow + 0x00` is the embedded `Graph` (`bmap`, `rect`, `visRgn`, `clipRgn`).
+  - `desktopWindow + 0x48..0x8C` holds the Window Manager's private region handles and child window linked list anchor!
+
+#### 2. The Six Region Handles of `desktopWindow`:
+The desktop window maintains 6 specialized region handles:
+
+| Offset on `desktopWindow` | Region Name | Dimensions & Structure | Role & Interaction in `SYS/FSX.X` |
+| :---: | :---: | :---: | :--- |
+| **`+0x10`** | **`graph.visible` (`visRgn`)** | `(0, 18, width, height)` | Shares region handle with `+0x8C`. When child windows are open, scanline data (`size = 38+`) carves holes out of the desktop. Must be reset to `size = 12` (simple rectangle) on resolution change so stale 768×512 inversions are cleared. |
+| **`+0x14`** | **`graph.clip` (`clipRgn`)** | `(-32767, -32767, 32767, 32767)` | Unlimited clipping rectangle for root graphics operations. |
+| **`+0x48`** | **`outside`** | `(0, 18, width, height)` | Bounding box of the entire desktop window frame below the menubar. |
+| **`+0x4C`** | **`inside`** | **`(0, 18, width, height)`** | **Critical Window Boundary**: Whenever any window is opened (`WMOpen` `$A1F9`), moved (`WMMove` `$A1FA`), or resized (`WMSize` `$A1FB`), `recalc_vis_rgns` at `text_base + 0x4149A` computes `window->graph.visible` by intersecting (`GMSectRgn` `$A178`) the window's rectangle with **`desktopWindow->inside`** and **`desktopGrafPort->visible`**! If `inside` is left at `(0, 18, 768, 512)`, all child windows are clipped at `x = 768` and `y = 512`! |
+| **`+0x88`** | **`rgn88`** | Bounding rect of all windows | Union of all open child windows' `outside` regions. Recomputed at `text_base + 0x4296E`. |
+| **`+0x8C`** | **`rgn8C`** | Uncovered desktop area | Region representing uncovered desktop background pattern (`desktopWindow->inside` minus child windows). |
+
+#### 3. Open Child Window Linked List & Drag/Grow Limits (`0x15B7E`):
+- `desktopWindow + 0x80` holds the 32-bit pointer to the topmost open child window (`curr = *(desktopWindow + 0x80)`).
+- Successive windows are linked via `next = *(curr + 0x66)`.
+- When a window is opened, `GMOpenGraph` (`text_base + 0x1ECBC`) allocates a private 22-byte `Bitmap` record at `*(win + 0x00)` copied from `text_base + 0x55278`.
+- When the user drags or resizes a window, `SXCallWindM` (`$A3A2` at `text_base + 0x15B7E`) invokes `WMDrag` (`$A205`) or `WMGrow` (`$A203`), using **`win->graph.bmap->rect` as the default `limitRect`**!
+- Therefore, when switching resolutions dynamically, `apply_screen_resolution` must traverse the open window linked list (`*(desktopWindow + 0x80)`) and update `*(win + 0x00)` (`bmap->rect.right = width`, `bmap->rect.bottom = height`) so child windows can be dragged and resized across the entire extended desktop without hitting an invisible 768×512 boundary.
+
+#### 4. Global Screen Rects & Mode Templates:
+To ensure new windows opened after a resolution switch inherit the correct dimensions, `apply_screen_resolution` updates:
+- **Global Screen Rect (`text_base + 0x54372`)**: `[0, 0, width, height]`.
+- **Max Window Bounds (`text_base + 0x543B6`)**: `width - 2, height - 24` (content bounds accounting for menubar and borders).
+- **Mode Records & Templates**:
+  - `ActiveScreenModeRecord` (`text_base + 0x55278`): `rect = [0, 0, width, height]`.
+  - `Bitmap` copy (`text_base + 0x5528E`): `rect = [0, 0, width, height]`.
+  - Graphic `Bitmap` template (`text_base + 0x552A4`): `rect = [0, 0, width, height]`.
+  - Default `GrafPort` rect template (`text_base + 0x552BA`): `bounds.right = width, bounds.bottom = height`.
+  - Mode table entries (`0x55338`, `0x5534E`, `0x5537A`) and CRT table (`0x15200`).
+
+#### 5. Desktop Background Repaint (`text_base + 0x4175E..0x41A28`):
+When resolution expands live:
+- Newly uncovered desktop regions are repainted by `SYS/FSX.X` using `GMFillRgn` (`$A17B`) with the 8-byte stipple pattern at `text_base + 0x543DA`, clipped against `desktopWindow->inside` and `desktopGrafPort->visible`.
+- In `apply_screen_resolution`, the emulator tiles the extended TVRAM memory space (`x >= 768` and `y >= 512`) from an icon-free 32×16 stipple sample (`col = 46..47, y = 0..15`), ensuring instant clean visuals without waiting for a guest redraw.
+
+#### 6. Live Desktop Resize & Boot-Time Persistence Implementation:
 1. **CRTC Write Intercept (`MemoryRegion::Crtc`)**:
    - When `--resolution` is specified on the command-line or applied via `apply_screen_resolution()`, `bus.target_resolution` is configured.
    - During `IPLROM` and `HUMAN.SYS` boot, or when `SXWIN.X` initializes at `$001A86`, guest code calls `IOCS $10` (`_CRTMOD(16)`), which attempts to reset CRTC registers `R02, R03, R06, R07, R10, R11, R20` back to standard 768×512.
    - The memory write handler for `MemoryRegion::Crtc` intercepts guest writes to these registers when `target_resolution` is active, enforcing the requested resolution without breaking other CRTC registers.
 2. **FSX.X Kernel Structure Patching**:
-   - `apply_screen_resolution()` updates `ActiveScreenModeRecord` (`text_base + 0x55278`), Mode 3 (`+0x55338`), Mode 4 (`+0x5534E`), Mode 6 (`+0x5537A`), and Physical CRT Mode 16 (`+0x15200`).
+   - `apply_screen_resolution()` in `crates/msx68k-bus/src/sxwin.rs` updates `ActiveScreenModeRecord`, mode table entries, screen templates, `desktopGrafPort`, and `desktopWindow` regions as detailed above.
    - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
-   - Patches Desktop GrafPort `portRect` (`gp + 4..12`), Screen `BitMap` (`bm + 6..10`), `visRgn` (`vis_ptr + 8..12`), and `clipRgn` (`clip_ptr + 8..12`). Note that `text_base + 0x54384` (`dtgs + 4`) is the 32-bit pointer to `gp`, and `text_base + 0x543C6` (`dtgs + 0x46`) is the 32-bit pointer to `menu_gp`.
    - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
    - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
-3. **Seamless TVRAM Pattern & Menubar Tiling**:
-   - When expanding resolution live, `apply_screen_resolution()` replicates the 8×8 desktop background pattern across `x >= 768` and `y >= 512`.
-   - Extends the menubar background across `x >= 768` for lines `y < 45`.
+3. **Verification via In-Process SCSI Boot & Window Dragging**:
+   - In `crates/msx68k-bus/tests/scsi_boot.rs` (`test_sxwin31_scsi_boot_and_mouse_sync`):
+     - Boots `SXWIN31.HDS`, spawns `SXMODE.X` Task 6 via `TSFock` (`$A351`), and clicks Button 2 to switch resolution to 1024×1024 live.
+     - Simulates dragging `SXMODE.X`'s window titlebar from `(250, 105)` across the 768×512 boundary to `(800, 550)`.
+     - Verifies that:
+       - `SXMODE->outside` moves from `(179, 97, 401, 271)` to `(729, 542, 951, 716)` (`right = 951 > 768`, `bottom = 716 > 512`).
+       - `SXMODE->inside` moves from `(180, 120, 400, 270)` to `(730, 565, 950, 715)` (`left = 730`, `right = 950 > 768`, `top = 565 > 512`, `bottom = 715 > 512`).
+       - `SXMODE->visRgn` remains **unclipped at the full `(0, 0, 220, 150)`** with `size = 12`.
+       - Window frame, text strings, buttons, and drop shadow render 100% pixel-perfect into TVRAM without truncation or artifacting.

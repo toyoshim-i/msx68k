@@ -40,8 +40,11 @@ flowchart LR
 ```
 
 ### 2.1 Layer 1: Native Hypercall Opcode Gateway
-- We reserve a dedicated range of unallocated F-Line opcodes (`$FE80`–`$FE8F`, implemented in [`HypercallId`](../crates/msx68k-bus/src/vm.rs)) as **Native Hypercalls**.
-- When the monomorphized MC68000 core fetches an F-Line opcode in `$FE80`–`$FE8F`, [`BusTrapHandler::on_f_line`](../crates/msx68k-bus/src/vm.rs) traps directly into the Rust hypercall dispatcher in **0 emulated CPU cycles**, without pushing a 68000 exception frame or traversing RAM vectors. All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
+- We reserve a dedicated range of unallocated F-Line opcodes (`$FE80`–`$FE8F`, declared in [`HypercallId`](../crates/msx68k-bus/src/sxwin.rs) and dispatched by `X68kBus::handle_hypercall`) as **Native Hypercalls**.
+- When the monomorphized MC68000 core fetches an F-Line opcode in `$FE80`–`$FE8F`, `BusTrapHandler::on_f_line` delegates to `X68kBus::handle_hypercall`, which traps directly into the Rust hypercall handlers in **0 emulated CPU cycles**, without pushing a 68000 exception frame or traversing RAM vectors.
+  - SX-Window integration and host display/mouse synchronization hypercalls (`$FE81` `SxMouseSync`, `$FE88` `SxSetScreenMode`) are routed to [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs).
+  - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiIocs`, `$FE83` `ScsiBootRom`, `$FE84` `ScsiRomdbInit`, `$FE85` `ScsiDriverCmd`, `$FE86` `ScsiHddRead`, `$FE87` `ScsiHddWrite`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
+  - All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
 - A native replacement stub in 68k memory or ROM requires only **4 bytes (2 words)**:
   ```text
   +0: $FE80 | hypercall_id   ; Traps into Rust Hypercall Dispatcher
@@ -51,7 +54,8 @@ flowchart LR
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
 - While physical RAM addresses shift depending on preceding device drivers (`text_base = $05817C` on floppy boot vs. `$0581E4` on SCSI HDD boot), **offsets relative to `text_base` (`text_base + offset`) and non-relocated instruction opcodes are 100% invariant**.
-- When `SYS/FSX.X` initializes, it writes its mouse packet handler address (`text_base + 0x04F82A`) into the IOCS mouse receiver vector at `$0000_0938`. [`X68kBus::check_fsx_mouse_hook_patch`](../crates/msx68k-bus/src/bus.rs) intercepts that write, derives `text_base = handler_addr - 0x04F82A`, verifies the expected 4-byte instruction signature at `text_base + 0x04F768` (`MOVEM.L D0-D2/A5, -(SP)` = `[0x48, 0xE7, 0xE0, 0x04]`), and patches `[0xFE, 0x81, 0x4E, 0x75]` (`HypercallId::SxMouseSync` + `RTS`).
+- When `SYS/FSX.X` initializes, it writes its mouse packet handler address (`text_base + 0x04F82A`) into the IOCS mouse receiver vector at `$0000_0938`. [`X68kBus::check_fsx_mouse_hook_patch`](../crates/msx68k-bus/src/sxwin.rs) intercepts that write, derives `text_base = handler_addr - 0x04F82A`, verifies the expected 4-byte instruction signature at `text_base + 0x04F768` (`MOVEM.L D0-D2/A5, -(SP)` = `[0x48, 0xE7, 0xE0, 0x04]`), and patches `[0xFE, 0x81, 0x4E, 0x75]` (`HypercallId::SxMouseSync` + `RTS`).
+- Dynamic screen resolution management and desktop region updates are handled entirely by `X68kBus::apply_screen_resolution` in [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs), completely separating SX-Window desktop virtualization from the SCSI disk subsystem.
 
 ### 2.3 Layer 3: Two Unified Hook Injection Patterns
 
