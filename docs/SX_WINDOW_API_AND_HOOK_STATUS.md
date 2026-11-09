@@ -816,25 +816,83 @@ And in the multi-type pixel offset unpacker (`text_base + 0x034724`):
 ---
 
 ### 5.5 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
-Because the original X68000 24-bit (`16 MB`) physical address space (`$000000`–`$FFFFFF`) has no room for an extended guest VRAM and the 24-bit `HD63450` DMAC cannot address above `$FFFFFF`, **msx68k** bypasses guest VRAM completely for high-resolution modes and renders directly to a **host-native `wgpu` surface** by hooking four minimal chokepoints:
+Because the original X68000 24-bit (`16 MB`) physical address space (`$000000`–`$FFFFFF`) has no room for an extended guest VRAM and the 24-bit `HD63450` DMAC cannot address above `$FFFFFF`, **msx68k** provides two complementary architectures to break the 1024×1024 TVRAM barrier:
+1. **Approach A (Host Direct Acceleration)**: Native Mixed Mode hypercalls (`$FE89..$FE93`) in the Graphic Device Driver Table (`text_base + 0x5549E`).
+2. **Approach B (Extended Planar Framebuffer - Implemented & Verified)**: Extended 32-bit linear planar framebuffer mapped at `EXT_TVRAM_BASE = $1000_0000`.
+
+The four primary integration chokepoints:
 
 1. **Chokepoint 1: `IOCS $10` (`_CRTMOD`), Mode Record & `GMInitBitmap` (`$A13C` / `text_base + 0x01ECBC`)**:
-   - Extend `IOCS $10` (`_CRTMOD`) and patch the Active Screen Mode Record at `text_base + 0x55278`:
-     - `bounds.right` = Host width (e.g. `1280` or `1920`).
-     - `bounds.bottom` = Host height (e.g. `720` or `1080`).
+   - Extend `IOCS $10` (`_CRTMOD`) with Mode `$50` and patch the Active Screen Mode Record at `text_base + 0x55278`:
+     - `bounds.right` = Target width (e.g. `1280` or `1920`).
+     - `bounds.bottom` = Target height (e.g. `720` or `1080`).
 2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
-   - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
-   - Line, Rect, Fill, BitBlt, and Text rendering commands are intercepted in Rust and rendered directly onto host `wgpu` textures with hardware acceleration!
-3. **Chokepoint 3: Bypass TVRAM Clear & CRTC Blitter**:
-     - `bounds.bottom` = Host height (e.g. `720` or `1080`).
-2. **Chokepoint 2: Graphic Device Driver Table (`text_base + 0x5549E`)**:
-   - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE88..$FE93`).
-   - Line, Rect, Fill, BitBlt, and Text rendering commands are intercepted in Rust and rendered directly onto host `wgpu` textures with hardware acceleration!
+   - Replace the 12 function pointers in `0x5549E` with native Mixed Mode hypercalls (`$FE89..$FE93`) for host hardware acceleration.
 3. **Chokepoint 3: Bypass TVRAM Clear & CRTC Blitter**:
    - NOP out the hardware multiwrite clear loop at `text_base + 0x133E8` and replace it with a single host GPU clear call.
 4. **Chokepoint 4: Hardware Mouse Overlay**:
    - Disable guest software cursor rendering at `text_base + 0x04F852`.
    - The host emulator (`crates/msx68k-app`) already receives exact cursor coordinates via `HypercallId::SxMouseSync` (`$FE81`) and renders the cursor on the host GPU overlay layer without touching guest VRAM.
+
+---
+
+### 5.6 Beyond 1K×1K Architecture: Extended Planar Framebuffer (`EXT_TVRAM_BASE = $1000_0000`) & Configuration Persistence
+
+While 1024×768 and 1024×1024 fit within the standard 512 KB TVRAM memory space (`$00E0_0000..$00E7_FFFF`, 128 bytes/line * 1024 lines * 4 planes), display resolutions beyond 1024×1024 (e.g. 1280×720, 1280×960, 1600×1200, 1920×1080 Full HD, up to 3840×2160 4K UHD) exceed the physical capacity and 128-byte stride of standard TVRAM.
+
+To support arbitrary modern high resolutions while maintaining **100% binary compatibility** with Graph Man's native 4-plane planar drawing routines without requiring hypercall translation of every single drawing primitive, **msx68k** implements **Approach B: Extended Planar Framebuffer**:
+
+#### 1. 32-Bit Linear Memory Mapping (`$1000_0000`):
+- In Motorola 68020/68030 32-bit linear address space, `msx68k-bus` maps an extended planar framebuffer at:
+  ```text
+  EXT_TVRAM_BASE = $1000_0000 (256 MB mark, safely above the 24-bit $0000_0000..$00FF_FFFF X68000 space)
+  ```
+- Any 68000/68030 memory access at `addr >= EXT_TVRAM_BASE` is redirected by `X68kBus` to `ext_tvram: Option<Vec<u8>>`:
+  - When resolution is `w <= 1024 && h <= 1024`, standard TVRAM at `$00E0_0000` is active (`ext_tvram = None`).
+  - When resolution exceeds 1024×1024 (e.g. 1920×1080), `apply_screen_resolution` allocates `ext_tvram` with exact dimensions, sets `ext_tvram_row_bytes`, `ext_tvram_plane_bytes`, and migrates existing TVRAM contents.
+
+#### 2. Dynamic Scanline Stride & Plane Layout:
+Because Graph Man primitives dynamically load `BitMap.rowBytes` (`+0x0E`) and `BitMap.planeSize` (`+0x10`) rather than assuming hardcoded addresses or strides (proven in Section 5.2):
+- **`rowBytes`**: Calculated as `((width + 15) / 16) * 2`.
+  - For `1920×1080`: `(1920 / 16) * 2 = 240` bytes per scanline per plane (compared to 128 bytes in standard TVRAM).
+- **`planeSize`**: 32-bit byte offset between planes = `rowBytes * height`.
+  - For `1920×1080`: `240 * 1080 = 259,200` bytes per plane ($0003_F480). Total 4-plane size = `1,036,800` bytes ($000F_D200).
+- Plane starting addresses at `$1000_0000`:
+  - Plane 0: `$1000_0000`
+  - Plane 1: `$1000_0000 + planeSize` (`$1003_F480`)
+  - Plane 2: `$1000_0000 + 2 * planeSize` (`$1007_E900`)
+  - Plane 3: `$1000_0000 + 3 * planeSize` (`$100B_DD80`)
+
+#### 3. Immediate Instruction Patches in `SYS/FSX.X`:
+While Graph Man's drawing loops dynamically read `BitMap` fields, two functions in `SYS/FSX.X` contain immediate 32-bit constants initializing newly allocated screen bitmaps to `$00E0_0000`:
+- **`GMNewBits` (`text_base + 0x02F23A`)**: `move.l #$00E00000, 10(A1)` (`2D 7C 00 E0 00 00 00 0A`).
+- **`GMUnlockBits` (`text_base + 0x02F32E`)**: `move.l #$00E00000, 10(A1)` (`21 7C 00 E0 00 00 00 0A` or `20 3C ...`).
+
+When `apply_screen_resolution` switches between standard TVRAM and Extended TVRAM, it dynamically updates these immediate constants in guest RAM:
+- If `use_ext`: Patches immediates at `0x02F23A` and `0x02F32E` to `$1000_0000`.
+- If standard: Restores immediates to `$00E0_0000`.
+
+#### 4. Hardware CRTC & Host Vicon GPU Pipeline:
+- **`Crtc`**: `active_resolution()` widened to accept horizontal columns up to `4096` (`h_cols * 8`) and vertical lines up to `4096`. Vertical timing registers (`regs[4], regs[6], regs[7]`) mask with `0x0FFF` (12 bits) instead of `0x07FF` (10 bits).
+- **`ViconGpuCompositor`**:
+  - Dynamically binds either `bus.tvram()` or `bus.ext_tvram()` via `bus.active_tvram()`.
+  - Passes dynamic strides `(row_bytes: u32, plane_bytes: u32)` to WGSL render and presentation pipelines (`shader.wgsl` and `present.wgsl`) via uniform buffers, enabling direct GPU conversion of planar 16-color buffers of any resolution to 32-bit RGBA without CPU copy overhead.
+
+#### 5. Disk Configuration File Persistence (`A:\SYS\MSX68K.CFG`):
+To persist display resolutions across cold boots and emulator restarts:
+- **Format** (ASCII text):
+  ```text
+  # MSX68K Display Configuration
+  SCREEN_WIDTH=1920
+  SCREEN_HEIGHT=1080
+  FULLSCREEN=0
+  ```
+- **Guest Writer (`SXMODE.X`)**: When a new resolution or fullscreen toggle is applied in `SXMODE.X`, it creates or overwrites `A:\SYS\MSX68K.CFG` using standard Human68k DOS calls (`_CREATE` `$FF3C`, `_WRITE` `$FF40`, `_CLOSE` `$FF3E`), guarded against execution in pre-boot test environments.
+- **Boot-Time Parser (`load_disk_config_if_present`)**:
+  - During VM initialization, `X68kBus::load_disk_config_if_present()` inspects SCSI HDD 0's partition table and FAT filesystem.
+  - Searches root directory `\MSX68K.CFG` and subdirectory `\SYS\MSX68K.CFG`.
+  - Parses `SCREEN_WIDTH`, `SCREEN_HEIGHT`, and `FULLSCREEN` keys.
+  - Applies the target resolution and fullscreen state before `HUMAN.SYS` or `SYS/FSX.X` boot, allowing seamless booting directly into 1920×1080 or native fullscreen mode without manual reconfiguration.
 
 ---
 
@@ -851,6 +909,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$FE85`** | Virtual SCSI ROM<br/>`$FC0060` | ROM Entry Point | `ScsiIocsDispatch` | **`[x] Hooked`** | **`IOCS $F5` (`_SCSIDRV`) Bridge**: Handles SCSI command packets (read, write, inquiry, capacity, ready) directly from guest space. |
 | **`$FE86`** | SCSI Block Driver<br/>`driver_addr + 0x14` | Injected Stub in RAM | `ScsiDriverStrategy` | **`[x] Hooked`** | **Block Driver Strategy**: Latches request packet pointer (`A5`) into emulator state. |
 | **`$FE87`** | SCSI Block Driver<br/>`driver_addr + 0x18` | Injected Stub in RAM | `ScsiDriverInterrupt` | **`[x] Hooked`** | **Block Driver Interrupt**: Executes Human68k commands: 0 (INIT), 1 (MEDIA CHECK), 2 (BUILD BPB), 4 (READ), 5 (MEDIA SENSE), 8/9 (WRITE). |
+| **`IOCS $10` (`_CRTMOD` `$50`)** | Trap #15 Handler<br/>`D0 = $10, D1 = $0150` | IOCS Vector $10 | `IOCS _CRTMOD Mode $50` | **`[x] Hooked`** | **Dynamic Display Resolution Query & Mode Switch**: Standardized high-level resolution interface. Query (`D2 = -1`): returns current mode (`$50` or 16) in `D0`, `(W << 16) \| H` in `D1`, fullscreen flag in `D2`, host native `(W << 16) \| H` in `D3`. Apply (`D2 = 0` for host fullscreen, `D2 = (W << 16) \| H` for windowed): applies resolution (up to 3840×2160), updates SRAM `$ED007E = $B0`, updates `_CRT_MODE` (`$093C`), and persists to `A:\SYS\MSX68K.CFG`. |
 | **`Patch-ModeTable`** | `SYS/FSX.X`<br/>`text_base + 0x55338` | `03 00 02 00 00 E0 00 00 00 80` | Screen Mode Table (Mode 3) | **`[ ] Planned (Phase 2A)`** | **Hi-Res Viewport Patch**: Overwrites Mode 3 width (`768`) and height (`512`) with host display dimensions (e.g. `1280×720`). |
 | **`$A077`** | `SYS/FSX.X`<br/>`text_base + 0x04FEB6` | `2F 10 61 92` | Mouse Manager: `MSBoundSet` | **`[ ] Planned (Phase 2A)`** | **Mouse Bounding Box Hook**: Intercepts guest desktop boundary configuration to maintain host aspect ratio and screen boundaries. |
 | **`$A1C4`** | `SYS/FSX.X`<br/>`text_base + 0x02F1A4` | `4E 56 FF C0` | Graph Man: `GMGetScrnSize` | **`[ ] Planned (Phase 2A)`** | **Screen Dimension Query Hook**: Returns dynamic host window dimensions `(Width, Height)` in `D0`. |
@@ -858,7 +917,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A227`** | `SYS/FSX.X`<br/>`text_base + 0x047DCE` | `4E 56 00 00` | Sub-Window Manager: `WSOpen` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Allocator**: Intercepts sub-window opening, allocates host `VirtualGvramSurface`, and binds to `WSRecord`. |
 | **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
 | **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
-| **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Dynamic Screen Mode & Resolution Switching**: Queries (`D1 = -1`) or switches screen mode (0: 768×512, 1: 1024×768, 2: 1024×1024). Reprograms CRTC registers (R02, R03, R06, R07, R10, R11, R20), persists settings into battery-backed SRAM (`$ED0072..$ED007E`), and updates resident `SYS/FSX.X` kernel structures (`ActiveScreenModeRecord`, mode table, CRT table, `MouseWorkArea` bounds, desktop GrafPort). |
+| **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Low-Level Screen Mode Switch Hypercall**: Fallback hypercall superseded by `IOCS _CRTMOD $50`. Directly invokes `apply_screen_resolution` to update CRTC, SRAM, TVRAM/EXT_TVRAM, and resident `SYS/FSX.X` kernel structures. |
 | **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
 | **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
 | **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |
@@ -909,13 +968,28 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
 - **Entry Register Handling**:
   - Works whether entered via CLI or SX-Window Process Manager. Switches stack immediately to internal 2 KB application stack (`app_stack_top`).
   - Obtains Task ID cleanly via `TSGetID` (`$A360`), which queries `SYS/FSX.X` kernel directly, eliminating reliance on entry pointer registers.
+- **Official `IOCS _CRTMOD` (`$10`) Mode `$50` Interface**:
+  - `SXMODE.X` interfaces with the emulator using standard IOCS `TRAP #15` (`D0 = $10, D1 = $0150`):
+    - **Query Active Resolution**: Call with `D2.L = -1`. Returns `D0.L = mode ($50 or 16)`, `D1.L = (cur_w << 16) | cur_h`, `D2.L = fullscreen flag`, `D3.L = (native_w << 16) | native_h`.
+    - **Apply Resolution**: Call with `D2.L = (w << 16) | h` for windowed mode, or `D2.L = 0` for host native fullscreen 1:1.
+- **8 Resolution Presets**:
+  - Preset 0 (`$03000200`): `768 x 512 ` (Standard Desktop, Mode 16)
+  - Preset 1 (`$04000300`): `1024 x 768 ` (XGA 4:3)
+  - Preset 2 (`$04000400`): `1024 x 1024` (Full VRAM)
+  - Preset 3 (`$050002D0`): `1280 x 720 ` (HD 16:9)
+  - Preset 4 (`$050003C0`): `1280 x 960 ` (SXGA 4:3)
+  - Preset 5 (`$064004B0`): `1600 x 1200` (UXGA 4:3)
+  - Preset 6 (`$07800438`): `1920 x 1080` (Full HD 16:9)
+  - Preset 7 (`$00000000`): `Native Full` (Host Native 1:1 Fullscreen)
+- **Configuration Persistence (`A:\SYS\MSX68K.CFG`)**:
+  - Automatically generates `A:\SYS\MSX68K.CFG` using standard Human68k DOS calls (`_CREATE` `$FF3C`, `_WRITE` `$FF40`, `_CLOSE` `$FF3E`), guarded by verifying that DOS vectors are initialized (`$002C.w != 0`).
 - **CLI Mode**:
   - Reads command line argument buffer from `A3` (Human68k ABI: `0(A3)` is length byte, `1(A3)` is argument characters).
   - Supported CLI options:
-    - `sxmode 0` or `sxmode 768x512`: Switch to Mode 0 (768×512 Standard).
-    - `sxmode 1` or `sxmode 1024x768`: Switch to Mode 1 (1024×768 XGA 4:3).
-    - `sxmode 2` or `sxmode 1024x1024`: Switch to Mode 2 (1024×1024 Full VRAM).
-  - Applies mode immediately via `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) and exits via `DOS _EXIT2` without launching GUI.
+    - `sxmode 0`..`sxmode 7`: Select preset mode by index.
+    - `sxmode 768x512`, `sxmode 1024x768`, `sxmode 1024x1024`, `sxmode 1280x720`, `sxmode 1280x960`, `sxmode 1600x1200`, `sxmode 1920x1080`: Select preset by resolution.
+    - `sxmode native` or `sxmode fullscreen`: Activate host native fullscreen 1:1.
+  - Applies mode immediately via `IOCS _CRTMOD` (`$10, $0150`), saves configuration file, and exits via `DOS _EXIT2` without launching GUI.
 - **Interactive GUI Mode (Launched without arguments in SX-Window)**:
   - Detects SX-Window runtime by checking Vector #10 (`Line 1010 Emulator` at `$0000_0028 < $00E0_0000`).
   - Switches stack to dedicated 2 KB application stack (`app_stack_top`).
@@ -923,20 +997,29 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
     - When launched by SX-Window Process Manager (`SYS/FSX.X`), `%a0` points to the Task Control Block, and `8(%a0)` contains the assigned Task ID.
     - If `8(%a0)` is not positive (or when invoked from CLI fallback), queries `TSGetID(-1)` (`$A360` with a negative word pushed on stack, matching `SYS/FSX.X`'s handler at `0x1481e` which requires `4(USP) < 0` to return the current task ID).
     - Stores the verified Task ID in `app_task_id`, then passes it to `TSInitApp` (`$A350`) alongside the 6 KB work buffer (`work_area: .ds.b 6144`, which `SYS/FSX.X` clears by writing 5,962 zeroes).
-  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=270, right=400)` with Pascal string title (`6, "SXMODE", 0`) and `refCon = app_task_id`.
-  - Sets port (`GMSetGraph` `$A131`), selects 12×13 system font (`GMFontKind` `$A18B`, `GMFontSize` `$A18E`), and renders three framed buttons using Pascal strings with `GMDrawStrL` (`$A190`):
-    - Button 0 (`y=16..46, x=20..200`): `" 768 x 512 "`
-    - Button 1 (`y=56..86, x=20..200`): `"1024 x 768 "`
-    - Button 2 (`y=96..126, x=20..200`): `"1024 x 1024"`
-  - Queries active mode via `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) and inverts the active button rectangle via official `GMInvertRect` (`$A1A3`).
+  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=396, right=400)` (`w=220, h=276`) with Pascal string title (`6, "SXMODE", 0`) and `refCon = app_task_id`.
+  - Sets port (`GMSetGraph` `$A131`), selects 12×13 system font (`GMFontKind` `$A18B`, `GMFontSize` `$A18E`), and renders eight framed buttons using Pascal strings with `GMDrawStrL` (`$A190`) with height 22, vertical stride 28, and spacing 6:
+    - Button 0 (`y=16..38, x=20..200`): `" 768 x 512 "`
+    - Button 1 (`y=44..66, x=20..200`): `"1024 x 768 "`
+    - Button 2 (`y=72..94, x=20..200`): `"1024 x 1024"`
+    - Button 3 (`y=100..122, x=20..200`): `"1280 x 720 "`
+    - Button 4 (`y=128..150, x=20..200`): `"1280 x 960 "`
+    - Button 5 (`y=156..178, x=20..200`): `"1600 x 1200"`
+    - Button 6 (`y=184..206, x=20..200`): `"1920 x 1080"`
+    - Button 7 (`y=212..234, x=20..200`): `"Native Full"`
+    *(Note: Buttons 0..2 remain at identical local positions for backward compatibility with automated tests).*
+  - Queries active mode via `IOCS _CRTMOD` (`$10, $0150`) and inverts the active button rectangle using XOR fill:
+    - `GMForeColor(2)` (`move.w #2, -(sp)` / `SXCALL GMForeColor`), because `9 ^ 2 == 11` (light gray background becomes black) and `11 ^ 2 == 9` (black text becomes light gray).
+    - `GMPenMode(3)` (`move.w #3, -(sp)` / `SXCALL GMPenMode`, `G_XOR`).
+    - `GMFillRect(btn_rect)` (`pea btn_rect` / `SXCALL GMFillRect`).
   - Executes canonical cooperative event loop via `TSEventAvail` (`$A357`):
     - `updateEvt` (7, verified from `SYS/FSX.X`): pushes `win_ptr` once, calls `WMUpdate` (`$A20D`), redraws buttons, calls `WMUpdtOver` (`$A20E`), and pops `win_ptr`.
     - `appQuitEvt` (12): cleans up via `WMDispose` (`$A1FC`) and `TSExit` (`$A352`).
     - `mouseDown` (1): brings window to front (`WMSelect` `$A1FE`), sets port (`GMSetGraph` `$A131`), and delegates window drag, close box, and content testing to `SXCallWindM` (`$A3A2`):
       - Close box confirmed (`D0 == 7`): calls `WMDispose` (`$A1FC`), `TSExit` (`$A352`), and exits cleanly via `DOS _EXIT2`.
-      - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit, invokes `HYPERCALL HYPER_SX_SET_SCREEN_MODE` (`$FE88`) to dynamically resize the desktop in real time, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
+      - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit (looping across 8 button bounds), invokes `IOCS _CRTMOD` (`$10, $0150`) to dynamically resize the desktop in real time, persists to `A:\SYS\MSX68K.CFG`, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
 - **Console Fallback Mode (Launched without arguments outside SX-Window)**:
-  - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> 0`) and exits cleanly.
+  - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> ... -> 0`) and exits cleanly.
 - **SCSI HDD Installation & File Layout**:
   - `build_bootable_sxwin_scsi_hdd` organizes files into the official Sharp `SX31_HD.INS` HDD hierarchy:
     - Root `A:\`: contains standard system files (`HUMAN.SYS`, `COMMAND.X`, `CONFIG.SYS`, `AUTOEXEC.BAT`, `STARTUP.ENV`, `KEY.SYS`, `USKCG.SYS`, `BEEP.SYS`), `SXMODE.X` (for 1-click access), and official subdirectories.
@@ -954,13 +1037,20 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
     - Once mouse polling starts, peripheral pacing locks to exact 60Hz wall-clock time (`run_burst_frame` with 166,667 10MHz ticks/frame).
 
 ### 7.4 Host Emulator Integration
-- **CLI Flag `--resolution <WxH>`**: Configures the initial screen mode (`768x512`, `1024x768`, `1024x1024`).
-- **Hotkey `F5`**: Dynamically cycles display resolutions at runtime (`768x512` -> `1024x768` -> `1024x1024` -> `768x512`).
-- **Dynamic Window Resizing**: Host emulator window automatically resizes to match the emulator's active CRTC display resolution when modes change.
+- **CLI Arguments**:
+  - `--resolution <WxH>`: Configures initial screen mode (`768x512`, `1024x768`, `1024x1024`, `1280x720`, `1280x960`, `1600x1200`, `1920x1080`, or arbitrary dimensions).
+  - `--fullscreen` / `-f`: Starts directly in host native fullscreen 1:1 mode.
+  - `--resolution native` / `--resolution fullscreen`: Equivalent to `--fullscreen`.
+- **Primary Monitor Probing**:
+  - In `msx68k-app`, `resumed()` queries the active/primary monitor physical dimensions, clamped to `768..=3840` (aligned to 16) and `512..=2160`, stored in `bus.host_native_resolution`.
+- **Hotkey `F5`**: Dynamically cycles display resolutions at runtime (`768x512` -> `1024x768` -> `1024x1024` -> `1280x960` -> `1920x1080` -> `768x512`).
+- **Dynamic Window Resizing & Wayland Compatibility**:
+  - In `WindowEvent::RedrawRequested`, the app checks for changes in `active_resolution()` or `fullscreen_mode`.
+  - On Wayland (`winit 0.30`), calling `window.request_inner_size(...)` synchronously updates the window size without emitting `WindowEvent::Resized`. The app immediately reconfigures `gpu.surface_config` and `gpu.surface.configure(...)` to ensure seamless 1:1 display without letterboxing or stale buffer scaling.
 
 ### 7.5 Window Clipping, Desktop Region Hierarchy & Live Resolution Switching
 
-When switching SX-Window desktop resolutions dynamically (e.g. from `768×512` to `1024×768` or `1024×1024`) or booting directly with an extended resolution, simply expanding CRTC timings and TVRAM memory tiling is insufficient. Without updating internal kernel Window Manager structures, windows dragged or resized beyond `(768, 512)` were clipped to the original 768×512 boundary.
+When switching SX-Window desktop resolutions dynamically (e.g. from `768×512` to `1024×768`, `1024×1024`, or `1920×1080`) or booting directly with an extended resolution, simply expanding CRTC timings and TVRAM memory tiling is insufficient. Without updating internal kernel Window Manager structures, windows dragged or resized beyond `(768, 512)` were clipped to the original 768×512 boundary.
 
 Reverse-engineering of `SYS/FSX.X` window management (`text_base + 0x41484..0x41630`, `0x15A34`, `0x4175E..0x41A28`) revealed the exact desktop region hierarchy, window traversal mechanics, and clipping algorithms.
 
@@ -988,7 +1078,7 @@ The desktop window maintains 6 specialized region handles:
 - Successive windows are linked via `next = *(curr + 0x66)`.
 - When a window is opened, `GMOpenGraph` (`text_base + 0x1ECBC`) allocates a private 22-byte `Bitmap` record at `*(win + 0x00)` copied from `text_base + 0x55278`.
 - When the user drags or resizes a window, `SXCallWindM` (`$A3A2` at `text_base + 0x15B7E`) invokes `WMDrag` (`$A205`) or `WMGrow` (`$A203`), using **`win->graph.bmap->rect` as the default `limitRect`**!
-- Therefore, when switching resolutions dynamically, `apply_screen_resolution` must traverse the open window linked list (`*(desktopWindow + 0x80)`) and update `*(win + 0x00)` (`bmap->rect.right = width`, `bmap->rect.bottom = height`) so child windows can be dragged and resized across the entire extended desktop without hitting an invisible 768×512 boundary.
+- Therefore, when switching resolutions dynamically, `apply_screen_resolution` must traverse the open window linked list (`*(desktopWindow + 0x80)`) and update `*(win + 0x00)` (`bmap->rect.right = width`, `bmap->rect.bottom = height`, and `bmap->baseAddr`, `rowBytes`, `planeSize` if switching to/from `EXT_TVRAM`) so child windows can be dragged and resized across the entire extended desktop without hitting an invisible boundary or writing to stale framebuffer addresses.
 
 #### 4. Global Screen Rects & Mode Templates:
 To ensure new windows opened after a resolution switch inherit the correct dimensions, `apply_screen_resolution` updates:
@@ -1016,12 +1106,15 @@ When resolution expands live:
    - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
    - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
    - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
-3. **Verification via In-Process SCSI Boot & Window Dragging**:
+3. **Verification via In-Process SCSI Boot, Window Dragging & Beyond 1K×1K Testing**:
    - In `crates/msx68k-bus/tests/scsi_boot.rs` (`test_sxwin31_scsi_boot_and_mouse_sync`):
      - Boots `SXWIN31.HDS`, spawns `SXMODE.X` Task 6 via `TSFock` (`$A351`), and clicks Button 2 to switch resolution to 1024×1024 live.
-     - Simulates dragging `SXMODE.X`'s window titlebar from `(250, 105)` across the 768×512 boundary to `(800, 550)`.
-     - Verifies that:
-       - `SXMODE->outside` moves from `(179, 97, 401, 271)` to `(729, 542, 951, 716)` (`right = 951 > 768`, `bottom = 716 > 512`).
-       - `SXMODE->inside` moves from `(180, 120, 400, 270)` to `(730, 565, 950, 715)` (`left = 730`, `right = 950 > 768`, `top = 565 > 512`, `bottom = 715 > 512`).
-       - `SXMODE->visRgn` remains **unclipped at the full `(0, 0, 220, 150)`** with `size = 12`.
-       - Window frame, text strings, buttons, and drop shadow render 100% pixel-perfect into TVRAM without truncation or artifacting.
+     - Simulates dragging `SXMODE.X`'s window titlebar across the 768×512 boundary to `(730, 565)`.
+     - Verifies `SXMODE->outside` and `SXMODE->inside` span past 768 and 512 with `visRgn` remaining unclipped at `(0, 0, 220, 276)` (`size = 12`).
+     - Verifies configuration persistence: checks that `A:\SYS\MSX68K.CFG` exists on the SCSI HDD and SRAM mode byte is `$B0`.
+     - Switches to Beyond 1K×1K (1920×1080) live via `IOCS _CRTMOD` (`$10, $0150, D2 = (1920<<16) | 1080`).
+     - Verifies `active_resolution() == (1920, 1080)`, `is_ext_tvram_active() == true`, `row_bytes == 240`, `plane_bytes == 259,200`.
+     - Drags `SXMODE.X` window past the 1024×1024 boundary to `(1300, 750)`.
+     - Asserts `inside.right > 1300`, `inside.bottom > 750`, `vis_w == 220`, `vis_h == 276`, and global `inside.left + vis_w > 1300` and `inside.top + vis_h > 750`.
+     - Renders 1920×1080 frame and samples window pixels at `(1350, 780)`, verifying pixel-perfect RGBA output across the 32-bit linear planar TVRAM planes without any clipping or artifacting.
+     - Switches back via CLI mode to 1024×1024, verifying V-Blank advance and seamless downscaling.

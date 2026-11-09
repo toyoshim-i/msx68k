@@ -45,6 +45,11 @@ flowchart LR
   - SX-Window integration and host display/mouse synchronization hypercalls (`$FE81` `SxMouseSync`, `$FE88` `SxSetScreenMode`) are routed to [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs).
   - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiIocs`, `$FE83` `ScsiBootRom`, `$FE84` `ScsiRomdbInit`, `$FE85` `ScsiDriverCmd`, `$FE86` `ScsiHddRead`, `$FE87` `ScsiHddWrite`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
   - All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
+- In addition to F-Line hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
+  - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).
+  - `D1.W == $0150, D2.L == 0`: Host Native Fullscreen 1:1 mode.
+  - `D1.W == $0150, D2.L > 0`: Windowed 1:1 mode (`w = D2.L >> 16, h = D2.L & $FFFF`).
+  - Active settings are automatically persisted to `A:\SYS\MSX68K.CFG` and battery-backed SRAM `$ED007E` (`0x80 | 0x30 = 0xB0`).
 - A native replacement stub in 68k memory or ROM requires only **4 bytes (2 words)**:
   ```text
   +0: $FE80 | hypercall_id   ; Traps into Rust Hypercall Dispatcher
