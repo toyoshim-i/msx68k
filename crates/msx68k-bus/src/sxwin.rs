@@ -477,15 +477,77 @@ impl X68kBus {
         }
 
         // 2. Manage Framebuffer buffers and copy existing scanlines
+        let (prev_max_w, prev_max_h) = self.max_desktop_size;
         let old_buf: Option<Vec<u8>> = if old_was_ext {
             self.ext_tvram.take()
         } else {
             self.tvram().map(|s| s.to_vec())
         };
         let had_drawn_pixels = old_buf.as_ref().is_some_and(|b| b.iter().any(|&x| x != 0));
+        if had_drawn_pixels {
+            self.max_desktop_size = (
+                prev_max_w.max(old_w).max(width),
+                prev_max_h.max(old_h).max(height),
+            );
+        }
+
+        // When switching away from an extended framebuffer, cache it in saved_ext_tvram
+        if old_was_ext {
+            if let Some(ref src) = old_buf {
+                if let Some((ref mut sw, ref mut sh, ref mut s_row, ref mut s_plane, ref mut s_buf)) =
+                    self.saved_ext_tvram
+                {
+                    if old_w >= *sw && old_h >= *sh {
+                        *sw = old_w;
+                        *sh = old_h;
+                        *s_row = old_row_bytes;
+                        *s_plane = old_plane_bytes;
+                        *s_buf = src.clone();
+                    } else {
+                        let copy_rows = (old_h as usize).min(*sh as usize);
+                        let copy_bytes = old_row_bytes.min(*s_row);
+                        for plane in 0..4 {
+                            let src_base = plane * old_plane_bytes;
+                            let dst_base = plane * (*s_plane);
+                            for r in 0..copy_rows {
+                                let s_off = src_base + r * old_row_bytes;
+                                let d_off = dst_base + r * (*s_row);
+                                if s_off + copy_bytes <= src.len() && d_off + copy_bytes <= s_buf.len()
+                                {
+                                    s_buf[d_off..d_off + copy_bytes]
+                                        .copy_from_slice(&src[s_off..s_off + copy_bytes]);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    self.saved_ext_tvram =
+                        Some((old_w, old_h, old_row_bytes, old_plane_bytes, src.clone()));
+                }
+            }
+        }
 
         if use_ext {
             let mut new_buf = vec![0u8; 4 * new_plane_bytes];
+            // First restore from previously saved extended TVRAM if available
+            if let Some((_sw, sh, s_row, s_plane, ref s_buf)) = self.saved_ext_tvram {
+                let copy_rows = (sh as usize).min(height as usize);
+                let copy_bytes = s_row.min(new_row_bytes);
+                for plane in 0..4 {
+                    let src_base = plane * s_plane;
+                    let dst_base = plane * new_plane_bytes;
+                    for r in 0..copy_rows {
+                        let s_off = src_base + r * s_row;
+                        let d_off = dst_base + r * new_row_bytes;
+                        if s_off + copy_bytes <= s_buf.len() && d_off + copy_bytes <= new_buf.len()
+                        {
+                            new_buf[d_off..d_off + copy_bytes]
+                                .copy_from_slice(&s_buf[s_off..s_off + copy_bytes]);
+                        }
+                    }
+                }
+            }
+            // Next copy the most recent active framebuffer scanlines (overwriting overlapping region)
             if let Some(ref src) = old_buf {
                 let copy_rows = (old_h as usize).min(height as usize);
                 let copy_bytes = old_row_bytes.min(new_row_bytes);
@@ -550,6 +612,7 @@ impl X68kBus {
         }
 
         // 4. Patch resident SYS/FSX.X kernel data structures if loaded in Main RAM
+        let mut open_window_outside_rects: Vec<(i16, i16, i16, i16)> = Vec::new();
         if self.main_ram.len() >= 0x0940 {
             let iocs_mouse_vec = u32::from_be_bytes([
                 self.main_ram[0x938],
@@ -848,6 +911,32 @@ impl X68kBus {
                         let mut count = 0;
                         while curr_win > 0 && curr_win + 0x6A <= self.main_ram.len() && count < 64
                         {
+                            let is_visible = self.main_ram[curr_win + 0x42] != 0;
+                            if is_visible {
+                                let out_h = read_ptr(&self.main_ram, curr_win + 0x48);
+                                let out_ptr = read_ptr(&self.main_ram, out_h);
+                                if out_ptr > 0 && out_ptr + 12 <= self.main_ram.len() {
+                                    let out_l = i16::from_be_bytes([
+                                        self.main_ram[out_ptr + 4],
+                                        self.main_ram[out_ptr + 5],
+                                    ]);
+                                    let out_t = i16::from_be_bytes([
+                                        self.main_ram[out_ptr + 6],
+                                        self.main_ram[out_ptr + 7],
+                                    ]);
+                                    let out_r = i16::from_be_bytes([
+                                        self.main_ram[out_ptr + 8],
+                                        self.main_ram[out_ptr + 9],
+                                    ]);
+                                    let out_b = i16::from_be_bytes([
+                                        self.main_ram[out_ptr + 10],
+                                        self.main_ram[out_ptr + 11],
+                                    ]);
+                                    open_window_outside_rects.push((out_l, out_t, out_r, out_b));
+                                }
+
+                            }
+
                             let bmap = read_ptr(&self.main_ram, curr_win);
                             if bmap > 0 && bmap + 20 <= self.main_ram.len() {
                                 let cur_base = u32::from_be_bytes([
@@ -874,7 +963,7 @@ impl X68kBus {
                         }
                     }
 
-                    // Menubar GrafPort pointed by dtgs + 0x46:
+                    // Menubar window pointed by dtgs + 0x46 (*(text_base + 0x543C6))
                     let dtgs = text_base + 0x54380;
                     let menu_gp = read_ptr(&self.main_ram, dtgs + 0x46);
                     if menu_gp > 0 && menu_gp + 0x10 <= self.main_ram.len() {
@@ -895,6 +984,38 @@ impl X68kBus {
                                 new_plane_bytes as u32,
                             );
                         }
+                    }
+
+                    // Global menuGrafPort allocated by MNInit: *(text_base + 0x54AE0)
+                    let menu_gp_ptr = read_ptr(&self.main_ram, text_base + 0x54AE0);
+                    if menu_gp_ptr > 0 && menu_gp_ptr + 0x20 <= self.main_ram.len() {
+                        update_rect_wh(&mut self.main_ram, menu_gp_ptr + 4, w_u16, h_u16);
+                        let bmap = read_ptr(&self.main_ram, menu_gp_ptr);
+                        if bmap > 0 && bmap + 20 <= self.main_ram.len() {
+                            update_planar_bmap(
+                                &mut self.main_ram,
+                                bmap,
+                                w_u16,
+                                h_u16,
+                                new_base_addr,
+                                new_row_bytes as u16,
+                                new_plane_bytes as u32,
+                            );
+                        }
+                        update_rgn_handle(
+                            &mut self.main_ram,
+                            menu_gp_ptr + 0x10,
+                            w_u16,
+                            h_u16,
+                            false,
+                        );
+                        update_rgn_handle(
+                            &mut self.main_ram,
+                            menu_gp_ptr + 0x14,
+                            w_u16,
+                            h_u16,
+                            true,
+                        );
                     }
 
                     // Patch GMNewBits (text_base + 0x02F23A) and GMUnlockBits (text_base + 0x02F32E) immediates
@@ -985,6 +1106,32 @@ impl X68kBus {
             } else {
                 self.tvram_mut()
             };
+
+            let check_keep = !open_window_outside_rects.is_empty()
+                && (prev_max_w > fill_w as u32 || prev_max_h > fill_h as u32);
+            let get_keep_mask = |y: usize, col: usize| -> u16 {
+                if !check_keep || y >= (prev_max_h as usize) {
+                    return 0;
+                }
+                let y_i16 = y as i16;
+                let col_start = (col * 16) as i16;
+                let col_end = col_start + 16;
+                let mut mask = 0u16;
+                for &(ol, ot, or, ob) in &open_window_outside_rects {
+                    if y_i16 >= ot && y_i16 < ob {
+                        let intersect_l = col_start.max(ol);
+                        let intersect_r = col_end.min(or).min(prev_max_w as i16);
+                        if intersect_l < intersect_r {
+                            for x in intersect_l..intersect_r {
+                                let b = (x - col_start) as usize;
+                                mask |= 1 << (15 - b);
+                            }
+                        }
+                    }
+                }
+                mask
+            };
+
             for plane in 0..4 {
                 let plane_base = plane * plane_stride;
                 let mut tile = [[0u8; 2]; 32]; // 16 rows * 2 cols
@@ -1003,7 +1150,15 @@ impl X68kBus {
                         let word = tile[ty * 2 + (col % 2)];
                         let dst_off = plane_base + y * stride + col * 2;
                         if dst_off + 2 <= tv.len() {
-                            tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                            let keep_mask = get_keep_mask(y, col);
+                            if keep_mask == 0 {
+                                tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                            } else if keep_mask != 0xFFFF {
+                                let existing = u16::from_be_bytes([tv[dst_off], tv[dst_off + 1]]);
+                                let stipple = u16::from_be_bytes(word);
+                                let out_word = (existing & keep_mask) | (stipple & !keep_mask);
+                                tv[dst_off..dst_off + 2].copy_from_slice(&out_word.to_be_bytes());
+                            }
                         }
                     }
                 }
@@ -1014,7 +1169,15 @@ impl X68kBus {
                         let word = tile[ty * 2 + (col % 2)];
                         let dst_off = plane_base + y * stride + col * 2;
                         if dst_off + 2 <= tv.len() {
-                            tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                            let keep_mask = get_keep_mask(y, col);
+                            if keep_mask == 0 {
+                                tv[dst_off..dst_off + 2].copy_from_slice(&word);
+                            } else if keep_mask != 0xFFFF {
+                                let existing = u16::from_be_bytes([tv[dst_off], tv[dst_off + 1]]);
+                                let stipple = u16::from_be_bytes(word);
+                                let out_word = (existing & keep_mask) | (stipple & !keep_mask);
+                                tv[dst_off..dst_off + 2].copy_from_slice(&out_word.to_be_bytes());
+                            }
                         }
                     }
                 }

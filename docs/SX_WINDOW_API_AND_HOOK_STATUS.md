@@ -1106,6 +1106,17 @@ When resolution expands live:
    - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
    - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
    - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
+   - **Menu GrafPort & Menubar Window Rescaling (`*(text_base + 0x54AE0)`, `*(text_base + 0x543C6)`)**:
+     - `MNInit` (`0x049CB2`) allocates a 64-byte `GrafPort` at boot and stores its pointer in `menuGrafPort = *(text_base + 0x54AE0)`.
+     - When the user right-clicks (`E_MSRDOWN`), `SXWIN.X` invokes `MNSelect` (`Trap $A268` at `0x04A4AE`), setting the active port to `menuGrafPort`, clamping the popup rect against `menuGrafPort->bmap->rect`, saving the background via `GMCopyBits` from `menuGrafPort->bmap`, and rendering into `menuGrafPort` clipped to `menuGrafPort->visible`.
+     - `apply_screen_resolution` rescales `menuGrafPort`'s port rect (`+0x04`), bitmap (`+0x00`), `visRgn` (`+0x10`), and `clipRgn` (`+0x14`) to `(w, h)`, and points `baseAddr` to `EXT_TVRAM_BASE` (`$1000_0000`) with matching stride when extended resolutions are active.
+     - The Menubar window `*(text_base + 0x543C6)` has its port rect width and bitmap dimensions updated to `(width, menu_h)` so the menubar spans full screen width.
+   - **Extended TVRAM Window Preservation Across Resolution Switching Cycles**:
+     - When switching between extended and standard resolutions (e.g. `1920×1080 -> 768×512 -> 1920×1080`), `X68kBus.saved_ext_tvram` preserves the highest watermark extended framebuffer.
+     - When re-entering an extended mode, `saved_ext_tvram` is restored before applying active scanline copies.
+     - During desktop stipple fill in Step 5, a 16-bit `keep_mask` is computed for each column intersecting any visible window in `open_window_outside_rects`, preserving window frames and client pixels in the extended desktop area.
+   - **Font Path Redirection in SCSI Image Generation (`IFM.LB` & `IFM.X`)**:
+     - Hardcoded font paths in `IFM.LB` (`D:\FONT\`) and `IFM.X` (`B:\FONT\`) on `SXWIN316.XDF` are patched to `A:\FONT\` during SCSI HDD generation, ensuring outline and image fonts load reliably from the boot partition.
    - **Cursor Save Buffer Stride Rescaling (`A4 + 0x24`, `save_buf + 0x00`)**:
      - When `SYS/FSX.X` draws the software cursor (`0x0522F2`), it caches a 32×16 pixel background block into `save_buf = *(A4 + 0x24)` (`text_base + 0x631C2`):
        - `A4 + 0x32`: `u8` flag (`0xFF` = cursor drawn & background saved).
@@ -1126,4 +1137,7 @@ When resolution expands live:
      - Drags `SXMODE.X` window past the 1024×1024 boundary to `(1300, 750)`.
      - Asserts `inside.right > 1300`, `inside.bottom > 750`, `vis_w == 220`, `vis_h == 276`, and global `inside.left + vis_w > 1300` and `inside.top + vis_h > 750`.
      - Renders 1920×1080 frame, verifies that `(1440..1472, 293..308)` is completely clean of any cursor background save buffer remnants, and samples window pixels at `(1350, 780)`, verifying pixel-perfect RGBA output across the 32-bit linear planar TVRAM planes without any clipping or artifacting.
+     - Verifies `menuGrafPort` (`*(text_base + 0x54AE0)`) is expanded to 1920×1080 with `baseAddr = EXT_TVRAM_BASE` and `rowBytes = 240`.
+     - Simulates right-click desktop popup menu at `(1500, 200)` in extended TVRAM.
+     - Executes a complete downscale/upscale cycle `1920×1080 -> 768×512 -> 1920×1080`, verifying window pixel preservation at `(1350, 780)` and unclipped visible regions.
      - Switches back via CLI mode to 1024×1024, verifying V-Blank advance and seamless downscaling.

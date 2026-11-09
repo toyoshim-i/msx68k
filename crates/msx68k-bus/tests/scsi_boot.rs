@@ -1232,6 +1232,83 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         eprintln!("[Screenshot 1920x1080] Saved 1920x1080 PNG to {:?}", path1080);
     }
 
+    // Verify Fix 1: Global menuGrafPort (*(text_base + 0x54AE0)) and Menubar Window (*(text_base + 0x543C6))
+    let menu_gp_ptr = vm.bus.read_u32(text_base + 0x54AE0, true).unwrap();
+    assert!(menu_gp_ptr > 0, "menuGrafPort must be allocated by MNInit");
+    let menu_gp_w = vm.bus.read_u16(menu_gp_ptr + 8, true).unwrap();
+    let menu_gp_h = vm.bus.read_u16(menu_gp_ptr + 10, true).unwrap();
+    assert_eq!((menu_gp_w, menu_gp_h), (1920, 1080), "menuGrafPort rect must be expanded to 1920x1080");
+    let menu_gp_bm = vm.bus.read_u32(menu_gp_ptr, true).unwrap();
+    assert!(menu_gp_bm > 0);
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 6, true).unwrap(), 1920, "menuGrafPort bmap width must be 1920");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 8, true).unwrap(), 1080, "menuGrafPort bmap height must be 1080");
+    assert_eq!(vm.bus.read_u32(menu_gp_bm + 10, true).unwrap(), msx68k_bus::EXT_TVRAM_BASE, "menuGrafPort baseAddr must be EXT_TVRAM_BASE");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 14, true).unwrap(), 240, "menuGrafPort rowBytes must be 240");
+
+    let menubar_win = vm.bus.read_u32(text_base + 0x543C6, true).unwrap();
+    assert!(menubar_win > 0, "menubar_win must be present at text_base + 0x543C6");
+    assert_eq!(vm.bus.read_u16(menubar_win + 8, true).unwrap(), 1920, "menubar_win rect.right must be 1920");
+    let menubar_bm = vm.bus.read_u32(menubar_win, true).unwrap();
+    assert!(menubar_bm > 0);
+    assert_eq!(vm.bus.read_u16(menubar_bm + 6, true).unwrap(), 1920, "menubar_bm width must be 1920");
+
+    // Perform right-click popup menu on desktop at (1500, 200) well into extended TVRAM:
+    vm.bus.set_host_mouse_position(Some((1500, 200)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..50_000 {
+        vm.step();
+    }
+    vm.bus.scc.set_mouse_buttons(false, true); // Right-click down
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..200_000 {
+        vm.step();
+    }
+    // Release right-click
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.bus.scc.add_mouse_delta(1, 1);
+    for _ in 0..200_000 {
+        vm.step();
+    }
+
+    // Verify Fix 2: Resolution switch cycle (1920x1080 -> 768x512 -> 1920x1080)
+    // with SXMODE.X remaining at (1300, 750) and preserving window pixels:
+    vm.cpu_state.d[0] = 0x10;
+    vm.cpu_state.d[1] = 0x0150;
+    vm.cpu_state.d[2] = (768 << 16) | 512;
+    let trap_res_down = vm.bus.handle_iocs_crtmod(&mut vm.cpu_state);
+    assert!(matches!(trap_res_down, msx68k_cpu::TrapResult::Handled { .. }));
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    assert!(!vm.bus.is_ext_tvram_active());
+    for _ in 0..100_000 {
+        vm.step();
+    }
+
+    // Switch back to 1920x1080:
+    vm.cpu_state.d[0] = 0x10;
+    vm.cpu_state.d[1] = 0x0150;
+    vm.cpu_state.d[2] = (1920 << 16) | 1080;
+    let trap_res_up = vm.bus.handle_iocs_crtmod(&mut vm.cpu_state);
+    assert!(matches!(trap_res_up, msx68k_cpu::TrapResult::Handled { .. }));
+    assert_eq!(vm.bus.crtc.active_resolution(), (1920, 1080));
+    assert!(vm.bus.is_ext_tvram_active());
+    for _ in 0..100_000 {
+        vm.step();
+    }
+
+    let (w1080_restored, h1080_restored, rgba1080_restored) = render_bus_tvram_rgba(&vm.bus);
+    assert_eq!((w1080_restored, h1080_restored), (1920, 1080));
+    let restored_px = &rgba1080_restored[sample_idx..sample_idx + 4];
+    eprintln!("[1920x1080 Restored Sample Pixel at (1350, 780)]: RGBA={:?}", restored_px);
+    assert_eq!(restored_px, px, "Window pixels at (1350, 780) must remain intact across resolution switch cycle");
+
+    // Verify SXMODE.X window regions remain unclipped after resolution switch cycle:
+    let sx_vis_h_restored = vm.bus.read_u32(top_win + 0x10, true).unwrap();
+    let sx_vis_ptr_restored = vm.bus.read_u32(sx_vis_h_restored, true).unwrap();
+    let vis_w_restored = vm.bus.read_u16(sx_vis_ptr_restored + 8, true).unwrap() as i16;
+    let vis_h_restored = vm.bus.read_u16(sx_vis_ptr_restored + 10, true).unwrap() as i16;
+    assert_eq!(vis_w_restored, 220, "SXMODE visible width must be 220 after resolution switch cycle");
+    assert_eq!(vis_h_restored, 276, "SXMODE visible height must be 276 after resolution switch cycle");
+
     // Verify SXMODE.X execution on the running SX-Window system:
     let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
     let inc_dir = workspace_root.join("guest/include");

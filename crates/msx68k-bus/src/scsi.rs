@@ -1090,6 +1090,18 @@ pub fn build_bootable_sxwin_scsi_hdd(
             new_path.extend_from_slice(b"\\EXCOM;A:\\FONT;A:\\SAMPLE;\r\n");
             f.data = new_path;
         }
+        // In IFM.LB (SXWIN316.XDF), replace "D:\FONT\" with "A:\FONT\"
+        if normalize_sjis(&f.raw_name).starts_with(b"IFM")
+            && normalize_sjis(&f.raw_ext).starts_with(b"LB")
+        {
+            f.data = replace_ascii_case_insensitive(&f.data, b"D:\\FONT\\", b"A:\\FONT\\");
+        }
+        // In IFM.X (SXWIN316.XDF / SXWIN313.XDF), replace "B:\FONT\" with "A:\FONT\"
+        if normalize_sjis(&f.raw_name).starts_with(b"IFM")
+            && normalize_sjis(&f.raw_ext).starts_with(b"X")
+        {
+            f.data = replace_ascii_case_insensitive(&f.data, b"B:\\FONT\\", b"A:\\FONT\\");
+        }
     }
 
     // 4b. Inject SXMODE.X built from guest/sxmode/sxmode.s into \BIN\SXMODE.X, \X68\SXMODE.X, and root A:\SXMODE.X

@@ -117,6 +117,10 @@ pub struct X68kBus {
     pub(crate) ext_tvram: Option<Vec<u8>>,
     pub(crate) ext_tvram_row_bytes: usize,
     pub(crate) ext_tvram_plane_bytes: usize,
+    /// Cached extended planar TVRAM preserved across downscaling to standard resolutions.
+    pub(crate) saved_ext_tvram: Option<(u32, u32, usize, usize, Vec<u8>)>,
+    /// High watermark of desktop dimensions seen so far.
+    pub(crate) max_desktop_size: (u32, u32),
     /// Host OS native display resolution for fullscreen 1:1 mode.
     pub host_native_resolution: (u32, u32),
     /// Whether host native fullscreen mode is active.
@@ -177,6 +181,8 @@ impl X68kBus {
             ext_tvram: None,
             ext_tvram_row_bytes: 0,
             ext_tvram_plane_bytes: 0,
+            saved_ext_tvram: None,
+            max_desktop_size: (0, 0),
             host_native_resolution: (1920, 1080),
             fullscreen_mode: false,
         }
