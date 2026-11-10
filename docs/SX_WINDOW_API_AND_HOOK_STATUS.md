@@ -190,7 +190,7 @@ graph TD
 | **Menu Manager** | `MNM` / `MN` | `$A266`–`$A26C` | 7 | Pull-down menubars, hierarchical menus, item selection tracking. |
 | **Control Manager** | `CM` | `$A289`–`$A2A7` | 30 | UI widgets: push buttons, radio buttons, checkboxes, vertical/horizontal scrollbars. |
 | **Dialog Manager** | `DLM` / `DM` | `$A2C0`–`$A2FA` | 22 | Modal/modeless dialogs, alert boxes, file open/save dialogs. |
-| **Text Manager** | `TXM` / `TM` | `$A30A`–`$A49D` | 114 | Multi-line text editor widgets, cursor navigation, line-wrapping, selection highlighting. |
+| **Text Manager** | `TXM` / `TM` | `$A30A`–`$A49D` | 114 | Multi-line text editor widgets, cursor navigation, dynamic `destRect` line-wrapping, fixed-point text scaling (`$A488` `TMScaleSet`), selection highlighting. |
 | **Task Manager** | `TKM` / `TS` | `$A34C`–`$A4C0` | 157 | Cooperative process scheduler, IPC messages, inter-task drag-and-drop (`TSPutDrag`). |
 | **Print Manager** | `PRM` | `$A4E0`–`$A4FE` | 31 | Hardcopy printer drivers, raster spooling, page layout. |
 | **Font Manager** | `IFM` / `FM` | `$A500`–`$A516` | 23 | Outline font engine (`IFM.X`): Bezier curve evaluation, polygon triangulation, font caching, and `$A198` `GMDrawText` interception. |
@@ -1118,9 +1118,31 @@ When resolution expands live:
      - When switching between extended and standard resolutions (e.g. `1920×1080 -> 768×512 -> 1920×1080`), `X68kBus.saved_ext_tvram` preserves the highest watermark extended framebuffer.
      - When re-entering an extended mode, `saved_ext_tvram` is restored before applying active scanline copies.
      - During desktop stipple fill in Step 5, a 16-bit `keep_mask` is computed for each column intersecting any visible window in `open_window_outside_rects`, preserving window frames and client pixels in the extended desktop area.
-   - **Application Window Geometries and Ruler Margins Across Resolution Switches**:
-     - Applications running during a runtime resolution switch (e.g. via `SXMODE.X`) retain their previously configured window bounds and cached geometries. Classic SX-Window has no system-wide window reconfiguration broadcast or notification event mechanism, which is an accepted limitation of 1990s desktop operating systems.
-     - In text editor applications such as `シャーペン.X` (Sharpen), text line wrapping defaults to 96 columns (768 px = 96 × 8 pixels). This is Sharpen's own internal default ruler setting (configurable via command-line option `-M<columns>` or interactively via the in-app ruler dialog with `ESC+!`), not a hardcoded screen size constraint. `SYS/FSX.X` TextEdit remains completely unpatched.
+   - **Application Window Geometries, TextEdit Architecture & Sharpen (`シャーペン.X`) Ruler Analysis**:
+     - **Classic SX-Window Reconfiguration Limitation**: Applications executing during runtime resolution switches (e.g. via `SXMODE.X`) retain their previously configured window bounds and cached geometries. Classic SX-Window has no system-wide display reconfiguration broadcast or notification event mechanism, which is an accepted architectural limitation of 1990s desktop operating systems.
+     - **Trap `$A488` is `TMScaleSet`, NOT a Wrap Setter**: Disassembly and official Sharp SDK header analysis (`SXCALL.MAC:682` / `sxwindow_3.1_dev_kit_1995.txt`) confirm that trap `$A488` is `TMScaleSet(mTEHdl, scaleX, scaleY)` (or `TMScaleSet(tEHandle, LPoint scale)` in C). The parameters specify horizontal and vertical text scaling as 16-bit fixed-point numbers with 6 bits integer and 10 bits fractional (`scale / 1024`; `$04000400` corresponds to `1024, 1024` = `1.0x` scaling on both axes). It is strictly a font scaling API for multi-font TextEdit records (`mTEHdl`), NOT a wrap setter, and enforces no 768px or screen-width boundary. Any earlier reference to `$A488` as `TMSetWrap` was an analysis misnomer.
+     - **`SYS/FSX.X` TextEdit Dynamic Wrap Calculation**: The kernel TextEdit subsystem contains no hardcoded screen-size, 512px, 768px, or GVRAM clamping. Text wrapping is computed dynamically as `destRect.right - destRect.left`:
+       - In the plain text formatting path (`text_base + 0x0089C0..0x0089C8`), line length is evaluated directly against the destination rectangle width.
+       - In the styled/outline multi-font path (`text_base + 0x00EC58..0x00EC7C`), wrap width is scaled against the scale record located at `te + 134`.
+       - TextEdit renders directly into the active window's `GrafPort` (TVRAM / `EXT_TVRAM`); the GVRAM graphic bitmap template at `text_base + 0x552A4` is not referenced by TextEdit.
+     - **Sharpen (`シャーペン.X`) Application Ruler Architecture**:
+       - `シャーペン.X` computes `config.destwidth` (the absolute ruler width in pixels) exactly once during document and window initialization:
+         $$\text{destwidth} = \frac{\text{cols} \times \text{fullwidth\_font\_dots}}{2}$$
+         (implemented at `0x002362..0x002368` and `0x00C814`).
+       - Base font metrics are queried via `GMFontInfo` (`$A198`) at `0x0073FC` and cached in the application work area at `A5@(582)`. Built-in X68000 ROM fonts have fixed metrics in `SYS/FSX.X` `GMFontInfo` at `0x02A90C`: ID 0 = 12 dots, ID 1 = 16 dots, ID 2 = 24 dots. When `IFM.X` is installed, it hooks `$A198` for outline fonts.
+       - Crucially, `destwidth` is NOT recomputed on font or font-size changes (`0x007264` only refreshes the cached metrics at `A5@(582)`). Window bounds are assigned as:
+         $$\text{destRect.left} = \text{window.left} + 8, \quad \text{destRect.right} = \text{destRect.left} + \text{destwidth}$$
+       - `destwidth` changes ONLY through:
+         1. Command-line switch `-M<cols>` (maximum 1024 columns).
+         2. Command-line switch `-MD<dots>` (maximum 10,000 dots, validated at `0x005FE6`).
+         3. In-app interactive menu: `ESC+!` (set columns) or `ESC+#` (set dot width).
+         4. Opening an existing `.PEN` document that saved a custom ruler width at header offset 6.
+     - **User-Observed Line Wrapping at Extended Resolutions**:
+       - In Full HD (`1920×1080`), a newly opened Sharpen window wraps lines at ~490–576 px local offset from the window left margin regardless of window position or desktop size. This matches the default `-M96` setting using the 12-dot system font:
+         $$\text{destwidth} = \frac{96 \times 12}{2} = 576 \text{ px}$$
+         (or ~490–500 px with internal margins and scrollbar padding).
+       - This is purely Sharpen application-level ruler logic, not an emulator, CRTC, or operating system bug. Users wishing to utilize wide editing windows in high-resolution modes can configure the ruler via `-MD<dots>` or `ESC+#`.
+     - **Kernel Binary Invariance**: `SYS/FSX.X` TextEdit remains completely unpatched and unmodified; source-of-truth configuration of screen mode presets and `menuGrafPort` maintains pristine kernel binary integrity without blanket binary patches.
    - **Font Manager (`IFM.X`) Vector Table (`$A500..$A516`, `$A198`) & Burst Frame Pacing**:
      - `IFM.X` installs 23 A-line trap vectors (`$A500` through `$A516`) for outline font handling (font open/close, metrics, Bezier curve evaluation, polygon triangulation, and glyph caching) and hooks `$A198` (`GMDrawText`) to intercept and render outline fonts into any active `GrafPort`.
      - Outline font path rendering performs intensive floating-point and fixed-point Bezier subdivision. In `msx68k-app`, `CpuSpeedMode::Burst` executes up to `1,000,000` instructions per 1/60s frame while maintaining exact `TARGET_TICKS_60HZ` (166,667 cycles) peripheral pacing, accelerating `IFM.X` font rendering by 4×–5× without breaking V-Blank or timer IRQ accuracy.
