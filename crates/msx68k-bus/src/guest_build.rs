@@ -80,6 +80,10 @@ pub fn build_guest_x_executable(
 mod tests {
     use super::*;
 
+    /// Instruction budget for SXMODE.X to format and attempt saving its settings before exiting.
+    const MAX_STEPS: usize = 20_000;
+    const DOS_STUB: u32 = 0x0800;
+
     #[test]
     fn test_build_sxmode_x_executable() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -206,8 +210,15 @@ mod tests {
             vm.cpu_state.a[7] = 0x0002_0000;
             vm.cpu_state.pc = code_addr + exec;
 
+            // No DOS is loaded here, so make DOS calls fail through a minimal F-Line handler:
+            // ADDQ.L #2, 2(SP) / MOVEQ #-1, D0 / RTE
+            vm.bus.write_u32(0x002C, DOS_STUB, true).unwrap();
+            for (i, word) in [0x54AFu16, 0x0002, 0x70FF, 0x4E73].iter().enumerate() {
+                vm.bus.write_u16(DOS_STUB + i as u32 * 2, *word, true).unwrap();
+            }
+
             let mut steps = 0;
-            while steps < 100 {
+            while steps < MAX_STEPS {
                 let cur_pc = vm.cpu_state.pc;
                 let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
                 if opcode == 0xFF4C {
@@ -218,8 +229,8 @@ mod tests {
                 steps += 1;
             }
             assert!(
-                steps < 100,
-                "SXMODE.X should reach DOS _EXIT2 ($FF4C) within 100 steps (steps={steps})"
+                steps < MAX_STEPS,
+                "SXMODE.X should reach DOS _EXIT2 ($FF4C) within {MAX_STEPS} steps (steps={steps})"
             );
 
             let sp = vm.cpu_state.a[7];
@@ -306,6 +317,13 @@ mod tests {
                 opcode: u16,
                 pc: u32,
             ) -> msx68k_cpu::TrapResult {
+                // No DOS is loaded here, so DOS calls fail instead of reaching an empty vector.
+                if opcode >= 0xFF00 && opcode != 0xFF4C && opcode != 0xFF00 {
+                    state.d[0] = 0xFFFF_FFFF;
+                    state.set_flag(msx68k_cpu::SR_N, true);
+                    state.set_flag(msx68k_cpu::SR_Z, false);
+                    return msx68k_cpu::TrapResult::Handled { extra_cycles: 0 };
+                }
                 bus.handle_hypercall(state, opcode, pc)
             }
 
@@ -357,7 +375,7 @@ mod tests {
 
             let mut trap_handler = MockSxTrapHandler;
             let mut steps = 0;
-            while steps < 200 {
+            while steps < MAX_STEPS {
                 let cur_pc = vm.cpu_state.pc;
                 let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
                 if opcode == 0xFF4C {
@@ -367,8 +385,8 @@ mod tests {
                 steps += 1;
             }
             assert!(
-                steps < 200,
-                "GUI launch with CLI args should process args and exit within 200 steps (steps={steps})"
+                steps < MAX_STEPS,
+                "GUI launch with CLI args should process args and exit within {MAX_STEPS} steps (steps={steps})"
             );
             vm.bus.crtc.active_resolution()
         };
@@ -425,6 +443,13 @@ mod tests {
                 opcode: u16,
                 pc: u32,
             ) -> msx68k_cpu::TrapResult {
+                // No DOS is loaded here, so DOS calls fail instead of reaching an empty vector.
+                if opcode >= 0xFF00 && opcode != 0xFF4C && opcode != 0xFF00 {
+                    state.d[0] = 0xFFFF_FFFF;
+                    state.set_flag(msx68k_cpu::SR_N, true);
+                    state.set_flag(msx68k_cpu::SR_Z, false);
+                    return msx68k_cpu::TrapResult::Handled { extra_cycles: 0 };
+                }
                 bus.handle_hypercall(state, opcode, pc)
             }
 

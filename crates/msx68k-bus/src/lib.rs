@@ -45,6 +45,37 @@ mod tests {
     use msx68k_cpu::Bus;
 
     #[test]
+    fn test_user_mode_cannot_reach_io_vram_rom_or_the_supervisor_area() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        for addr in [0x00C0_0000u32, 0x00E0_0000, 0x00E8_8001, 0x00ED_0000, 0x00FF_0000, EXT_TVRAM_BASE] {
+            assert!(matches!(
+                bus.read_u8(addr, false),
+                Err(BusFault::BusError { is_write: false, .. })
+            ));
+            assert!(matches!(
+                bus.read_u16(addr & !1, false),
+                Err(BusFault::BusError { is_write: false, .. })
+            ));
+            assert!(matches!(
+                bus.write_u8(addr, 0, false),
+                Err(BusFault::BusError { is_write: true, .. })
+            ));
+            assert!(matches!(
+                bus.write_u16(addr & !1, 0, false),
+                Err(BusFault::BusError { is_write: true, .. })
+            ));
+        }
+
+        // Main RAM is protected up to the area set boundary, $2000 after reset.
+        assert!(bus.read_u16(0x1FFE, false).is_err());
+        assert!(bus.read_u16(0x2000, false).is_ok());
+        assert!(bus.read_u16(0x1FFE, true).is_ok());
+        bus.write_u8(0x00E8_6001, 1, true).unwrap();
+        assert!(bus.read_u16(0x3FFE, false).is_err());
+        assert!(bus.read_u16(0x4000, false).is_ok());
+    }
+
+    #[test]
     fn test_vm_role_defaults_and_app_speed_selection() {
         // Master VM defaults to Burst (0 delay)
         let master = X68kVm::new_master_sx();

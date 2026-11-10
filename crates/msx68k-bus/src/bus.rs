@@ -19,6 +19,10 @@ pub const GVRAM_BYTES: usize = 512 * 1024;
 /// TVRAM physical capacity (`512 KB`).
 pub const TVRAM_BYTES: usize = 512 * 1024;
 /// Extended Planar Framebuffer Base Address (`$1000_0000`) for Beyond 1K×1K modes.
+/// Main RAM protected from user mode until the guest writes the area set register.
+const RESET_SUPERVISOR_AREA: u32 = 0x2000;
+/// Everything from here up (VRAM, I/O, SRAM, and ROM) is reachable only in supervisor mode.
+const SUPERVISOR_ONLY_BASE: u32 = 0x00C0_0000;
 pub const EXT_TVRAM_BASE: u32 = 0x1000_0000;
 /// Sprite / PCG / BG window capacity (`64 KB`, `$EB0000`–`$EBFFFF`).
 pub const SPRITE_WINDOW_BYTES: usize = 64 * 1024;
@@ -75,8 +79,6 @@ pub struct X68kBus {
     pub(crate) sram_dirty: bool,
     /// Supervisor Area Set boundary (`($E86001 + 1) * 8192`).
     supervisor_area_limit: u32,
-    /// Enforce supervisor protection on Main RAM below `supervisor_area_limit` and I/O space.
-    enforce_supervisor_protection: bool,
     /// Font & IPL ROM (`1 MB`, `$F00000`–`$FFFFFF`).
     pub(crate) rom: Vec<u8>,
     /// Precomputed 4 KB page wait-state table.
@@ -169,8 +171,7 @@ impl X68kBus {
             sram,
             sram_write_enabled: false,
             sram_dirty: false,
-            supervisor_area_limit: 0,
-            enforce_supervisor_protection: false,
+            supervisor_area_limit: RESET_SUPERVISOR_AREA,
             rom: vec![0xFF; ROM_WINDOW_BYTES],
             wait_table: WaitStateTable::new(timing),
             access_flags: HardwareAccessFlags::default(),
@@ -353,8 +354,7 @@ impl X68kBus {
                 self.main_ram[0..8].copy_from_slice(ipl_vectors);
             }
         }
-        self.supervisor_area_limit = 0;
-        self.enforce_supervisor_protection = false;
+        self.supervisor_area_limit = RESET_SUPERVISOR_AREA;
         self.sram_write_enabled = false;
 
         self.crtc = Crtc::new();
@@ -577,6 +577,12 @@ impl Bus for X68kBus {
     }
 
     fn read_u8(&mut self, addr: u32, supervisor: bool) -> Result<u8, BusFault> {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+            return Err(BusFault::BusError {
+                addr: addr & 0x00FF_FFFF,
+                is_write: false,
+            });
+        }
         if addr >= EXT_TVRAM_BASE {
             let off = (addr - EXT_TVRAM_BASE) as usize;
             return Ok(self.ext_tvram.as_ref().and_then(|b| b.get(off).copied()).unwrap_or(0));
@@ -587,9 +593,7 @@ impl Bus for X68kBus {
 
         match region {
             MemoryRegion::MainRam => {
-                if self.enforce_supervisor_protection
-                    && !supervisor
-                    && a < self.supervisor_area_limit
+                if !supervisor && a < self.supervisor_area_limit
                 {
                     return Err(BusFault::BusError {
                         addr: a,
@@ -706,6 +710,12 @@ impl Bus for X68kBus {
     }
 
     fn read_u16(&mut self, addr: u32, supervisor: bool) -> Result<u16, BusFault> {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+            return Err(BusFault::BusError {
+                addr: addr & 0x00FF_FFFF,
+                is_write: false,
+            });
+        }
         if addr >= EXT_TVRAM_BASE {
             let off = (addr - EXT_TVRAM_BASE) as usize;
             if let Some(ref b) = self.ext_tvram {
@@ -718,7 +728,7 @@ impl Bus for X68kBus {
         let a = addr & 0x00FF_FFFF;
         // Fast path for Main RAM aligned 16-bit read
         if a < 0x00C0_0000 {
-            if self.enforce_supervisor_protection && !supervisor && a < self.supervisor_area_limit {
+            if !supervisor && a < self.supervisor_area_limit {
                 return Err(BusFault::BusError {
                     addr: a,
                     is_write: false,
@@ -747,6 +757,12 @@ impl Bus for X68kBus {
     }
 
     fn write_u8(&mut self, addr: u32, val: u8, supervisor: bool) -> Result<(), BusFault> {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+            return Err(BusFault::BusError {
+                addr: addr & 0x00FF_FFFF,
+                is_write: true,
+            });
+        }
         if addr >= EXT_TVRAM_BASE {
             self.access_flags.tvram_accessed = true;
             let off = (addr - EXT_TVRAM_BASE) as usize;
@@ -764,9 +780,7 @@ impl Bus for X68kBus {
 
         match region {
             MemoryRegion::MainRam => {
-                if self.enforce_supervisor_protection
-                    && !supervisor
-                    && a < self.supervisor_area_limit
+                if !supervisor && a < self.supervisor_area_limit
                 {
                     return Err(BusFault::BusError {
                         addr: a,
@@ -950,6 +964,12 @@ impl Bus for X68kBus {
     }
 
     fn write_u16(&mut self, addr: u32, val: u16, supervisor: bool) -> Result<(), BusFault> {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+            return Err(BusFault::BusError {
+                addr: addr & 0x00FF_FFFF,
+                is_write: true,
+            });
+        }
         if addr >= EXT_TVRAM_BASE {
             self.access_flags.tvram_accessed = true;
             let off = (addr - EXT_TVRAM_BASE) as usize;
@@ -963,7 +983,7 @@ impl Bus for X68kBus {
         }
         let a = addr & 0x00FF_FFFF;
         if a < 0x00C0_0000 {
-            if self.enforce_supervisor_protection && !supervisor && a < self.supervisor_area_limit {
+            if !supervisor && a < self.supervisor_area_limit {
                 return Err(BusFault::BusError {
                     addr: a,
                     is_write: true,

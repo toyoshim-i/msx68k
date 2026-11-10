@@ -472,10 +472,6 @@ apply_mode_by_index:
 save_config_file:
 	movem.l	d0-d4/a0-a1, -(sp)
 
-	* If DOS exception vector at $002C is NULL, skip DOS file I/O
-	move.l	$002C.w, d0
-	beq	save_cfg_done
-
 	* Query active resolution and fullscreen flag via IOCS _CRTMOD
 	moveq.l	#$10, d0
 	move.w	#$0150, d1

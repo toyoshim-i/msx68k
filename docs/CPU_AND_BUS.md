@@ -121,6 +121,7 @@ Each hook returns either `TrapResult::Handled { extra_cycles }` (continuing exec
 To allow isolated VMs and console processes to spawn in microseconds:
 - `X68kBus` allocates only `MainRam`, `Sram`, and `Rom` upfront; `Gvram` (512 KB), `Tvram` (512 KB), `SpriteBg` (64 KB), and `io_space` (128 KB) are initialized to `None` and allocated on first write.
 - Accesses to unmapped Main RAM (`main_ram.len()..$C00000`) or unpopulated Expansion I/O (`$EA0000`, `$EC0000`) raise hardware `BusFault::BusError` (Vector 2), allowing unmodified Human68k/IPLROM startup probes to detect installed RAM size and expansion boards accurately.
+- User mode raises `BusFault::BusError` for everything from `$C00000` up (GVRAM, TVRAM, all I/O, SRAM, and ROM) and for Main RAM below the area set boundary (`($E86001 + 1) * 8192`, `$2000` after reset).
 - `HardwareAccessFlags` tracks accessed subsystems so the hypervisor can automatically detach a console process into an isolated display VM when it touches `Gvram`, `Tvram`, `Crtc`, `PaletteVicon`, or `SpriteBg` (`requires_isolated_display_vm() == true`), while keeping resident sound drivers (`Opm`, `Adpcm`) inside the shared Master VM.
 
 ---

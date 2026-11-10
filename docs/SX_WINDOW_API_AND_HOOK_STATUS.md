@@ -345,7 +345,7 @@ text+0x151B0:  2010                 MOVE.L  (A0), D0               ; D0 = (width
 text+0x151B2:  4CDF 0004            MOVEM.L (SP)+, D2
 text+0x151B6:  4E75                 RTS
 ```
-Entry 16 in the table at `text_base + 0x151C0` is located at `text_base + 0x15200` (`0x0300 0x0200` = `768 × 512`).
+Extended mode `$50` also lands on entry 16 because only the low 5 bits are used, so msx68k answers `$A432` natively in extended modes. Entry 16 in the table at `text_base + 0x151C0` is located at `text_base + 0x15200` (`0x0300 0x0200` = `768 × 512`).
 
 #### 6. Startup Mode Switcher (`text_base + 0x13334`, called from `0x12F2A` in `TSInitTaskM`):
 During SX-Window kernel initialization, `TSInitTaskM` synchronizes the active CRT mode with SRAM settings:
@@ -909,7 +909,7 @@ To persist display resolutions across cold boots and emulator restarts:
 - **`Region` rows**: a record of size 12 is a bare rectangle. Otherwise each row is a Y value followed by X edges terminated by `32767`, and each row toggles those edges against the previous row. A Y of `32767` ends the record.
 - **Pens**: every pen resolves to one 16-word pattern per plane. Kinds `G_FORE` and `G_BACK` are solid, `G_PPAT` selects between the foreground and background color from `penPat`, and `G_EXPAT` reads four planes from `exPat`. Pattern words rotate by the bitmap's left edge and rows are indexed by the bitmap Y coordinate. Bit 2 of the operation inverts the color, swaps the two colors for `G_PPAT`, and inverts the pattern for `G_EXPAT`.
 - **Cursor**: the guest hides the software cursor around drawing. A native call whose spans come near either cursor position is left to the guest, so a repaint under the cursor still runs in 68000 code.
-- **Verification**: native and guest `GMFillRect` and `GMFillRgn` were run on identical live desktop and window ports over rectangle, region, pen kind, and operation combinations, and matched in VRAM, data registers, condition codes other than `X`, and address registers other than `A0`.
+- **Verification**: native and guest `GMFrameRect`, `GMFillRect`, and `GMFillRgn` were run on identical live desktop and window ports over rectangle, region, pen kind, and operation combinations, and matched in VRAM, data registers, condition codes other than `X`, and address registers other than `A0`.
 
 ## 6. Master Hook & Patch Tracking Table
 
@@ -933,7 +933,8 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
 | **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
 | **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Low-Level Screen Mode Switch Hypercall**: Fallback hypercall superseded by `IOCS _CRTMOD $50`. Directly invokes `apply_screen_resolution` to update CRTC, SRAM, TVRAM/EXT_TVRAM, and resident `SYS/FSX.X` kernel structures. |
-| **`$A173`**, **`$A17B`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFillRect`, `GMFillRgn` | **`[x] Hooked`** | **Native Fill**: Screens above 1024×1024 only, for all pen kinds and the eight logical pen operations. Recording and spans near the cursor stay on the guest routine. |
+| **`$A432`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | System: `SXGetDispRect` | **`[x] Hooked`** | **Actual Display Rect**: The guest indexes its fixed CRT table with the low 5 bits of the mode, so extended mode `$50` reads as 768×512. Desktop popup menus use this rect as their bounds. |
+| **`$A172`**, **`$A173`**, **`$A17B`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRect`, `GMFillRect`, `GMFillRgn` | **`[x] Hooked`** | **Native Fill**: Screens above 1024×1024 only, for all pen kinds and the eight logical pen operations. Recording and spans near the cursor stay on the guest routine. |
 | **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
 | **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
 | **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |

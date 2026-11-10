@@ -8,6 +8,8 @@ use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_Z};
 
 use crate::bus::{X68kBus, EXT_TVRAM_BASE};
 
+const SX_GET_DISP_RECT: u16 = 0xA432;
+const GM_FRAME_RECT: u16 = 0xA172;
 const GM_FILL_RECT: u16 = 0xA173;
 const GM_FILL_RGN: u16 = 0xA17B;
 
@@ -31,6 +33,7 @@ const GRAPH_VISIBLE: u32 = 16;
 const GRAPH_CLIPPING: u32 = 20;
 const GRAPH_DRAW_LEVEL: u32 = 24;
 const GRAPH_PEN_MODE: u32 = 26;
+const GRAPH_PEN_SIZE: u32 = 32;
 const GRAPH_PEN_PAT: u32 = 36;
 const GRAPH_EX_PAT: u32 = 40;
 const GRAPH_WORK_KIND: u32 = 44;
@@ -77,6 +80,15 @@ impl Rect {
     }
 }
 
+/// The area a fill covers beyond the clipping regions.
+#[derive(Debug, Copy, Clone)]
+enum FillShape {
+    Rect,
+    Region(u32),
+    /// A rectangle with this hole left undrawn.
+    Frame { hole: Rect },
+}
+
 /// Row-by-row reader of a `Region`, whose rows toggle the set of covered X intervals.
 struct RegionCursor {
     bounds: Rect,
@@ -119,10 +131,19 @@ impl X68kBus {
         let Some(text_base) = self.native_gm_text_base else {
             return TrapResult::PassToVector;
         };
+        // The guest answers this from a fixed table indexed by CRT mode, which knows nothing of
+        // extended resolutions, so it is needed for correctness rather than as a migration step.
+        if opcode == SX_GET_DISP_RECT {
+            return match self.sx_get_disp_rect(state) {
+                Some(()) => TrapResult::Handled { extra_cycles: 0 },
+                None => TrapResult::PassToVector,
+            };
+        }
         if !self.native_gm_enabled || !self.is_ext_tvram_active() {
             return TrapResult::PassToVector;
         }
         let handled = match opcode {
+            GM_FRAME_RECT => self.gm_frame_rect(state, text_base),
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
             _ => None,
@@ -136,10 +157,45 @@ impl X68kBus {
         }
     }
 
+    fn sx_get_disp_rect(&mut self, state: &mut CpuState) -> Option<()> {
+        if !self.is_extended_crtmod_active() {
+            return None;
+        }
+        let rect_ptr = self.peek_u32(state.a[7])?;
+        let (width, height) = self.crtc.active_resolution();
+        let bytes = [0u16, 0, width as u16, height as u16];
+        for (i, byte) in bytes.iter().flat_map(|word| word.to_be_bytes()).enumerate() {
+            if !self.poke_u8(rect_ptr.wrapping_add(i as u32), byte) {
+                return None;
+            }
+        }
+        return_result(state, 0);
+        Some(())
+    }
+
+    fn gm_frame_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let rect_ptr = self.peek_u32(state.a[7])?;
+        let rect = self.peek_rect(rect_ptr)?;
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let width = self.peek_u16(graph + GRAPH_PEN_SIZE)? as i16;
+        let height = self.peek_u16(graph + GRAPH_PEN_SIZE + 2)? as i16;
+        if width <= 0 || height <= 0 {
+            return_result(state, 0);
+            return Some(());
+        }
+        let hole = Rect {
+            left: rect.left.saturating_add(width),
+            top: rect.top.saturating_add(height),
+            right: rect.right.saturating_sub(width),
+            bottom: rect.bottom.saturating_sub(height),
+        };
+        self.fill_area(state, text_base, rect, FillShape::Frame { hole })
+    }
+
     fn gm_fill_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
         let rect_ptr = self.peek_u32(state.a[7])?;
         let rect = self.peek_rect(rect_ptr)?;
-        self.fill_area(state, text_base, rect, None)
+        self.fill_area(state, text_base, rect, FillShape::Rect)
     }
 
     fn gm_fill_rgn(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
@@ -149,16 +205,16 @@ impl X68kBus {
         }
         let region = self.peek_u32(handle)?;
         let bounds = self.peek_region_bounds(region)?;
-        self.fill_area(state, text_base, bounds, Some(region))
+        self.fill_area(state, text_base, bounds, FillShape::Region(region))
     }
 
-    /// Fills `rect` on the screen, also limited to `shape` when it is given.
+    /// Fills `rect` on the screen, limited to `shape`.
     fn fill_area(
         &mut self,
         state: &mut CpuState,
         text_base: u32,
         rect: Rect,
-        shape: Option<u32>,
+        shape: FillShape,
     ) -> Option<()> {
         let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
 
@@ -197,8 +253,8 @@ impl X68kBus {
             self.region_cursor(visible, area.top)?,
             self.region_cursor(clipping, area.top)?,
         ];
-        if let Some(shape) = shape {
-            cursors.push(self.region_cursor(shape, area.top)?);
+        if let FillShape::Region(region) = shape {
+            cursors.push(self.region_cursor(region, area.top)?);
         }
 
         let mut spans = Vec::new();
@@ -207,7 +263,19 @@ impl X68kBus {
                 self.advance_region(cursor, y)?;
             }
             for (left, right) in clipped_spans(area, &cursors) {
-                spans.push((y, left, right));
+                match shape {
+                    FillShape::Frame { hole }
+                        if !hole.is_empty() && y >= hole.top && y < hole.bottom =>
+                    {
+                        if left < hole.left {
+                            spans.push((y, left, right.min(hole.left)));
+                        }
+                        if right > hole.right {
+                            spans.push((y, left.max(hole.right), right));
+                        }
+                    }
+                    _ => spans.push((y, left, right)),
+                }
             }
         }
 
@@ -618,6 +686,40 @@ mod tests {
         for x in 0..8 {
             assert_eq!(pixel(&bus, x, 1), if (4..6).contains(&x) { 5 } else { 0 }, "x={x}");
         }
+    }
+
+    #[test]
+    fn frames_a_rectangle_with_the_pen_size() {
+        let (mut bus, mut state) = test_bus([1, 1, 7, 6]);
+        write_u16(&mut bus, GRAPH + GRAPH_PEN_SIZE, 2);
+        write_u16(&mut bus, GRAPH + GRAPH_PEN_SIZE + 2, 1);
+        bus.handle_native_gm(&mut state, GM_FRAME_RECT);
+        for y in 0..7 {
+            for x in 0..9 {
+                let outer = (1..7).contains(&x) && (1..6).contains(&y);
+                let hole = (3..5).contains(&x) && (2..5).contains(&y);
+                assert_eq!(pixel(&bus, x, y), if outer && !hole { 5 } else { 0 }, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn reports_the_actual_display_size_in_extended_modes() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.target_resolution = Some((1920, 1080));
+        bus.crtc.regs[3] = 1920 / 8;
+        write_u32(&mut bus, STACK, RECT_ARG);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, SX_GET_DISP_RECT),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        let (width, height) = bus.crtc.active_resolution();
+        assert_eq!(bus.peek_rect(RECT_ARG), Some(Rect {
+            left: 0,
+            top: 0,
+            right: width as i16,
+            bottom: height as i16,
+        }));
     }
 
     #[test]
