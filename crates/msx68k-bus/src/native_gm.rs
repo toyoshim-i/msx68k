@@ -16,6 +16,9 @@ const GM_INVERT_RECT: u16 = 0xA1A3;
 const GM_MARCHING_RECT: u16 = 0xA1A4;
 const GM_FILL_RGN: u16 = 0xA17B;
 const GM_COPY: u16 = 0xA17F;
+const GM_PUT_RIMG: u16 = 0xA183;
+const GM_DUP_HRIMG: u16 = 0xA188;
+const GM_DUP_VRIMG: u16 = 0xA189;
 
 /// `text_base` offset of the pointer to the current `Graph` record.
 const CURRENT_GRAPH: u32 = 0x5523A;
@@ -152,6 +155,19 @@ impl PlanarBitmap {
     fn row_addr(&self, plane: usize, row: u32) -> u32 {
         self.base + plane as u32 * self.page + row * self.line
     }
+}
+
+/// A `GMCopy` style transfer between two planar bitmaps.
+struct Transfer {
+    source: PlanarBitmap,
+    dest: PlanarBitmap,
+    /// The destination `Bitmap` record, compared with the current graph's to decide clipping.
+    dest_ptr: u32,
+    source_rect: Rect,
+    dest_rect: Rect,
+    mode: u16,
+    mask_handle: u32,
+    planes: u16,
 }
 
 /// Reads the eight bits of packed `bits` starting at `bit_offset`.
@@ -302,6 +318,9 @@ impl X68kBus {
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
             GM_COPY => self.gm_copy(state, text_base),
+            GM_PUT_RIMG => self.gm_put_rimg(state, text_base),
+            GM_DUP_HRIMG => self.gm_dup_hrimg(state, text_base),
+            GM_DUP_VRIMG => self.gm_dup_vrimg(state, text_base),
             GM_INVERT_RECT => self.gm_invert_rect(state, text_base),
             GM_MARCHING_RECT => self.gm_marching_rect(state, text_base),
             _ => None,
@@ -340,6 +359,199 @@ impl X68kBus {
         let mode = self.peek_u16(args + 16)?;
         let mask_handle = self.peek_u32(args + 18)?;
 
+        let (source, source_pages) = self.peek_planar_target(source_ptr)?;
+        let (dest, dest_pages) = self.peek_planar_target(dest_ptr)?;
+        if source_pages != dest_pages {
+            return None;
+        }
+        let transfer = Transfer {
+            source,
+            dest,
+            dest_ptr,
+            source_rect,
+            dest_rect,
+            mode,
+            mask_handle,
+            planes: dest_pages,
+        };
+        self.copy_bits(state, text_base, transfer)
+    }
+
+    /// Draws a `RectImg` with its top left at `pt` through the copy path, as the guest does with
+    /// a temporary `Bitmap` over the image data.
+    fn gm_put_rimg(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let image = self.peek_u32(state.a[7])?;
+        let x = self.peek_u16(state.a[7] + 4)? as i16;
+        let y = self.peek_u16(state.a[7] + 6)? as i16;
+        self.put_rimg(state, text_base, image, x, y)
+    }
+
+    /// `GMDupHRImg`: repeats each row of an image at most 16 dots wide across `width` dots.
+    ///
+    /// Like the guest, every row becomes a 16-dot extended pattern word whose period is the image
+    /// width, phased by the bitmap's left edge, and is written to planes 0 and 1.
+    fn gm_dup_hrimg(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let image = self.peek_u32(state.a[7])?;
+        let x = self.peek_u16(state.a[7] + 4)? as i16;
+        let y = self.peek_u16(state.a[7] + 6)? as i16;
+        let length = self.peek_u16(state.a[7] + 8)? as i16;
+        let bounds = self.peek_rect(image)?;
+        let width = bounds.right.wrapping_sub(bounds.left);
+        let height = bounds.bottom.wrapping_sub(bounds.top);
+        if !(1..=16).contains(&width) || height <= 0 {
+            return None;
+        }
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let bitmap_rect = self.peek_rect(self.peek_u32(graph + GRAPH_BITMAP)? + BITMAP_RECT)?;
+        let phase = (bitmap_rect.left as u16 as u32) % width as u32;
+        let mask = !(0xFFFFu16 >> width);
+        let data = image + 8;
+        let plane_stride = height as u32 * 2;
+        for row in 0..height {
+            let mut rows = [[0u16; PATTERN_ROWS]; 4];
+            for (plane, plane_rows) in rows.iter_mut().enumerate() {
+                let word = self.peek_u16(data + plane as u32 * plane_stride + row as u32 * 2)?;
+                let mut bits = ((word & mask) as u32) << 16;
+                let mut filled = bits;
+                let mut span = width as u32;
+                while span < 15 + width as u32 {
+                    bits >>= span;
+                    filled |= bits;
+                    bits = filled;
+                    span *= 2;
+                }
+                *plane_rows = [((bits << phase) >> 16) as u16; PATTERN_ROWS];
+            }
+            let pen = PlanePen { rows, op: 0 };
+            let rect = Rect {
+                left: x,
+                top: y.wrapping_add(row),
+                right: x.wrapping_add(length),
+                bottom: y.wrapping_add(row + 1),
+            };
+            self.fill_with(state, text_base, rect, FillShape::Rect, Some((pen, 0b0011)))?;
+        }
+        return_result(state, 0);
+        Some(())
+    }
+
+    /// `GMDupVRImg`: repeats an image at most 16 dots tall down `height` dots.
+    ///
+    /// The guest reads the image as four planes and picks the source row from the destination
+    /// row's unsigned 16-bit coordinate modulo the image height, not from `pt`.
+    fn gm_dup_vrimg(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let image = self.peek_u32(state.a[7])?;
+        let x = self.peek_u16(state.a[7] + 4)? as i16;
+        let y = self.peek_u16(state.a[7] + 6)? as i16;
+        let length = self.peek_u16(state.a[7] + 8)? as i16;
+        let bounds = self.peek_rect(image)?;
+        let width = bounds.right.wrapping_sub(bounds.left);
+        let height = bounds.bottom.wrapping_sub(bounds.top);
+        if !(1..=16).contains(&height) || width <= 0 || length < 0 {
+            return None;
+        }
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let dest_ptr = self.peek_u32(graph + GRAPH_BITMAP)?;
+        let (dest, planes) = self.peek_planar_target(dest_ptr)?;
+        let line = ((width as u32 + 15) >> 4) * 2;
+        let source = PlanarBitmap {
+            rect: Rect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            base: image + 8,
+            line,
+            page: line * height as u32,
+        };
+        if source.base as usize >= self.main_ram.len() {
+            return None;
+        }
+        for dest_y in y..y.wrapping_add(length) {
+            let row = ((dest_y as u16 as u32) % height as u32) as i16;
+            let transfer = Transfer {
+                source,
+                dest,
+                dest_ptr,
+                source_rect: Rect {
+                    left: 0,
+                    top: row,
+                    right: width,
+                    bottom: row + 1,
+                },
+                dest_rect: Rect {
+                    left: x,
+                    top: dest_y,
+                    right: x.wrapping_add(width),
+                    bottom: dest_y + 1,
+                },
+                mode: 0,
+                mask_handle: 0,
+                planes,
+            };
+            self.copy_bits(state, text_base, transfer)?;
+        }
+        return_result(state, 0);
+        Some(())
+    }
+
+    /// Copies the image at `image` with its top left at `(x, y)`.
+    fn put_rimg(&mut self, state: &mut CpuState, text_base: u32, image: u32, x: i16, y: i16) -> Option<()> {
+        let bounds = self.peek_rect(image)?;
+        let width = bounds.right.wrapping_sub(bounds.left);
+        let height = bounds.bottom.wrapping_sub(bounds.top);
+
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let dest_ptr = self.peek_u32(graph + GRAPH_BITMAP)?;
+        let (dest, planes) = self.peek_planar_target(dest_ptr)?;
+        let image_rect = Rect {
+            left: 0,
+            top: 0,
+            right: width.max(0),
+            bottom: height.max(0),
+        };
+        let line = ((image_rect.right as u32 + 15) >> 4) * 2;
+        let source = PlanarBitmap {
+            rect: image_rect,
+            base: image + 8,
+            line,
+            page: line * image_rect.bottom as u32,
+        };
+        if source.base as usize >= self.main_ram.len() {
+            return None;
+        }
+        let drawn = image_rect;
+        let transfer = Transfer {
+            source,
+            dest,
+            dest_ptr,
+            source_rect: drawn,
+            dest_rect: Rect {
+                left: x,
+                top: y,
+                right: x.wrapping_add(drawn.right),
+                bottom: y.wrapping_add(drawn.bottom),
+            },
+            mode: 0,
+            mask_handle: 0,
+            planes,
+        };
+        self.copy_bits(state, text_base, transfer)
+    }
+
+    /// Copies between planar bitmaps the way `GMCopy` does.
+    fn copy_bits(&mut self, state: &mut CpuState, text_base: u32, transfer: Transfer) -> Option<()> {
+        let Transfer {
+            source,
+            dest,
+            dest_ptr,
+            source_rect,
+            dest_rect,
+            mode,
+            mask_handle,
+            planes: active_pages,
+        } = transfer;
         if mode >= 8 {
             return None;
         }
@@ -348,8 +560,6 @@ impl X68kBus {
         if !same_size {
             return None;
         }
-        let source = self.peek_planar_bitmap(source_ptr)?;
-        let dest = self.peek_planar_bitmap(dest_ptr)?;
         if !source.is_screen() && !dest.is_screen() {
             return None;
         }
@@ -437,6 +647,9 @@ impl X68kBus {
             let shift = pixel & 7;
             let mut planes = [vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes]];
             for (plane, packed) in planes.iter_mut().enumerate() {
+                if active_pages & (1 << plane) == 0 {
+                    continue;
+                }
                 let start = source.row_addr(plane, row) + (pixel >> 3);
                 let mut current = self.peek_u8(start)?;
                 for (i, out) in packed.iter_mut().enumerate() {
@@ -461,6 +674,9 @@ impl X68kBus {
             let first_mask = 0xFFu8 >> (first_pixel & 7);
             let last_mask = 0xFFu8 << (7 - (last_pixel & 7));
             for (plane, packed) in planes.iter().enumerate() {
+                if active_pages & (1 << plane) == 0 {
+                    continue;
+                }
                 let line = dest.row_addr(plane, row);
                 for byte in (first_pixel >> 3)..=(last_pixel >> 3) {
                     let mut mask = 0xFFu8;
@@ -493,24 +709,6 @@ impl X68kBus {
         if let Some(slot) = slice.get_mut(offset) {
             *slot = value;
         }
-    }
-
-    /// Reads a `Bitmap` that is planar with all four planes active and stored in Main RAM or
-    /// the screen, returning `None` for anything else.
-    fn peek_planar_bitmap(&self, addr: u32) -> Option<PlanarBitmap> {
-        if self.peek_u16(addr + BITMAP_TYPE)? != 0
-            || self.peek_u16(addr + BITMAP_ACTIVE_PAGES)? != 0xF
-        {
-            return None;
-        }
-        let bitmap = PlanarBitmap {
-            rect: self.peek_rect(addr + BITMAP_RECT)?,
-            base: self.peek_u32(addr + BITMAP_BASE)?,
-            line: self.peek_u16(addr + BITMAP_LINE)? as u32,
-            page: self.peek_u32(addr + BITMAP_PAGE)?,
-        };
-        let reachable = bitmap.is_screen() || (bitmap.base as usize) < self.main_ram.len();
-        reachable.then_some(bitmap)
     }
 
     fn gm_invert_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
@@ -684,13 +882,26 @@ impl X68kBus {
         self.fill_area(state, text_base, bounds, FillShape::Region(region))
     }
 
-    /// Fills `rect` on the screen, limited to `shape`.
+    /// Fills `rect` on the screen, limited to `shape`, with the current pen.
     fn fill_area(
         &mut self,
         state: &mut CpuState,
         text_base: u32,
         rect: Rect,
         shape: FillShape,
+    ) -> Option<()> {
+        self.fill_with(state, text_base, rect, shape, None)
+    }
+
+    /// Fills like [`Self::fill_area`], optionally with a given pen and set of planes instead of
+    /// the current pen and the bitmap's active planes.
+    fn fill_with(
+        &mut self,
+        state: &mut CpuState,
+        text_base: u32,
+        rect: Rect,
+        shape: FillShape,
+        pen_override: Option<(PlanePen, u16)>,
     ) -> Option<()> {
         let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
 
@@ -709,9 +920,14 @@ impl X68kBus {
         if !is_screen {
             return None;
         }
-        let active_pages = self.peek_u16(bitmap + BITMAP_ACTIVE_PAGES)?;
         let bitmap_rect = self.peek_rect(bitmap + BITMAP_RECT)?;
-        let pen = self.resolve_pen(graph, bitmap_rect)?;
+        let (pen, active_pages) = match pen_override {
+            Some(pen) => pen,
+            None => (
+                self.resolve_pen(graph, bitmap_rect)?,
+                self.peek_u16(bitmap + BITMAP_ACTIVE_PAGES)?,
+            ),
+        };
 
         let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
         let clipping = self.peek_region(graph + GRAPH_CLIPPING)?;
