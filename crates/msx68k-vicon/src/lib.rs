@@ -423,6 +423,16 @@ impl ViconGpuCompositor {
         }
     }
 
+    /// Draws the host mouse cursor over the uploaded TVRAM copy.
+    fn upload_cursor_overlay(&self, bus: &X68kBus, tvram_len: usize) {
+        for (offset, bytes) in bus.cursor_overlay() {
+            if offset + bytes.len() <= tvram_len {
+                self.queue
+                    .write_buffer(&self.tvram_buf, offset as u64, &bytes);
+            }
+        }
+    }
+
     fn upload_bus_buffers(&mut self, bus: &X68kBus) -> ViconUniforms {
         let uniforms = ViconUniforms::from_bus(bus);
         self.queue
@@ -431,6 +441,7 @@ impl ViconGpuCompositor {
         if let Some(tvram) = bus.active_tvram() {
             let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
             self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
+            self.upload_cursor_overlay(bus, len);
         }
 
         if let Some(gvram) = bus.gvram() {
@@ -536,6 +547,7 @@ impl ViconGpuCompositor {
         if let Some(tvram) = bus.active_tvram() {
             let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
             self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
+            self.upload_cursor_overlay(bus, len);
         } else {
             let zero = vec![0u8; TVRAM_BYTES];
             self.queue.write_buffer(&self.tvram_buf, 0, &zero);
@@ -604,6 +616,17 @@ impl ViconGpuCompositor {
 }
 
 /// CPU reference compositor producing the exact same `RGBA8` framebuffer as [`ViconGpuCompositor`].
+/// Returns a copy of `tvram` with the host mouse cursor drawn over it.
+fn with_cursor_overlay(bus: &X68kBus, tvram: &[u8]) -> Vec<u8> {
+    let mut screen = tvram.to_vec();
+    for (offset, bytes) in bus.cursor_overlay() {
+        if let Some(slot) = screen.get_mut(offset..offset + bytes.len()) {
+            slot.copy_from_slice(&bytes);
+        }
+    }
+    screen
+}
+
 pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let params = ViconUniforms::from_bus(bus);
     let width = params.width;
@@ -617,7 +640,8 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let gr_rank = (params.r1_priority >> 10) & 3;
     let text_above_gr = tx_rank <= gr_rank;
 
-    let tvram = bus.active_tvram();
+    let tvram = bus.active_tvram().map(|tv| with_cursor_overlay(bus, tv));
+    let tvram = tvram.as_deref();
     let row_bytes = params.tvram_row_bytes as usize;
     let plane_bytes = params.tvram_plane_bytes as usize;
     let gvram = bus.gvram();

@@ -25,6 +25,22 @@ const CURSOR_POS: u32 = 0x549F6;
 const CURSOR_DRAWN_POS: u32 = 0x5CA44 + 0x1E;
 /// Margin around the cursor position within which drawing is left to the 68000 cursor shielding.
 const CURSOR_MARGIN: i16 = 64;
+/// `text_base` offsets of the routines that draw and erase the software cursor in VRAM.
+const CURSOR_DRAW: u32 = 0x521BA;
+const CURSOR_ERASE: u32 = 0x521DC;
+/// Opening instructions shared by both cursor routines, used to confirm the kernel build.
+const CURSOR_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x00, 0x0C, 0x28, 0x68, 0x00, 0x00];
+/// `text_base` offset of the pointer to the `Mouse` record.
+const MOUSE_RECORD: u32 = 0x633CA;
+
+// `Mouse` and `MsCsr` record offsets (`SXDEF2.H`).
+const MOUSE_POSITION: u32 = 16;
+const MOUSE_CURSOR: u32 = 40;
+const MOUSE_PLANES: u32 = 44;
+const MOUSE_CURSOR_SHOWN: u32 = 50;
+const CURSOR_MASK: u32 = 4;
+const CURSOR_PATTERN: u32 = 36;
+const CURSOR_SIZE: i32 = 16;
 
 // `Graph` record offsets (`SXGRAPH.H`).
 const GRAPH_BITMAP: u32 = 0;
@@ -154,9 +170,111 @@ impl X68kBus {
     /// Enables native Graph Manager APIs if `text_base` holds the expected kernel.
     pub(crate) fn enable_native_gm(&mut self, text_base: u32) {
         let proc = self.peek_u32(text_base.wrapping_add(DRIVER_TABLE + 8));
-        if proc == Some(text_base.wrapping_add(RECT_PROC)) {
-            self.native_gm_text_base = Some(text_base);
+        if proc != Some(text_base.wrapping_add(RECT_PROC)) {
+            return;
         }
+        self.native_gm_text_base = Some(text_base);
+
+        // The host draws the cursor over the screen, so the guest must stop drawing it into
+        // VRAM. Its routines keep all bookkeeping outside these two entry points.
+        let routines = [CURSOR_DRAW, CURSOR_ERASE].map(|offset| (text_base + offset) as usize);
+        let matches = routines.iter().all(|&addr| {
+            self.main_ram.get(addr..addr + CURSOR_PROLOGUE.len()) == Some(&CURSOR_PROLOGUE[..])
+        });
+        if matches {
+            for addr in routines {
+                self.main_ram[addr..addr + 2].copy_from_slice(&[0x4E, 0x75]); // RTS
+            }
+            self.host_cursor = true;
+        }
+    }
+
+    /// Returns the screen bytes the cursor changes, as `(offset, bytes)` pairs aligned to four
+    /// bytes within [`X68kBus::active_tvram`], for the presenter to apply over its copy.
+    pub fn cursor_overlay(&self) -> Vec<(usize, [u8; 4])> {
+        self.cursor_overlay_words().unwrap_or_default()
+    }
+
+    fn cursor_overlay_words(&self) -> Option<Vec<(usize, [u8; 4])>> {
+        let text_base = self.native_gm_text_base.filter(|_| self.host_cursor)?;
+        let mouse = self.peek_u32(text_base + MOUSE_RECORD)?;
+        if self.peek_u8(mouse + MOUSE_CURSOR_SHOWN)? == 0 {
+            return Some(Vec::new());
+        }
+        let bitmap = self.peek_u32(mouse)?;
+        let screen_base = if self.is_ext_tvram_active() {
+            EXT_TVRAM_BASE
+        } else {
+            0x00E0_0000
+        };
+        if self.peek_u16(bitmap + BITMAP_TYPE)? != 0
+            || self.peek_u32(bitmap + BITMAP_BASE)? != screen_base
+        {
+            return Some(Vec::new());
+        }
+        let rect = self.peek_rect(bitmap + BITMAP_RECT)?;
+        let line = self.peek_u16(bitmap + BITMAP_LINE)? as usize;
+        let page = self.peek_u32(bitmap + BITMAP_PAGE)? as usize;
+        let planes = self.peek_u16(mouse + MOUSE_PLANES)?;
+        let cursor = self.peek_u32(self.peek_u32(mouse + MOUSE_CURSOR)?)?;
+        let x = self.peek_u16(mouse + MOUSE_POSITION)? as i16 as i32
+            - self.peek_u16(cursor)? as i16 as i32
+            - rect.left as i32;
+        let y = self.peek_u16(mouse + MOUSE_POSITION + 2)? as i16 as i32
+            - self.peek_u16(cursor + 2)? as i16 as i32
+            - rect.top as i32;
+        let width = (rect.right - rect.left) as i32;
+        let height = (rect.bottom - rect.top) as i32;
+        let screen = if self.is_ext_tvram_active() {
+            self.ext_tvram.as_deref()?
+        } else {
+            self.tvram.as_deref()?
+        };
+
+        // Same blend as the guest routine: (screen AND NOT mask) XOR pattern, per plane.
+        let mut words: Vec<(usize, [u8; 4])> = Vec::new();
+        for row in 0..CURSOR_SIZE {
+            let vy = y + row;
+            if vy < 0 || vy >= height {
+                continue;
+            }
+            let mask = self.peek_u16(cursor + CURSOR_MASK + row as u32 * 2)?;
+            for plane in 0..4 {
+                if planes & (1 << plane) == 0 {
+                    continue;
+                }
+                let pattern_addr = cursor + CURSOR_PATTERN + (plane * 32 + row * 2) as u32;
+                let pattern = self.peek_u16(pattern_addr)?;
+                let line_start = plane as usize * page + vy as usize * line;
+                for column in 0..CURSOR_SIZE {
+                    let vx = x + column;
+                    if vx < 0 || vx >= width {
+                        continue;
+                    }
+                    let bit = 15 - column;
+                    let (m, p) = ((mask >> bit) & 1, (pattern >> bit) & 1);
+                    if m == 0 && p == 0 {
+                        continue;
+                    }
+                    let offset = line_start + (vx as usize >> 3);
+                    let aligned = offset & !3;
+                    let index = match words.iter().position(|(start, _)| *start == aligned) {
+                        Some(index) => index,
+                        None => {
+                            let mut bytes = [0u8; 4];
+                            bytes.copy_from_slice(screen.get(aligned..aligned + 4)?);
+                            words.push((aligned, bytes));
+                            words.len() - 1
+                        }
+                    };
+                    let byte = &mut words[index].1[offset - aligned];
+                    let shift = 7 - (vx as usize & 7);
+                    let value = (((*byte >> shift) & 1) as u16 & !m) ^ p;
+                    *byte = (*byte & !(1 << shift)) | ((value as u8 & 1) << shift);
+                }
+            }
+        }
+        Some(words)
     }
 
     /// Runs the native implementation of an A-Line API when one applies.
@@ -285,7 +403,7 @@ impl X68kBus {
             }
         }
 
-        let touches = |zones: &[Rect; 2], y: i32, left: i32, right: i32| {
+        let touches = |zones: &[Rect], y: i32, left: i32, right: i32| {
             zones.iter().any(|zone| {
                 y >= zone.top as i32
                     && y < zone.bottom as i32
@@ -576,8 +694,12 @@ impl X68kBus {
         })
     }
 
-    /// Returns the areas, in `bitmap_rect` coordinates, that need the guest's cursor shielding.
-    fn cursor_zones(&self, text_base: u32, bitmap_rect: Rect) -> Option<[Rect; 2]> {
+    /// Returns the areas, in `bitmap_rect` coordinates, that need the guest's cursor shielding,
+    /// which is none once the host draws the cursor.
+    fn cursor_zones(&self, text_base: u32, bitmap_rect: Rect) -> Option<Vec<Rect>> {
+        if self.host_cursor {
+            return Some(Vec::new());
+        }
         let zone = |offset: u32| -> Option<Rect> {
             let x = (self.peek_u16(text_base.wrapping_add(offset))? as i16)
                 .saturating_add(bitmap_rect.left);
@@ -590,7 +712,7 @@ impl X68kBus {
                 bottom: y.saturating_add(CURSOR_MARGIN),
             })
         };
-        Some([zone(CURSOR_POS)?, zone(CURSOR_DRAWN_POS)?])
+        Some(vec![zone(CURSOR_POS)?, zone(CURSOR_DRAWN_POS)?])
     }
 
     /// Fills one span, with `pattern_y` selecting the pen row in the bitmap's own coordinates.

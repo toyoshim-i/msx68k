@@ -121,6 +121,8 @@ pub struct X68kBus {
     pub(crate) ext_tvram: Option<Vec<u8>>,
     /// `SYS/FSX.X` load address once its Graph Manager APIs may be replaced natively.
     pub(crate) native_gm_text_base: Option<u32>,
+    /// Whether the host draws the mouse cursor in place of `SYS/FSX.X`.
+    pub(crate) host_cursor: bool,
     /// Resolution waiting for a safe point in the guest scheduler.
     pub(crate) pending_resolution: Option<(u32, u32)>,
     /// Allows native Graph Manager APIs; clear to run everything through the guest routines.
@@ -192,6 +194,7 @@ impl X68kBus {
             target_resolution: None,
             ext_tvram: None,
             native_gm_text_base: None,
+            host_cursor: false,
             pending_resolution: None,
             native_gm_enabled: true,
             native_gm_calls: 0,
@@ -368,6 +371,7 @@ impl X68kBus {
         self.ext_tvram = None;
         self.native_gm_text_base = None;
         self.pending_resolution = None;
+        self.host_cursor = false;
         self.ext_tvram_row_bytes = 0;
         self.ext_tvram_plane_bytes = 0;
         self.saved_ext_tvram = None;
