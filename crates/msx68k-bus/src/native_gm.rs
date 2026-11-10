@@ -539,7 +539,7 @@ impl X68kBus {
         let rect_ptr = self.peek_u32(state.a[7])?;
         let style_ptr = self.peek_u32(state.a[7] + 4)?;
         let style = self.peek_u16(style_ptr)?;
-        if !(style_ptr as usize + 2 <= self.main_ram.len()) {
+        if style_ptr as usize + 2 > self.main_ram.len() {
             return None;
         }
         self.dashed_frame(text_base, rect_ptr, style, true)?;
@@ -1241,7 +1241,7 @@ mod tests {
     #[test]
     fn inverts_a_dashed_outline_without_touching_the_inside() {
         let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
-        write_rect(&mut bus, RECT_ARG, [0, 0, 4, 3]);
+        write_rect(&mut bus, RECT_ARG, [2, 2, 6, 5]);
         write_u32(&mut bus, STACK, RECT_ARG);
         write_u16(&mut bus, STACK + 4, 0xFFFF);
         bus.host_cursor = true;
@@ -1249,10 +1249,14 @@ mod tests {
             bus.handle_native_gm(&mut state, GM_INVERT_RECT),
             TrapResult::Handled { extra_cycles: 0 }
         );
-        for y in 0..3 {
-            for x in 0..4 {
-                let edge = y == 0 || y == 2 || x == 0 || x == 3;
-                assert_eq!(pixel(&bus, x, y), if edge { 0xF } else { 0 }, "({x},{y})");
+        // Like the guest, the sides also cover the top and bottom rows, so the corners are
+        // inverted twice and come back unchanged.
+        for y in 1..6 {
+            for x in 1..7 {
+                let horizontal = (y == 2 || y == 4) && (2..6).contains(&x);
+                let vertical = (x == 2 || x == 5) && (2..5).contains(&y);
+                let expected = if horizontal ^ vertical { 0xF } else { 0 };
+                assert_eq!(pixel(&bus, x as usize, y as usize), expected, "({x},{y})");
             }
         }
     }
