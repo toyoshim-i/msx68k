@@ -9,6 +9,7 @@ use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_Z};
 use crate::bus::{X68kBus, EXT_TVRAM_BASE};
 
 const GM_FILL_RECT: u16 = 0xA173;
+const GM_FILL_RGN: u16 = 0xA17B;
 
 /// `text_base` offset of the pointer to the current `Graph` record.
 const CURRENT_GRAPH: u32 = 0x5523A;
@@ -30,6 +31,8 @@ const GRAPH_VISIBLE: u32 = 16;
 const GRAPH_CLIPPING: u32 = 20;
 const GRAPH_DRAW_LEVEL: u32 = 24;
 const GRAPH_PEN_MODE: u32 = 26;
+const GRAPH_PEN_PAT: u32 = 36;
+const GRAPH_EX_PAT: u32 = 40;
 const GRAPH_WORK_KIND: u32 = 44;
 const GRAPH_FG_COLOR: u32 = 50;
 const GRAPH_BG_COLOR: u32 = 52;
@@ -46,6 +49,9 @@ const BITMAP_ACTIVE_PAGES: u32 = 20;
 const REGION_RECT_SIZE: u32 = 12;
 const REGION_DATA: u32 = 12;
 const REGION_END: i16 = 32767;
+
+/// Height and width of pen patterns, which are stored as one 16-bit word per row.
+const PATTERN_ROWS: usize = 16;
 
 /// Half-open rectangle in the coordinates of its source record.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -79,22 +85,21 @@ struct RegionCursor {
     next_row: u32,
 }
 
-/// Pen operations of the low three bits of the pen mode.
-#[derive(Debug, Copy, Clone)]
-struct SolidPen {
-    color: u16,
+/// A pen resolved to source bits for each plane and pattern row, in bitmap pixel alignment.
+#[derive(Debug, Clone)]
+struct PlanePen {
+    rows: [[u16; PATTERN_ROWS]; 4],
     op: u8,
 }
 
-impl SolidPen {
-    /// Returns `(clear, set, invert)` bit masks for one plane.
-    fn plane_action(self, plane: usize) -> (bool, bool, bool) {
-        let bit = (self.color >> plane) & 1 != 0;
+impl PlanePen {
+    /// Combines `source` into `dest` within the bits of `mask`.
+    fn apply(&self, dest: u8, source: u8, mask: u8) -> u8 {
         match self.op & 3 {
-            0 => (!bit, bit, false),
-            1 => (!bit, false, false),
-            2 => (false, bit, false),
-            _ => (false, false, bit),
+            0 => (dest & !mask) | (source & mask),
+            1 => dest & (source | !mask),
+            2 => dest | (source & mask),
+            _ => dest ^ (source & mask),
         }
     }
 }
@@ -119,6 +124,7 @@ impl X68kBus {
         }
         let handled = match opcode {
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
+            GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
             _ => None,
         };
         match handled {
@@ -133,6 +139,27 @@ impl X68kBus {
     fn gm_fill_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
         let rect_ptr = self.peek_u32(state.a[7])?;
         let rect = self.peek_rect(rect_ptr)?;
+        self.fill_area(state, text_base, rect, None)
+    }
+
+    fn gm_fill_rgn(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let handle = self.peek_u32(state.a[7])?;
+        if handle == 0 {
+            return None;
+        }
+        let region = self.peek_u32(handle)?;
+        let bounds = self.peek_region_bounds(region)?;
+        self.fill_area(state, text_base, bounds, Some(region))
+    }
+
+    /// Fills `rect` on the screen, also limited to `shape` when it is given.
+    fn fill_area(
+        &mut self,
+        state: &mut CpuState,
+        text_base: u32,
+        rect: Rect,
+        shape: Option<u32>,
+    ) -> Option<()> {
         let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
 
         let drawable = self.peek_u32(graph + GRAPH_PROCS)? == 0
@@ -141,21 +168,6 @@ impl X68kBus {
         if !drawable {
             return None;
         }
-
-        let mode = self.peek_u16(graph + GRAPH_PEN_MODE)?;
-        let color = match mode >> 8 {
-            0 => self.peek_u16(graph + GRAPH_FG_COLOR)?,
-            1 => self.peek_u16(graph + GRAPH_BG_COLOR)?,
-            _ => return None,
-        };
-        if mode & 0xFF >= 8 {
-            return None;
-        }
-        let color = if mode & 4 != 0 { !color } else { color };
-        let pen = SolidPen {
-            color: color & 0xF,
-            op: mode as u8,
-        };
 
         let bitmap = self.peek_u32(graph + GRAPH_BITMAP)?;
         let is_screen = self.peek_u16(bitmap + BITMAP_TYPE)? == 0
@@ -166,8 +178,9 @@ impl X68kBus {
             return None;
         }
         let active_pages = self.peek_u16(bitmap + BITMAP_ACTIVE_PAGES)?;
-
         let bitmap_rect = self.peek_rect(bitmap + BITMAP_RECT)?;
+        let pen = self.resolve_pen(graph, bitmap_rect)?;
+
         let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
         let clipping = self.peek_region(graph + GRAPH_CLIPPING)?;
         let area = rect
@@ -179,60 +192,130 @@ impl X68kBus {
             return_result(state, 0);
             return Some(());
         }
-        if self.overlaps_cursor(text_base, area, bitmap_rect)? {
+
+        let mut cursors = vec![
+            self.region_cursor(visible, area.top)?,
+            self.region_cursor(clipping, area.top)?,
+        ];
+        if let Some(shape) = shape {
+            cursors.push(self.region_cursor(shape, area.top)?);
+        }
+
+        let mut spans = Vec::new();
+        for y in area.top..area.bottom {
+            for cursor in &mut cursors {
+                self.advance_region(cursor, y)?;
+            }
+            for (left, right) in clipped_spans(area, &cursors) {
+                spans.push((y, left, right));
+            }
+        }
+
+        let cursor_zones = self.cursor_zones(text_base, bitmap_rect)?;
+        let near_cursor = spans.iter().any(|&(y, left, right)| {
+            cursor_zones
+                .iter()
+                .any(|zone| y >= zone.top && y < zone.bottom && left < zone.right && right > zone.left)
+        });
+        if near_cursor {
             return None;
         }
 
-        let mut visible = self.region_cursor(visible, area.top)?;
-        let mut clipping = self.region_cursor(clipping, area.top)?;
-        for y in area.top..area.bottom {
-            self.advance_region(&mut visible, y)?;
-            self.advance_region(&mut clipping, y)?;
-            let row = (y - bitmap_rect.top) as usize;
-            for (left, right) in clipped_spans(area, &visible, &clipping) {
-                self.fill_screen_span(
-                    row,
-                    (left as i32 - bitmap_rect.left as i32) as usize,
-                    (right as i32 - bitmap_rect.left as i32) as usize,
-                    pen,
-                    active_pages,
-                );
-            }
+        for (y, left, right) in spans {
+            self.fill_screen_span(
+                (y as i32 - bitmap_rect.top as i32) as usize,
+                (left as i32 - bitmap_rect.left as i32) as usize,
+                (right as i32 - bitmap_rect.left as i32) as usize,
+                y,
+                &pen,
+                active_pages,
+            );
         }
         return_result(state, 0);
         Some(())
     }
 
-    /// Returns `true` if `area` is close enough to the cursor to need its background shielding.
-    fn overlaps_cursor(&self, text_base: u32, area: Rect, bitmap_rect: Rect) -> Option<bool> {
-        let global = Rect {
-            left: area.left - bitmap_rect.left,
-            top: area.top - bitmap_rect.top,
-            right: area.right - bitmap_rect.left,
-            bottom: area.bottom - bitmap_rect.top,
-        };
-        for offset in [CURSOR_POS, CURSOR_DRAWN_POS] {
-            let x = self.peek_u16(text_base.wrapping_add(offset))? as i16;
-            let y = self.peek_u16(text_base.wrapping_add(offset + 2))? as i16;
-            let zone = Rect {
+    /// Expands the pen of `graph` into per-plane source rows, or `None` if it is unsupported.
+    fn resolve_pen(&self, graph: u32, bitmap_rect: Rect) -> Option<PlanePen> {
+        let mode = self.peek_u16(graph + GRAPH_PEN_MODE)?;
+        if mode & 0xFF >= 8 {
+            return None;
+        }
+        let inverted = mode & 4 != 0;
+        let foreground = self.peek_u16(graph + GRAPH_FG_COLOR)?;
+        let background = self.peek_u16(graph + GRAPH_BG_COLOR)?;
+        let rotation = (bitmap_rect.left & 15) as u32;
+
+        let mut rows = [[0u16; PATTERN_ROWS]; 4];
+        match mode >> 8 {
+            kind @ (0 | 1) => {
+                let color = if kind == 0 { foreground } else { background };
+                let color = if inverted { !color } else { color };
+                for (plane, plane_rows) in rows.iter_mut().enumerate() {
+                    *plane_rows = [if (color >> plane) & 1 != 0 { 0xFFFF } else { 0 }; PATTERN_ROWS];
+                }
+            }
+            2 => {
+                let pattern = self.peek_u32(graph + GRAPH_PEN_PAT)?;
+                let (set, clear) = if inverted {
+                    (background, foreground)
+                } else {
+                    (foreground, background)
+                };
+                for (plane, plane_rows) in rows.iter_mut().enumerate() {
+                    let set = if (set >> plane) & 1 != 0 { 0xFFFF } else { 0 };
+                    let clear = if (clear >> plane) & 1 != 0 { 0xFFFF } else { 0 };
+                    for (row, word) in plane_rows.iter_mut().enumerate() {
+                        let bits = self
+                            .peek_u16(pattern + row as u32 * 2)?
+                            .rotate_left(rotation);
+                        *word = (bits & set) | (!bits & clear);
+                    }
+                }
+            }
+            3 => {
+                let pattern = self.peek_u32(graph + GRAPH_EX_PAT)?;
+                let flip = if inverted { 0xFFFF } else { 0 };
+                for (plane, plane_rows) in rows.iter_mut().enumerate() {
+                    for (row, word) in plane_rows.iter_mut().enumerate() {
+                        let offset = (plane * PATTERN_ROWS + row) as u32 * 2;
+                        *word = self.peek_u16(pattern + offset)?.rotate_left(rotation) ^ flip;
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(PlanePen {
+            rows,
+            op: mode as u8,
+        })
+    }
+
+    /// Returns the areas, in `bitmap_rect` coordinates, that need the guest's cursor shielding.
+    fn cursor_zones(&self, text_base: u32, bitmap_rect: Rect) -> Option<[Rect; 2]> {
+        let zone = |offset: u32| -> Option<Rect> {
+            let x = (self.peek_u16(text_base.wrapping_add(offset))? as i16)
+                .saturating_add(bitmap_rect.left);
+            let y = (self.peek_u16(text_base.wrapping_add(offset + 2))? as i16)
+                .saturating_add(bitmap_rect.top);
+            Some(Rect {
                 left: x.saturating_sub(CURSOR_MARGIN),
                 top: y.saturating_sub(CURSOR_MARGIN),
                 right: x.saturating_add(CURSOR_MARGIN),
                 bottom: y.saturating_add(CURSOR_MARGIN),
-            };
-            if !global.intersect(zone).is_empty() {
-                return Some(true);
-            }
-        }
-        Some(false)
+            })
+        };
+        Some([zone(CURSOR_POS)?, zone(CURSOR_DRAWN_POS)?])
     }
 
+    /// Fills one span, with `pattern_y` selecting the pen row in the bitmap's own coordinates.
     fn fill_screen_span(
         &mut self,
         row: usize,
         left: usize,
         right: usize,
-        pen: SolidPen,
+        pattern_y: i16,
+        pen: &PlanePen,
         active_pages: u16,
     ) {
         let row_bytes = self.ext_tvram_row_bytes;
@@ -248,15 +331,13 @@ impl X68kBus {
         let last = (right - 1) >> 3;
         let first_mask = 0xFFu8 >> (left & 7);
         let last_mask = 0xFFu8 << (7 - ((right - 1) & 7));
+        let pattern_row = (pattern_y as usize) & (PATTERN_ROWS - 1);
 
         for plane in 0..4 {
             if active_pages & (1 << plane) == 0 {
                 continue;
             }
-            let (clear, set, invert) = pen.plane_action(plane);
-            if !(clear || set || invert) {
-                continue;
-            }
+            let word = pen.rows[plane][pattern_row];
             let line = plane * plane_bytes + row * row_bytes;
             for byte in first..=last {
                 let mut mask = 0xFFu8;
@@ -266,16 +347,13 @@ impl X68kBus {
                 if byte == last {
                     mask &= last_mask;
                 }
+                let source = if byte & 1 == 0 {
+                    (word >> 8) as u8
+                } else {
+                    word as u8
+                };
                 if let Some(slot) = buffer.get_mut(line + byte) {
-                    if clear {
-                        *slot &= !mask;
-                    }
-                    if set {
-                        *slot |= mask;
-                    }
-                    if invert {
-                        *slot ^= mask;
-                    }
+                    *slot = pen.apply(*slot, source, mask);
                 }
             }
         }
@@ -374,21 +452,21 @@ fn spans(area: Rect, region: &RegionCursor) -> Vec<(i16, i16)> {
     }
 }
 
-/// Returns the X intervals of the current row covered by both regions within `area`.
-fn clipped_spans(
-    area: Rect,
-    visible: &RegionCursor,
-    clipping: &RegionCursor,
-) -> Vec<(i16, i16)> {
-    let mut result = Vec::new();
-    let clip = spans(area, clipping);
-    for (left, right) in spans(area, visible) {
-        for &(clip_left, clip_right) in &clip {
-            let span = (left.max(clip_left), right.min(clip_right));
-            if span.0 < span.1 {
-                result.push(span);
+/// Returns the X intervals of the current row covered by every region within `area`.
+fn clipped_spans(area: Rect, regions: &[RegionCursor]) -> Vec<(i16, i16)> {
+    let mut result = vec![(area.left, area.right)];
+    for region in regions {
+        let limits = spans(area, region);
+        let mut narrowed = Vec::new();
+        for &(left, right) in &result {
+            for &(limit_left, limit_right) in &limits {
+                let span = (left.max(limit_left), right.min(limit_right));
+                if span.0 < span.1 {
+                    narrowed.push(span);
+                }
             }
         }
+        result = narrowed;
     }
     result
 }
@@ -506,6 +584,43 @@ mod tests {
     }
 
     #[test]
+    fn expands_pen_patterns_in_bitmap_coordinates() {
+        let (mut bus, mut state) = test_bus([0, 0, 16, 2]);
+        const PATTERN: u32 = 0x1600;
+        write_u32(&mut bus, GRAPH + GRAPH_PEN_PAT, PATTERN);
+        write_u16(&mut bus, PATTERN, 0x8000);
+        write_u16(&mut bus, PATTERN + 2, 0x4000);
+        write_u16(&mut bus, GRAPH + GRAPH_BG_COLOR, 0xA);
+        write_u16(&mut bus, GRAPH + GRAPH_PEN_MODE, 0x0200);
+        run(&mut bus, &mut state);
+        assert_eq!(pixel(&bus, 0, 0), 5);
+        assert_eq!(pixel(&bus, 1, 0), 0xA);
+        assert_eq!(pixel(&bus, 1, 1), 5);
+    }
+
+    #[test]
+    fn fills_a_region_argument_through_the_visible_area() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SHAPE: u32 = 0x1700;
+        const SHAPE_HANDLE: u32 = 0x1308;
+        write_u32(&mut bus, SHAPE_HANDLE, SHAPE);
+        write_u32(&mut bus, SHAPE, 0x100);
+        write_rect(&mut bus, SHAPE + 4, [2, 0, 6, 2]);
+        for (i, value) in [0u16, 2, 6, 0x7FFF, 2, 2, 6, 0x7FFF, 0x7FFF].iter().enumerate() {
+            write_u16(&mut bus, SHAPE + REGION_DATA + i as u32 * 2, *value);
+        }
+        write_u32(&mut bus, STACK, SHAPE_HANDLE);
+        write_rect_region(&mut bus, VISIBLE, [4, 0, 256, 64]);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_FILL_RGN),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        for x in 0..8 {
+            assert_eq!(pixel(&bus, x, 1), if (4..6).contains(&x) { 5 } else { 0 }, "x={x}");
+        }
+    }
+
+    #[test]
     fn draws_only_the_active_planes() {
         let (mut bus, mut state) = test_bus([0, 0, 8, 1]);
         write_u16(&mut bus, BITMAP + BITMAP_ACTIVE_PAGES, 0x3);
@@ -548,7 +663,7 @@ mod tests {
         let unsupported: [(u32, u16); 3] = [
             (GRAPH + GRAPH_WORK_KIND, 2),
             (GRAPH + GRAPH_DRAW_LEVEL, 0xFFFF),
-            (GRAPH + GRAPH_PEN_MODE, 0x0200),
+            (GRAPH + GRAPH_PEN_MODE, 0x0400),
         ];
         for (field, value) in unsupported {
             let (mut bus, mut state) = test_bus([0, 0, 8, 8]);
