@@ -416,6 +416,51 @@ impl X68kBus {
         self.write_rom_u8(addr.wrapping_add(1), val as u8);
     }
 
+    /// Reads a memory byte for a debugger without touching any bus or peripheral state.
+    ///
+    /// Returns `None` for I/O regions, whose reads may have side effects, and for unmapped memory.
+    pub fn peek_u8(&self, addr: u32) -> Option<u8> {
+        if addr >= EXT_TVRAM_BASE {
+            let off = (addr - EXT_TVRAM_BASE) as usize;
+            return self.ext_tvram.as_ref().and_then(|b| b.get(off).copied());
+        }
+        let a = addr & 0x00FF_FFFF;
+        match MemoryRegion::from_addr(a) {
+            MemoryRegion::MainRam => self.main_ram.get(a as usize).copied(),
+            MemoryRegion::Gvram => {
+                let offset = (a as usize) & (GVRAM_BYTES - 1);
+                Some(self.gvram.as_ref().map_or(0, |buf| buf[offset]))
+            }
+            MemoryRegion::Tvram => {
+                let offset = (a as usize) & (TVRAM_BYTES - 1);
+                Some(self.tvram.as_ref().map_or(0, |buf| buf[offset]))
+            }
+            MemoryRegion::Sram => self.sram.get((a - 0x00ED_0000) as usize).copied(),
+            MemoryRegion::Rom => {
+                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
+                    return None;
+                }
+                self.rom.get((a - 0x00F0_0000) as usize).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Writes a Main RAM or ROM byte for a debugger, returning `false` for any other address.
+    pub fn poke_u8(&mut self, addr: u32, val: u8) -> bool {
+        if addr >= EXT_TVRAM_BASE {
+            return false;
+        }
+        match MemoryRegion::from_addr(addr & 0x00FF_FFFF) {
+            MemoryRegion::MainRam => self.write_u8(addr, val, true).is_ok(),
+            MemoryRegion::Rom => {
+                self.write_rom_u8(addr, val);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Advances CRTC scanlines, MFP timers, and OPM timers by `cycles_10mhz` (10 MHz clock cycles).
     pub fn advance_peripherals(&mut self, cycles_10mhz: u32) {
         let sync = self

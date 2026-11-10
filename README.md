@@ -64,6 +64,16 @@ cargo run --release -- --fd0 disks/HUMAN302.XDF
 cargo run --release -- --fd0 disks/SXWIN311.XDF --fd1 disks/SXWIN315.XDF --speed burst
 ```
 
+### Debugging Guest Code with GDB
+Pass `--gdb <port>` to serve the GDB remote protocol on `127.0.0.1:<port>`. Without this option no socket is opened. The VM halts when a client connects and resumes when it detaches.
+
+```bash
+cargo run --release -- --hdd0 disks/SXWIN31.HDS --gdb 1234
+gdb-multiarch -ex 'set endian big' -ex 'set architecture m68k:68000' -ex 'target remote :1234'
+```
+
+`set endian big` is required because GDB has no executable to learn the byte order from. Memory reads cover RAM, VRAM, SRAM, and ROM. I/O registers are not readable, so inspecting them cannot disturb peripherals.
+
 ### Runtime Window Controls (`msx68k-app`)
 - **Mouse**: 1:1 pixel-exact synchronization between the host OS cursor and the SX-Window cursor via the `SYS/FSX.X` `SxMouseSync` (`$FE81`) Mixed Mode hook (with automatic fallback to relative `Z8530 SCC` Channel B movement for non-SX-Window software). Hold the Right mouse button in SX-Window to display the top menu bar.
 - **Keyboard**: Forwarded as X68000 hardware scan codes via `MC68901 MFP` USART.

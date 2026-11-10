@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use msx68k_bus::{CpuSpeedMode, VmConfig, X68kVm};
+use msx68k_bus::{CpuSpeedMode, FrameBudget, GdbServer, VmConfig, X68kVm};
 use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -117,6 +117,7 @@ struct AppArgs {
     scale: u32,
     resolution: Option<(u32, u32)>,
     fullscreen: bool,
+    gdb_port: Option<u16>,
 }
 
 impl Default for AppArgs {
@@ -151,6 +152,7 @@ impl Default for AppArgs {
             scale: 1,
             resolution: None,
             fullscreen: false,
+            gdb_port: None,
         }
     }
 }
@@ -218,6 +220,13 @@ impl AppArgs {
                 "--fullscreen" | "-f" => {
                     cfg.fullscreen = true;
                 }
+                "--gdb" => match args.next().and_then(|s| s.parse::<u16>().ok()) {
+                    Some(port) => cfg.gdb_port = Some(port),
+                    None => {
+                        eprintln!("--gdb requires a TCP port number");
+                        std::process::exit(1);
+                    }
+                },
                 "--resolution" => {
                     if let Some(s) = args.next() {
                         if s.eq_ignore_ascii_case("native") || s.eq_ignore_ascii_case("fullscreen") {
@@ -252,7 +261,8 @@ impl AppArgs {
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
-                           --fullscreen, -f     Start in host native fullscreen 1:1 mode\n\n\
+                           --fullscreen, -f     Start in host native fullscreen 1:1 mode\n  \
+                           --gdb <port>         Serve the GDB remote protocol on 127.0.0.1:<port>\n\n\
                          Hotkeys:\n  \
                            F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F5: Cycle Resolution | F12: Reset"
                     );
@@ -276,6 +286,7 @@ struct GpuWindowState {
 struct Msx68kApp {
     args: AppArgs,
     vm: X68kVm,
+    gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
     last_title_update: Instant,
     next_frame_deadline: Instant,
@@ -308,6 +319,15 @@ impl Msx68kApp {
                 args.ipl_path.display()
             );
             std::process::exit(1);
+        });
+
+        let gdb = args.gdb_port.map(|port| {
+            let server = GdbServer::bind(port).unwrap_or_else(|e| {
+                eprintln!("Failed to listen for GDB on 127.0.0.1:{port}: {e}");
+                std::process::exit(1);
+            });
+            println!("GDB server listening on 127.0.0.1:{port}");
+            server
         });
 
         vm.bus.load_cgrom(&cgrom);
@@ -431,6 +451,7 @@ impl Msx68kApp {
         Self {
             args,
             vm,
+            gdb,
             gpu: None,
             last_title_update: now,
             next_frame_deadline: now,
@@ -471,7 +492,7 @@ impl Msx68kApp {
         }
     }
 
-    fn step_vm_one_frame(&mut self) {
+    fn frame_budget(&self) -> FrameBudget {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
                 if self.vm.bus.is_mouse_polling_active() {
@@ -479,11 +500,14 @@ impl Msx68kApp {
                     // clock to exact 1/60s frame time (166,667 10MHz ticks) so guest timers
                     // (Timer C, V-Blank, double-click speed) match real wall-clock time.
                     const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
-                    self.vm.run_burst_frame(1_000_000, TARGET_TICKS_60HZ);
+                    FrameBudget::Paced {
+                        max_instructions: 1_000_000,
+                        target_ticks_10mhz: TARGET_TICKS_60HZ,
+                    }
                 } else {
                     // Fast-forward through boot and splash screen timer waits until the
                     // desktop starts polling the mouse.
-                    self.vm.run_steps(1_000_000);
+                    FrameBudget::Instructions(1_000_000)
                 }
             }
             mode => {
@@ -491,13 +515,20 @@ impl Msx68kApp {
                 // so floppy boot and program loads complete smoothly.
                 let fdd_busy = self.vm.bus.fdc.drives.iter().any(|d| d.motor_on);
                 let cpu_mhz = mode.timing_config().cpu_mhz.max(10);
-                let frame_cycles = if fdd_busy {
+                FrameBudget::Cycles(if fdd_busy {
                     (cpu_mhz * 1_000_000) / 15
                 } else {
                     (cpu_mhz * 1_000_000) / 60
-                };
-                self.vm.run_cycles(frame_cycles);
+                })
             }
+        }
+    }
+
+    fn step_vm_one_frame(&mut self) {
+        let budget = self.frame_budget();
+        match &mut self.gdb {
+            Some(gdb) if gdb.is_connected() => gdb.run_frame(&mut self.vm, budget),
+            _ => self.vm.run_frame(budget),
         }
     }
 }
@@ -831,6 +862,13 @@ impl ApplicationHandler for Msx68kApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let budget = self.frame_budget();
+        let mut gdb_connected = false;
+        if let Some(gdb) = &mut self.gdb {
+            gdb.poll(&mut self.vm, budget);
+            gdb_connected = gdb.is_connected();
+        }
+
         let now = Instant::now();
         let frame_interval = Duration::from_micros(16_667); // ~60 Hz
         if now >= self.next_frame_deadline {
@@ -839,7 +877,13 @@ impl ApplicationHandler for Msx68kApp {
                 gpu.window.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
+        // A GDB client waits for each reply, so keep round trips well below a frame.
+        let wake_at = if gdb_connected {
+            self.next_frame_deadline.min(now + Duration::from_millis(1))
+        } else {
+            self.next_frame_deadline
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
     }
 }
 

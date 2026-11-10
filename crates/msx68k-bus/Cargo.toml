@@ -8,6 +8,7 @@ description = "X68000 24-bit system bus, memory region wait-state model (10/16/2
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+gdbstub = "0.7"
 msx68k-cpu = { path = "../msx68k-cpu" }
 rhas = { path = "../../third_party/rhas" }
 rhlk = { path = "../../third_party/rhlk" }

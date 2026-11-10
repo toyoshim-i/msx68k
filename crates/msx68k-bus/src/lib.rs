@@ -4,6 +4,7 @@ pub mod bus;
 pub mod crtc;
 pub mod dmac;
 pub mod fdc;
+pub mod gdb;
 pub mod guest_build;
 pub mod mfp;
 pub mod peripherals;
@@ -21,6 +22,7 @@ pub use bus::{
 pub use crtc::{Crtc, CrtcSyncEvents, RASTER_BLOCK_BYTES, TVRAM_PLANE_BYTES};
 pub use dmac::{DmaChannel, Dmac};
 pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};
+pub use gdb::GdbServer;
 pub use mfp::Mfp;
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use scsi::{
@@ -34,7 +36,7 @@ pub use timing::{
     PAGE_COUNT_4K, PAGE_SHIFT_4K,
 };
 pub use vicon::{grbi_to_rgba8, Vicon};
-pub use vm::{BusTrapHandler, VmConfig, X68kVm};
+pub use vm::{BusTrapHandler, FrameBudget, VmConfig, X68kVm};
 
 #[cfg(test)]
 mod tests {

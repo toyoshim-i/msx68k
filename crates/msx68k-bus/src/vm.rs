@@ -7,6 +7,7 @@ use msx68k_cpu::{
 };
 
 use crate::bus::{X68kBus, MAX_MAIN_RAM_BYTES};
+use crate::gdb::DebugState;
 use crate::timing::{BusTimingConfig, CpuSpeedMode, VmRole};
 
 /// Default mixed-mode hypercall trap handler for the X68000 virtual machine.
@@ -114,6 +115,20 @@ impl VmConfig {
     }
 }
 
+/// How much guest execution one host frame is allowed.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FrameBudget {
+    /// Burst execution with peripherals paced to `target_ticks_10mhz` ([`X68kVm::run_burst_frame`]).
+    Paced {
+        max_instructions: usize,
+        target_ticks_10mhz: u32,
+    },
+    /// A fixed instruction count ([`X68kVm::run_steps`]).
+    Instructions(usize),
+    /// A CPU clock cycle target ([`X68kVm::run_cycles`]).
+    Cycles(u32),
+}
+
 /// An X68000 Virtual Machine instance supporting seamless switching between
 /// cycle-accurate (`10MHz`, `16MHz`, `24MHz`) and zero-overhead (`Burst`) execution.
 pub struct X68kVm {
@@ -124,6 +139,8 @@ pub struct X68kVm {
     pub bus: X68kBus,
     /// Temporary disk I/O burst override flag.
     disk_io_burst_active: bool,
+    /// GDB session state, only consulted by the debug execution loop.
+    pub(crate) debug: DebugState,
 }
 
 impl X68kVm {
@@ -135,6 +152,7 @@ impl X68kVm {
             cpu_state: CpuState::new(),
             bus: X68kBus::new(config.ram_size_bytes, timing),
             disk_io_burst_active: false,
+            debug: DebugState::default(),
         }
     }
 
@@ -390,5 +408,23 @@ impl X68kVm {
     pub fn run_burst_frame(&mut self, max_instructions: usize, target_ticks_10mhz: u32) -> usize {
         let mut handler = BusTrapHandler;
         self.run_burst_frame_with_trap(max_instructions, target_ticks_10mhz, &mut handler)
+    }
+
+    /// Executes one host frame of guest code as described by `budget`.
+    pub fn run_frame(&mut self, budget: FrameBudget) {
+        match budget {
+            FrameBudget::Paced {
+                max_instructions,
+                target_ticks_10mhz,
+            } => {
+                self.run_burst_frame(max_instructions, target_ticks_10mhz);
+            }
+            FrameBudget::Instructions(count) => {
+                self.run_steps(count);
+            }
+            FrameBudget::Cycles(cycles) => {
+                self.run_cycles(cycles);
+            }
+        }
     }
 }
