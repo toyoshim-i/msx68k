@@ -7,6 +7,7 @@ pub mod fdc;
 pub mod gdb;
 pub mod guest_build;
 pub mod mfp;
+pub mod native_gm;
 pub mod peripherals;
 pub mod scsi;
 pub mod sxwin;

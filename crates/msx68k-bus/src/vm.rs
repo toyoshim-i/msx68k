@@ -1,6 +1,8 @@
 //! X68000 Virtual Machine wrapper combining the monomorphized MC68000 CPU core
 //! and the region-aware X68000 system bus.
 
+use std::time::Instant;
+
 use msx68k_cpu::{
     BurstPolicy, BusFault, CpuCore, CpuState, StepOutcome, TrackedPolicy,
     TrapHandler,
@@ -19,6 +21,18 @@ use crate::timing::{BusTimingConfig, CpuSpeedMode, VmRole};
 pub struct BusTrapHandler;
 
 impl TrapHandler<X68kBus> for BusTrapHandler {
+    #[inline]
+    fn on_a_line(
+        &mut self,
+        state: &mut CpuState,
+        bus: &mut X68kBus,
+        opcode: u16,
+        _pc: u32,
+    ) -> msx68k_cpu::TrapResult {
+        bus.apply_pending_resolution(state, opcode);
+        bus.handle_native_gm(state, opcode)
+    }
+
     #[inline]
     fn on_f_line(
         &mut self,
@@ -115,16 +129,47 @@ impl VmConfig {
     }
 }
 
+/// Instructions executed between host clock checks while Burst runs until a deadline.
+pub(crate) const BURST_SYNC_INSTRUCTIONS: usize = 256;
+/// Most peripheral ticks applied at one clock check, so time lost while rendering is made up
+/// gradually instead of in a single jump that would merge timer interrupts.
+const BURST_MAX_CATCH_UP_TICKS: u64 = 2_000;
+/// Backlog above this (100 ms) is dropped, e.g. after the VM was halted or the window hidden.
+const BURST_MAX_BACKLOG_TICKS: u64 = 1_000_000;
+
+/// Tracks how many 10 MHz peripheral ticks Burst execution owes to match host time.
+#[derive(Debug, Default)]
+pub(crate) struct HostClock {
+    origin: Option<Instant>,
+    advanced: u64,
+}
+
+impl HostClock {
+    /// Returns the ticks to apply now.
+    pub(crate) fn ticks_due(&mut self, now: Instant) -> u32 {
+        let origin = *self.origin.get_or_insert(now);
+        let due = (now.duration_since(origin).as_nanos() / 100) as u64;
+        let owed = (due - self.advanced).min(BURST_MAX_BACKLOG_TICKS);
+        self.advanced = due - owed;
+
+        let ticks = owed.min(BURST_MAX_CATCH_UP_TICKS);
+        self.advanced += ticks;
+        ticks as u32
+    }
+
+    /// Restarts from the current moment, discarding time during which the guest was not running.
+    pub(crate) fn rebase(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// How much guest execution one host frame is allowed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FrameBudget {
-    /// Burst execution with peripherals paced to `target_ticks_10mhz` ([`X68kVm::run_burst_frame`]).
-    Paced {
-        max_instructions: usize,
-        target_ticks_10mhz: u32,
-    },
-    /// A fixed instruction count ([`X68kVm::run_steps`]).
-    Instructions(usize),
+    /// Burst flat out until `deadline`, with peripherals following host time.
+    RealTime { deadline: Instant },
+    /// Burst flat out until `deadline`, with peripherals on virtual time to skip guest timer waits.
+    FastForward { deadline: Instant },
     /// A CPU clock cycle target ([`X68kVm::run_cycles`]).
     Cycles(u32),
 }
@@ -141,6 +186,8 @@ pub struct X68kVm {
     disk_io_burst_active: bool,
     /// GDB session state, only consulted by the debug execution loop.
     pub(crate) debug: DebugState,
+    /// Host time reference for [`FrameBudget::RealTime`].
+    pub(crate) host_clock: HostClock,
 }
 
 impl X68kVm {
@@ -153,6 +200,7 @@ impl X68kVm {
             bus: X68kBus::new(config.ram_size_bytes, timing),
             disk_io_burst_active: false,
             debug: DebugState::default(),
+            host_clock: HostClock::default(),
         }
     }
 
@@ -410,21 +458,89 @@ impl X68kVm {
         self.run_burst_frame_with_trap(max_instructions, target_ticks_10mhz, &mut handler)
     }
 
+    /// Executes Burst code as fast as the host allows until `deadline`, advancing peripherals
+    /// to match host time so guest timers run at their real rate.
+    pub fn run_burst_real_time(&mut self, deadline: Instant) {
+        let state = std::mem::take(&mut self.cpu_state);
+        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut handler = BusTrapHandler;
+        loop {
+            for _ in 0..BURST_SYNC_INSTRUCTIONS {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
+                core.step(&mut self.bus, &mut handler);
+            }
+            let now = Instant::now();
+            let ticks = self.host_clock.ticks_due(now);
+            self.bus.advance_peripherals(ticks);
+            if now >= deadline {
+                break;
+            }
+        }
+        core.state.set_ipl(self.bus.highest_pending_ipl());
+        self.cpu_state = core.into_state();
+    }
+
+    /// Executes Burst code as fast as the host allows until `deadline`, with peripherals on
+    /// virtual time so boot-time timer waits finish quickly.
+    pub fn run_burst_fast_forward(&mut self, deadline: Instant) {
+        let state = std::mem::take(&mut self.cpu_state);
+        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut handler = BusTrapHandler;
+        while Instant::now() < deadline {
+            for _ in 0..BURST_SYNC_INSTRUCTIONS {
+                core.state.set_ipl(self.bus.highest_pending_ipl());
+                let out = core.step(&mut self.bus, &mut handler);
+                self.bus.advance_peripherals(if out.stopped { 64 } else { 8 });
+            }
+        }
+        core.state.set_ipl(self.bus.highest_pending_ipl());
+        self.cpu_state = core.into_state();
+    }
+
     /// Executes one host frame of guest code as described by `budget`.
     pub fn run_frame(&mut self, budget: FrameBudget) {
         match budget {
-            FrameBudget::Paced {
-                max_instructions,
-                target_ticks_10mhz,
-            } => {
-                self.run_burst_frame(max_instructions, target_ticks_10mhz);
-            }
-            FrameBudget::Instructions(count) => {
-                self.run_steps(count);
-            }
+            FrameBudget::RealTime { deadline } => self.run_burst_real_time(deadline),
+            FrameBudget::FastForward { deadline } => self.run_burst_fast_forward(deadline),
             FrameBudget::Cycles(cycles) => {
                 self.run_cycles(cycles);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn host_clock_pays_time_off_gradually() {
+        let start = Instant::now();
+        let mut clock = HostClock::default();
+        assert_eq!(clock.ticks_due(start), 0);
+
+        // 1 ms is 10,000 ticks, more than one check may apply.
+        let later = start + Duration::from_millis(1);
+        let mut paid = 0;
+        for _ in 0..5 {
+            paid += clock.ticks_due(later);
+        }
+        assert_eq!(paid, 10_000);
+        assert_eq!(clock.ticks_due(later), 0);
+    }
+
+    #[test]
+    fn host_clock_drops_backlog_beyond_the_limit() {
+        let start = Instant::now();
+        let mut clock = HostClock::default();
+        clock.ticks_due(start);
+
+        let later = start + Duration::from_secs(10);
+        let mut paid = 0u64;
+        for _ in 0..1_000 {
+            paid += clock.ticks_due(later) as u64;
+        }
+        assert_eq!(paid, BURST_MAX_BACKLOG_TICKS);
     }
 }

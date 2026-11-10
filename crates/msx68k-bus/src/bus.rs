@@ -117,6 +117,14 @@ pub struct X68kBus {
     pub target_resolution: Option<(u32, u32)>,
     /// Extended planar framebuffer at `0x1000_0000` (Approach B: Beyond 1K×1K).
     pub(crate) ext_tvram: Option<Vec<u8>>,
+    /// `SYS/FSX.X` load address once its Graph Manager APIs may be replaced natively.
+    pub(crate) native_gm_text_base: Option<u32>,
+    /// Resolution waiting for a safe point in the guest scheduler.
+    pub(crate) pending_resolution: Option<(u32, u32)>,
+    /// Allows native Graph Manager APIs; clear to run everything through the guest routines.
+    pub native_gm_enabled: bool,
+    /// Number of Graph Manager calls completed natively.
+    pub native_gm_calls: u64,
     pub(crate) ext_tvram_row_bytes: usize,
     pub(crate) ext_tvram_plane_bytes: usize,
     /// Cached extended planar TVRAM preserved across downscaling to standard resolutions.
@@ -182,6 +190,10 @@ impl X68kBus {
             host_mouse_pos: None,
             target_resolution: None,
             ext_tvram: None,
+            native_gm_text_base: None,
+            pending_resolution: None,
+            native_gm_enabled: true,
+            native_gm_calls: 0,
             ext_tvram_row_bytes: 0,
             ext_tvram_plane_bytes: 0,
             saved_ext_tvram: None,
@@ -354,6 +366,8 @@ impl X68kBus {
         self.fdc.reset(&mut self.ioi);
 
         self.ext_tvram = None;
+        self.native_gm_text_base = None;
+        self.pending_resolution = None;
         self.ext_tvram_row_bytes = 0;
         self.ext_tvram_plane_bytes = 0;
         self.saved_ext_tvram = None;

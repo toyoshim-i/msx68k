@@ -56,6 +56,8 @@ flowchart LR
   +2: $4E75                  ; RTS (returns cleanly to 68k caller)
   ```
 
+- SX-Window APIs are replaced natively through `TrapHandler::on_a_line` without patching guest memory. See Section 5.7 of [the SX-Window reference](SX_WINDOW_API_AND_HOOK_STATUS.md).
+
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
 - While physical RAM addresses shift depending on preceding device drivers (`text_base = $05817C` on floppy boot vs. `$0581E4` on SCSI HDD boot), **offsets relative to `text_base` (`text_base + offset`) and non-relocated instruction opcodes are 100% invariant**.

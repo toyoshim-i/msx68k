@@ -46,6 +46,18 @@ fn render_bus_tvram_rgba(bus: &msx68k_bus::X68kBus) -> (u32, u32, Vec<u8>) {
     (width, height, rgba)
 }
 
+/// Requests a resolution change and runs the guest until the scheduler has applied it.
+fn switch_resolution_at_task_turn(vm: &mut X68kVm, width: u32, height: u32) {
+    vm.bus.request_screen_resolution(width, height);
+    for _ in 0..5_000_000 {
+        if vm.bus.crtc.active_resolution() == (width, height) {
+            return;
+        }
+        vm.step();
+    }
+    panic!("resolution {width}x{height} was never applied");
+}
+
 fn save_rgba_to_png(width: u32, height: u32, rgba: &[u8], out_png: &str) {
     let raw_path = format!("{}.raw", out_png);
     std::fs::write(&raw_path, rgba).expect("write raw");
@@ -1279,11 +1291,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
 
     // Verify Fix 2: Resolution switch cycle (1920x1080 -> 768x512 -> 1920x1080)
     // with SXMODE.X remaining at (1300, 750) and preserving window pixels:
-    vm.cpu_state.d[0] = 0x10;
-    vm.cpu_state.d[1] = 0x0150;
-    vm.cpu_state.d[2] = (768 << 16) | 512;
-    let trap_res_down = vm.bus.handle_iocs_crtmod(&mut vm.cpu_state);
-    assert!(matches!(trap_res_down, msx68k_cpu::TrapResult::Handled { .. }));
+    switch_resolution_at_task_turn(&mut vm, 768, 512);
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
     assert!(!vm.bus.is_ext_tvram_active());
     for _ in 0..100_000 {
@@ -1291,11 +1299,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     }
 
     // Switch back to 1920x1080:
-    vm.cpu_state.d[0] = 0x10;
-    vm.cpu_state.d[1] = 0x0150;
-    vm.cpu_state.d[2] = (1920 << 16) | 1080;
-    let trap_res_up = vm.bus.handle_iocs_crtmod(&mut vm.cpu_state);
-    assert!(matches!(trap_res_up, msx68k_cpu::TrapResult::Handled { .. }));
+    switch_resolution_at_task_turn(&mut vm, 1920, 1080);
     assert_eq!(vm.bus.crtc.active_resolution(), (1920, 1080));
     assert!(vm.bus.is_ext_tvram_active());
     for _ in 0..100_000 {

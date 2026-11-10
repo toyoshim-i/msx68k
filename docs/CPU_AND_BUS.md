@@ -96,6 +96,12 @@ let page = ((addr & 0x00FF_FFFF) >> 12) as usize;
 self.pages[page] as u32
 ```
 
+### 3.5 Burst Execution and Guest Time
+In the desktop app, Burst has no instruction limit. Each host frame runs guest code on the main thread until a deadline just before rendering, so throughput is whatever the host can deliver.
+
+- **`FrameBudget::RealTime`** (SX-Window desktop): every 256 instructions, peripherals advance by the host time that has passed, so guest timers keep their real rates at any CPU speed. Time spent rendering is made up gradually, at most 2,000 ticks per check, and a backlog above 100 ms is dropped.
+- **`FrameBudget::FastForward`** (boot, before the desktop polls the mouse): peripherals advance a fixed 8 ticks per instruction, so timer waits finish faster than real time.
+
 ---
 
 ## 4. Mixed Mode & Trap Interception (`TrapHandler`)

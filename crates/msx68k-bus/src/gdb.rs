@@ -23,7 +23,7 @@ use gdbstub::target::ext::breakpoints::{
 use gdbstub::target::{Target, TargetError, TargetResult};
 use msx68k_cpu::{BurstPolicy, CpuCore, CpuPolicy, TrackedPolicy};
 
-use crate::vm::{BusTrapHandler, FrameBudget, X68kVm};
+use crate::vm::{BusTrapHandler, FrameBudget, X68kVm, BURST_SYNC_INSTRUCTIONS};
 
 /// Size of the `g` packet payload: `D0-D7`, `A0-A7`, `SR`, `PC` as 32-bit big-endian values.
 const REGISTER_BYTES: usize = 18 * 4;
@@ -121,8 +121,6 @@ impl Registers for M68000Registers {
 struct FrameProgress {
     instructions: usize,
     elapsed_cycles: u32,
-    elapsed_ticks: u32,
-    tick_accum: usize,
 }
 
 /// Debugger state owned by the VM.
@@ -208,29 +206,17 @@ impl X68kVm {
         frame.instructions += 1;
 
         let done = match budget {
-            FrameBudget::Paced {
-                max_instructions,
-                target_ticks_10mhz,
-            } => {
-                let remaining = target_ticks_10mhz.saturating_sub(frame.elapsed_ticks);
-                let ticks = if stopped {
-                    remaining.min(64)
-                } else {
-                    frame.tick_accum += target_ticks_10mhz as usize;
-                    let step = frame.tick_accum / max_instructions.max(1);
-                    frame.tick_accum %= max_instructions.max(1);
-                    (step as u32).min(remaining)
-                };
-                frame.elapsed_ticks += ticks;
-                let stop_budget_spent = stopped && remaining == 0;
-                let done = stop_budget_spent || frame.instructions >= max_instructions;
-                let flush = if done { remaining - ticks } else { 0 };
-                self.bus.advance_peripherals(ticks + flush);
-                done
+            FrameBudget::RealTime { deadline } => {
+                frame.instructions.is_multiple_of(BURST_SYNC_INSTRUCTIONS) && {
+                    let now = Instant::now();
+                    let ticks = self.host_clock.ticks_due(now);
+                    self.bus.advance_peripherals(ticks);
+                    now >= deadline
+                }
             }
-            FrameBudget::Instructions(count) => {
+            FrameBudget::FastForward { deadline } => {
                 self.bus.advance_peripherals(if stopped { 64 } else { 8 });
-                frame.instructions >= count
+                frame.instructions.is_multiple_of(BURST_SYNC_INSTRUCTIONS) && Instant::now() >= deadline
             }
             FrameBudget::Cycles(target) if running_burst => {
                 self.bus.advance_peripherals(if stopped { 64 } else { 8 });
@@ -311,6 +297,7 @@ impl SingleThreadBase for X68kVm {
 impl SingleThreadResume for X68kVm {
     fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Infallible> {
         self.debug.single_step = false;
+        self.host_clock.rebase();
         Ok(())
     }
 
@@ -322,6 +309,7 @@ impl SingleThreadResume for X68kVm {
 impl SingleThreadSingleStep for X68kVm {
     fn step(&mut self, _signal: Option<Signal>) -> Result<(), Infallible> {
         self.debug.single_step = true;
+        self.host_clock.rebase();
         Ok(())
     }
 }
@@ -540,10 +528,7 @@ mod tests {
     use std::io::Write;
 
     const PROGRAM_PC: u32 = 0x1000;
-    const LOOP_BUDGET: FrameBudget = FrameBudget::Paced {
-        max_instructions: 1000,
-        target_ticks_10mhz: 166_667,
-    };
+    const LOOP_BUDGET: FrameBudget = FrameBudget::Cycles(1000);
 
     /// A VM spinning in `ADDQ.L #1,D0` / `BRA.S` at [`PROGRAM_PC`].
     fn loop_vm(speed_mode: CpuSpeedMode) -> X68kVm {
@@ -565,7 +550,6 @@ mod tests {
     fn debug_frame_matches_regular_execution_for_every_budget() {
         for (mode, budget) in [
             (CpuSpeedMode::Burst, LOOP_BUDGET),
-            (CpuSpeedMode::Burst, FrameBudget::Instructions(1000)),
             (CpuSpeedMode::Mhz10, FrameBudget::Cycles(10_000)),
         ] {
             let mut regular = loop_vm(mode);
@@ -591,6 +575,25 @@ mod tests {
         assert_eq!(debug.run_debug_frame(LOOP_BUDGET), None);
 
         assert_same_machine(&regular, &debug);
+    }
+
+    #[test]
+    fn timed_budgets_end_at_the_deadline_and_still_honor_breakpoints() {
+        for make in [
+            |deadline| FrameBudget::RealTime { deadline },
+            |deadline| FrameBudget::FastForward { deadline },
+        ] {
+            let mut vm = loop_vm(CpuSpeedMode::Burst);
+            let deadline = Instant::now() + Duration::from_millis(5);
+            assert_eq!(vm.run_debug_frame(make(deadline)), None);
+            assert!(Instant::now() >= deadline);
+            assert!(vm.cpu_state.d[0] > 0);
+
+            let mut vm = loop_vm(CpuSpeedMode::Burst);
+            vm.debug.add_breakpoint(PROGRAM_PC + 2);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            assert_eq!(vm.run_debug_frame(make(deadline)), Some(DebugStop::Breakpoint));
+        }
     }
 
     #[test]

@@ -3,6 +3,10 @@
 use msx68k_cpu::{CpuState, TrapResult};
 use crate::bus::X68kBus;
 
+/// Task Manager APIs through which a task gives up its turn in the cooperative scheduler.
+const TS_EVENT_AVAIL: u16 = 0xA357;
+const TS_GET_EVENT: u16 = 0xA358;
+
 /// Reserved F-Line Mixed Mode hypercall IDs (`$FE80`..=`$FE8F`).
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u16)]
@@ -97,6 +101,7 @@ impl X68kBus {
                 // Patch MOVEM.L D0-D2/A5, -(SP) with Hypercall 0xFE81 (SxMouseSync) + RTS (0x4E75)
                 self.main_ram[patch_addr..patch_addr + 4]
                     .copy_from_slice(&[0xFE, 0x81, 0x4E, 0x75]);
+                self.enable_native_gm(text_base);
 
                 if self.target_resolution.is_none()
                     && (self.sram.get(0x7E).copied().unwrap_or(0) & 0x3F) == 0x30
@@ -426,6 +431,29 @@ impl X68kBus {
             if w >= 256 && h >= 256 {
                 self.fullscreen_mode = false;
                 self.target_resolution = Some((w, h));
+            }
+        }
+    }
+
+    /// Switches resolution at a point where the running `SYS/FSX.X` is in a consistent state.
+    ///
+    /// `apply_screen_resolution` rewrites window and region records that kernel routines may be
+    /// in the middle of using, so once `SYS/FSX.X` is up the change waits for a task to take its
+    /// turn in the cooperative scheduler.
+    pub fn request_screen_resolution(&mut self, width: u32, height: u32) {
+        if self.native_gm_text_base.is_some() {
+            self.pending_resolution = Some((width, height));
+        } else {
+            self.apply_screen_resolution(width, height);
+        }
+    }
+
+    /// Applies a requested resolution if a task is yielding through `opcode`.
+    #[inline]
+    pub(crate) fn apply_pending_resolution(&mut self, state: &CpuState, opcode: u16) {
+        if matches!(opcode, TS_EVENT_AVAIL | TS_GET_EVENT) && !state.is_supervisor() {
+            if let Some((width, height)) = self.pending_resolution.take() {
+                self.apply_screen_resolution(width, height);
             }
         }
     }

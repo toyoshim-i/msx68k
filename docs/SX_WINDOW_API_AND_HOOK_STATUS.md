@@ -193,7 +193,7 @@ graph TD
 | **Text Manager** | `TXM` / `TM` | `$A30A`–`$A49D` | 114 | Multi-line text editor widgets, cursor navigation, dynamic `destRect` line-wrapping, fixed-point text scaling (`$A488` `TMScaleSet`), selection highlighting. |
 | **Task Manager** | `TKM` / `TS` | `$A34C`–`$A4C0` | 157 | Cooperative process scheduler, IPC messages, inter-task drag-and-drop (`TSPutDrag`). |
 | **Print Manager** | `PRM` | `$A4E0`–`$A4FE` | 31 | Hardcopy printer drivers, raster spooling, page layout. |
-| **Font Manager** | `IFM` / `FM` | `$A500`–`$A516` | 23 | Outline font engine (`IFM.X`): Bezier curve evaluation, polygon triangulation, font caching, and `$A198` `GMDrawText` interception. |
+| **Font Manager** | `IFM` / `FM` | `$A500`–`$A516` | 23 | Outline font engine (`IFM.X`): Bezier curve evaluation, polygon triangulation, font caching, and `$A198` `GMFontInfo` interception. |
 | **Semaphore Manager** | `SMM` | `$A5F0`–`$A5F3` | 4 | Inter-task synchronization semaphores and critical section locks. |
 | **Color Manager** | `CLM` | `$A600`–`$A61F` | 31 | 16-color / 256-color palette allocation, color lookup tables, color dialogs. |
 | **Kernel Internal / Private** | `SYS` | Various | 204 | Private kernel routines embedded within the table for inter-subsystem dispatch. |
@@ -769,7 +769,7 @@ A crucial discovery is that all Graph Man drawing primitives dispatch through an
 
 | Table Offset | Function Pointer | Primitive Name | Description & Functional Role |
 | :---: | :---: | :--- | :--- |
-| **`+0x00`** | `text_base + 0x02921C` | `Dot` / `SetPixel` | Plots a single pixel at `(X, Y)`. |
+| **`+0x00`** | `text_base + 0x02921C` | Text | Reached from `GMDrawStrL` (`$A190`) and `GMDrawStr` (`$A191`), confirmed by tracing live calls. |
 | **`+0x04`** | `text_base + 0x0206DC` | `Line` | Draws a line between pen location and target `(X, Y)`. |
 | **`+0x08`** | `text_base + 0x020B68` | `Rect` | Frames or fills a rectangular area (`GMFillRect`, `GMFrameRect`). |
 | **`+0x0C`** | `text_base + 0x021AD8` | `RRect` | Outlines or fills a rounded rectangle with corner radii. |
@@ -778,7 +778,7 @@ A crucial discovery is that all Graph Man drawing primitives dispatch through an
 | **`+0x18`** | `text_base + 0x0216D4` | `Poly` | Renders a polygon described by a vertex list. |
 | **`+0x1C`** | `text_base + 0x0229A6` | `Rgn` | Fills or inverts an arbitrary multi-boundary `Region`. |
 | **`+0x20`** | `text_base + 0x023548` | `Bits` / `CopyBits`| High-speed bitmap block transfer between surfaces. |
-| **`+0x24`** | `text_base + 0x034284` | `Text` | Renders text glyphs using active font face into bitmap. |
+| **`+0x24`** | `text_base + 0x034284` | Unverified | Not called during desktop, window open, or window drag traces. |
 | **`+0x28`** | `text_base + 0x0291A2` | `DeviceSync` | Flushes pending drawing commands to hardware rasterizer. |
 | **`+0x2C`** | `text_base + 0x02AA00` | `DeviceCustom` | Device-specific extension hook. |
 
@@ -818,6 +818,9 @@ And in the multi-type pixel offset unpacker (`text_base + 0x034724`):
 
 ### 5.5 Phase 2B Implementation: Minimal Chokepoints to Break TVRAM Barrier
 Because the original X68000 24-bit (`16 MB`) physical address space (`$000000`–`$FFFFFF`) has no room for an extended guest VRAM and the 24-bit `HD63450` DMAC cannot address above `$FFFFFF`, **msx68k** provides two complementary architectures to break the 1024×1024 TVRAM barrier:
+> [!IMPORTANT]
+> The design decision is to replace the Graph Manager natively. The extended planar framebuffer below is only a transitional store while APIs migrate; its "Approach B" label does not match the option chosen when this work was planned, which was the native offload called Approach A here. Native replacement happens at the A-Line API boundary (Section 5.7).
+
 1. **Approach A (Host Direct Acceleration)**: Native Mixed Mode hypercalls (`$FE89..$FE93`) in the Graphic Device Driver Table (`text_base + 0x5549E`).
 2. **Approach B (Extended Planar Framebuffer - Implemented & Verified)**: Extended 32-bit linear planar framebuffer mapped at `EXT_TVRAM_BASE = $1000_0000`.
 
@@ -897,6 +900,16 @@ To persist display resolutions across cold boots and emulator restarts:
 
 ---
 
+### 5.7 Native Graph Manager at the A-Line API Boundary
+`BusTrapHandler::on_a_line` hands `$Axxx` calls to [`native_gm`](../crates/msx68k-bus/src/native_gm.rs) before the guest dispatcher runs. No guest memory is patched or consumed, and any API or case without a native implementation returns `PassToVector` and runs the original `SYS/FSX.X` routine. Tracing window operations confirmed that `SYS/FSX.X` reaches its drawing procedures through A-Line calls as well, so this boundary also covers internal callers.
+
+- **Activation**: enabled from the `SYS/FSX.X` load tracker after checking that the procedure table holds the expected relocated `Rect` pointer. Only screens in `ext_tvram` are handled, so resolutions up to 1024×1024 stay on the guest routines.
+- **Calling convention**: arguments start at `A7`. Results go in `D0.L` and the condition codes, because the dispatcher copies the handler's CCR back to the caller.
+- **Records** (`SXGRAPH.H`): `Graph` holds `procs` at `+12`, `visible` at `+16`, `clipping` at `+20`, `drawLvl` at `+24`, `penMode` at `+26` (kind in the high byte, operation in the low byte), `workKind` at `+44`, `fgColor` at `+50`, and `bgColor` at `+52`. A `workKind` of 2 or 3 records drawing and is left to the guest.
+- **`Region` rows**: a record of size 12 is a bare rectangle. Otherwise each row is a Y value followed by X edges terminated by `32767`, and each row toggles those edges against the previous row. A Y of `32767` ends the record.
+- **Cursor**: the guest hides the software cursor around drawing. Native calls near either cursor position are currently left to the guest.
+- **Verification**: native and guest `GMFillRect` were run on identical live desktop and window ports over rectangle, pen kind, operation, and color combinations, and matched in VRAM, data registers, and address registers other than `A0`.
+
 ## 6. Master Hook & Patch Tracking Table
 
 This living status table tracks all active and planned Mixed Mode hypercalls, module patches, and A-Line hooks across the **msx68k** project:
@@ -919,6 +932,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
 | **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
 | **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Low-Level Screen Mode Switch Hypercall**: Fallback hypercall superseded by `IOCS _CRTMOD $50`. Directly invokes `apply_screen_resolution` to update CRTC, SRAM, TVRAM/EXT_TVRAM, and resident `SYS/FSX.X` kernel structures. |
+| **`$A173`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFillRect` | **`[x] Hooked`** | **Native Solid Fill**: Screens above 1024×1024 only. Patterned pens, recording, and drawing near the cursor stay on the guest routine. |
 | **`$FE89`** | `SYS/FSX.X`<br/>`text_base + 0x5549E` | `00 02 92 1C` | Driver Table +0x00 (`Dot`) | **`[ ] Planned (Phase 2B)`** | **Native Dot Hypercall**: Hardware-accelerated pixel plot directly onto `wgpu` surface. |
 | **`$FE8A`** | `SYS/FSX.X`<br/>`text_base + 0x554A2` | `00 02 06 DC` | Driver Table +0x04 (`Line`) | **`[ ] Planned (Phase 2B)`** | **Native Line Hypercall**: Hardware-accelerated line primitive rendered via `wgpu`. |
 | **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x554A6` | `00 02 0B 68` | Driver Table +0x08 (`Rect`) | **`[ ] Planned (Phase 2B)`** | **Native Rect Hypercall**: High-speed solid and patterned rectangle fill/outline bypassing TVRAM plane loops. |
@@ -1144,8 +1158,8 @@ When resolution expands live:
        - This is purely Sharpen application-level ruler logic, not an emulator, CRTC, or operating system bug. Users wishing to utilize wide editing windows in high-resolution modes can configure the ruler via `-MD<dots>` or `ESC+#`.
      - **Kernel Binary Invariance**: `SYS/FSX.X` TextEdit remains completely unpatched and unmodified; source-of-truth configuration of screen mode presets and `menuGrafPort` maintains pristine kernel binary integrity without blanket binary patches.
    - **Font Manager (`IFM.X`) Vector Table (`$A500..$A516`, `$A198`) & Burst Frame Pacing**:
-     - `IFM.X` installs 23 A-line trap vectors (`$A500` through `$A516`) for outline font handling (font open/close, metrics, Bezier curve evaluation, polygon triangulation, and glyph caching) and hooks `$A198` (`GMDrawText`) to intercept and render outline fonts into any active `GrafPort`.
-     - Outline font path rendering performs intensive floating-point and fixed-point Bezier subdivision. In `msx68k-app`, `CpuSpeedMode::Burst` executes up to `1,000,000` instructions per 1/60s frame while maintaining exact `TARGET_TICKS_60HZ` (166,667 cycles) peripheral pacing, accelerating `IFM.X` font rendering by 4×–5× without breaking V-Blank or timer IRQ accuracy.
+     - `IFM.X` installs 23 A-line trap vectors (`$A500` through `$A516`) for outline font handling (font open/close, metrics, Bezier curve evaluation, polygon triangulation, and glyph caching) and hooks `$A198` (`GMFontInfo`) to intercept and render outline fonts into any active `GrafPort`.
+     - Outline font path rendering performs intensive floating-point and fixed-point Bezier subdivision on the 68000. In `msx68k-app`, `CpuSpeedMode::Burst` runs guest code flat out on the main thread for each host frame, leaving a small reserve for rendering, while peripherals follow host time so V-Blank and timer IRQs keep their real rates.
    - **Soft Reset vs. CPU Peripheral Reset & Storage Persistence**:
      - On standard 68000 systems, executing the `RESET` opcode (`0x4E70`) asserts the external peripheral reset pin (resetting DMAC, MFP, OPM, SCC, and FDC) but preserves CPU registers, memory mapping, CRTC geometry, and extended framebuffer state.
      - Cold/soft reboots (`X68kBus.soft_reset()`, invoked on `F12` or emulator reset) re-mirror IPLROM vectors to `$000000..$000007`, reset CRTC/VICON, and reset extended desktop configuration.

@@ -104,6 +104,9 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(sc)
 }
 
+/// Host time left free each frame for rendering while Burst runs flat out.
+const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
+
 #[derive(Debug, Clone)]
 struct AppArgs {
     ipl_path: PathBuf,
@@ -495,19 +498,16 @@ impl Msx68kApp {
     fn frame_budget(&self) -> FrameBudget {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
+                let deadline = self.next_frame_deadline - BURST_RENDER_RESERVE;
                 if self.vm.bus.is_mouse_polling_active() {
-                    // Once the desktop is up and actively polling the mouse, pace peripheral
-                    // clock to exact 1/60s frame time (166,667 10MHz ticks) so guest timers
-                    // (Timer C, V-Blank, double-click speed) match real wall-clock time.
-                    const TARGET_TICKS_60HZ: u32 = 10_000_000 / 60;
-                    FrameBudget::Paced {
-                        max_instructions: 1_000_000,
-                        target_ticks_10mhz: TARGET_TICKS_60HZ,
-                    }
+                    // Once the desktop is up and actively polling the mouse, peripherals follow
+                    // host time so guest timers (Timer C, V-Blank, double-click speed) match
+                    // real wall-clock time.
+                    FrameBudget::RealTime { deadline }
                 } else {
                     // Fast-forward through boot and splash screen timer waits until the
                     // desktop starts polling the mouse.
-                    FrameBudget::Instructions(1_000_000)
+                    FrameBudget::FastForward { deadline }
                 }
             }
             mode => {
@@ -738,8 +738,8 @@ impl ApplicationHandler for Msx68kApp {
                                     _ => (768, 512),
                                 };
                                 self.vm.bus.fullscreen_mode = false;
-                                self.vm.bus.apply_screen_resolution(next_w, next_h);
-                                println!("F5: Switched resolution to {}x{}", next_w, next_h);
+                                self.vm.bus.request_screen_resolution(next_w, next_h);
+                                println!("F5: Requested resolution {}x{}", next_w, next_h);
                                 return;
                             }
                             KeyCode::F12 => {
