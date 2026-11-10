@@ -123,6 +123,8 @@ pub struct X68kBus {
     pub(crate) native_gm_text_base: Option<u32>,
     /// Whether the host draws the mouse cursor in place of `SYS/FSX.X`.
     pub(crate) host_cursor: bool,
+    /// A native call stalled until a V-DISP falling edge, as `(pc, falls to reach)`.
+    pub(crate) vsync_wait: Option<(u32, u64)>,
     /// Resolution waiting for a safe point in the guest scheduler.
     pub(crate) pending_resolution: Option<(u32, u32)>,
     /// Allows native Graph Manager APIs; clear to run everything through the guest routines.
@@ -195,6 +197,7 @@ impl X68kBus {
             ext_tvram: None,
             native_gm_text_base: None,
             host_cursor: false,
+            vsync_wait: None,
             pending_resolution: None,
             native_gm_enabled: true,
             native_gm_calls: 0,
@@ -372,6 +375,7 @@ impl X68kBus {
         self.native_gm_text_base = None;
         self.pending_resolution = None;
         self.host_cursor = false;
+        self.vsync_wait = None;
         self.ext_tvram_row_bytes = 0;
         self.ext_tvram_plane_bytes = 0;
         self.saved_ext_tvram = None;

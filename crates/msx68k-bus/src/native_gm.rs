@@ -11,6 +11,9 @@ use crate::bus::{X68kBus, EXT_TVRAM_BASE};
 const SX_GET_DISP_RECT: u16 = 0xA432;
 const GM_FRAME_RECT: u16 = 0xA172;
 const GM_FILL_RECT: u16 = 0xA173;
+const GM_INVERT_RECT: u16 = 0xA1A3;
+/// Unnamed in the official headers: draws an animated dashed frame and waits for V-DISP.
+const GM_MARCHING_RECT: u16 = 0xA1A4;
 const GM_FILL_RGN: u16 = 0xA17B;
 const GM_COPY: u16 = 0xA17F;
 
@@ -299,6 +302,8 @@ impl X68kBus {
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
             GM_COPY => self.gm_copy(state, text_base),
+            GM_INVERT_RECT => self.gm_invert_rect(state, text_base),
+            GM_MARCHING_RECT => self.gm_marching_rect(state, text_base),
             _ => None,
         };
         match handled {
@@ -506,6 +511,142 @@ impl X68kBus {
         };
         let reachable = bitmap.is_screen() || (bitmap.base as usize) < self.main_ram.len();
         reachable.then_some(bitmap)
+    }
+
+    fn gm_invert_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let rect_ptr = self.peek_u32(state.a[7])?;
+        let style = self.peek_u16(state.a[7] + 4)?;
+        self.dashed_frame(text_base, rect_ptr, style, false)?;
+        return_result(state, 0);
+        Some(())
+    }
+
+    /// Draws the frame with the stored dash style, advances the style for the next call, and
+    /// holds the caller until a V-DISP falling edge as the guest routine does by polling `GPIP`.
+    fn gm_marching_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let pc = state.ir_pc;
+        if let Some((waiting_pc, target)) = self.vsync_wait {
+            if waiting_pc == pc {
+                if self.mfp.vdisp_falls >= target {
+                    self.vsync_wait = None;
+                } else {
+                    state.pc = pc;
+                }
+                return Some(());
+            }
+        }
+
+        let rect_ptr = self.peek_u32(state.a[7])?;
+        let style_ptr = self.peek_u32(state.a[7] + 4)?;
+        let style = self.peek_u16(style_ptr)?;
+        if !(style_ptr as usize + 2 <= self.main_ram.len()) {
+            return None;
+        }
+        self.dashed_frame(text_base, rect_ptr, style, true)?;
+        let rotated = style.rotate_right(1).to_be_bytes();
+        self.main_ram[style_ptr as usize..style_ptr as usize + 2].copy_from_slice(&rotated);
+        return_result(state, 0);
+
+        // The guest waits while V-DISP is high, then while it is low, then while it is high.
+        let falls = if self.mfp.vdisp_active() { 2 } else { 1 };
+        self.vsync_wait = Some((pc, self.mfp.vdisp_falls + falls));
+        state.pc = pc;
+        Some(())
+    }
+
+    /// Draws a one-pixel rectangle outline with a 16-bit dash `style`, clipped to the current
+    /// bitmap only, by XOR or, when `set`, by writing the dash bits to every active plane.
+    fn dashed_frame(&mut self, text_base: u32, rect_ptr: u32, style: u16, set: bool) -> Option<()> {
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        if (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0 {
+            return Some(());
+        }
+        let bitmap_ptr = self.peek_u32(graph + GRAPH_BITMAP)?;
+        let (bitmap, active_pages) = self.peek_planar_target(bitmap_ptr)?;
+        if bitmap.is_screen() && !self.host_cursor {
+            return None;
+        }
+        let rect = self.peek_rect(rect_ptr)?;
+        let area = rect.intersect(bitmap.rect);
+        if area.is_empty() {
+            return Some(());
+        }
+
+        // Rotation follows the guest, which takes it from the low word of the bitmap pointer.
+        let rotation = (rect.left.wrapping_sub(bitmap_ptr as u16 as i16) & 15) as u32;
+        let reversed = style.reverse_bits();
+        let top = style.rotate_right(rotation);
+        let bottom = reversed.rotate_right(rotation);
+
+        let mut pixels = Vec::new();
+        let row = |y: i16, pattern: u16, pixels: &mut Vec<(i16, i16, bool)>| {
+            for x in area.left..area.right {
+                let physical = (x as i32 - bitmap.rect.left as i32) & 15;
+                pixels.push((x, y, (pattern >> (15 - physical)) & 1 != 0));
+            }
+        };
+        if area.top == rect.top {
+            row(area.top, top, &mut pixels);
+        }
+        let height = rect.bottom as i32 - rect.top as i32 - 2;
+        if height >= 0 {
+            if height > 0 {
+                let start = area.top + (area.top == bitmap.rect.top) as i16;
+                let end = area.bottom - (area.bottom == bitmap.rect.bottom) as i16;
+                let skip = (start - area.top) as i32;
+                let column = |x: i16, pattern: u16, pixels: &mut Vec<(i16, i16, bool)>| {
+                    for (k, y) in (start..end).enumerate() {
+                        let index = (skip + k as i32) & 15;
+                        pixels.push((x, y, (pattern >> (15 - index)) & 1 != 0));
+                    }
+                };
+                if area.left == rect.left {
+                    column(area.left, reversed, &mut pixels);
+                }
+                if rect.right - rect.left - 1 != 0 && area.right == rect.right {
+                    column(area.right - 1, style, &mut pixels);
+                }
+            }
+            if area.bottom == rect.bottom {
+                row(area.bottom - 1, bottom, &mut pixels);
+            }
+        }
+
+        for (x, y, on) in pixels {
+            let px = (x as i32 - bitmap.rect.left as i32) as u32;
+            let py = (y as i32 - bitmap.rect.top as i32) as u32;
+            let bit = 0x80u8 >> (px & 7);
+            for plane in 0..4 {
+                if active_pages & (1 << plane) == 0 {
+                    continue;
+                }
+                let addr = bitmap.row_addr(plane, py) + (px >> 3);
+                let current = self.peek_u8(addr)?;
+                let value = match (set, on) {
+                    (false, true) => current ^ bit,
+                    (false, false) => current,
+                    (true, true) => current | bit,
+                    (true, false) => current & !bit,
+                };
+                self.store_plane_byte(addr, value);
+            }
+        }
+        Some(())
+    }
+
+    /// Reads a planar `Bitmap` in Main RAM or on the screen together with its active planes.
+    fn peek_planar_target(&self, addr: u32) -> Option<(PlanarBitmap, u16)> {
+        if self.peek_u16(addr + BITMAP_TYPE)? != 0 {
+            return None;
+        }
+        let bitmap = PlanarBitmap {
+            rect: self.peek_rect(addr + BITMAP_RECT)?,
+            base: self.peek_u32(addr + BITMAP_BASE)?,
+            line: self.peek_u16(addr + BITMAP_LINE)? as u32,
+            page: self.peek_u32(addr + BITMAP_PAGE)?,
+        };
+        let reachable = bitmap.is_screen() || (bitmap.base as usize) < self.main_ram.len();
+        reachable.then_some((bitmap, self.peek_u16(addr + BITMAP_ACTIVE_PAGES)?))
     }
 
     fn gm_frame_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
@@ -1095,6 +1236,50 @@ mod tests {
         write_u32(&mut bus, STACK + 8, SOURCE_RECT);
         write_u32(&mut bus, STACK + 12, DEST_RECT);
         assert_eq!(bus.handle_native_gm(&mut state, GM_COPY), TrapResult::PassToVector);
+    }
+
+    #[test]
+    fn inverts_a_dashed_outline_without_touching_the_inside() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        write_rect(&mut bus, RECT_ARG, [0, 0, 4, 3]);
+        write_u32(&mut bus, STACK, RECT_ARG);
+        write_u16(&mut bus, STACK + 4, 0xFFFF);
+        bus.host_cursor = true;
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_INVERT_RECT),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        for y in 0..3 {
+            for x in 0..4 {
+                let edge = y == 0 || y == 2 || x == 0 || x == 3;
+                assert_eq!(pixel(&bus, x, y), if edge { 0xF } else { 0 }, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn marching_frame_holds_the_caller_until_the_display_period_ends() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const STYLE: u32 = 0x1B00;
+        write_rect(&mut bus, RECT_ARG, [0, 0, 4, 3]);
+        write_u32(&mut bus, STACK, RECT_ARG);
+        write_u32(&mut bus, STACK + 4, STYLE);
+        write_u16(&mut bus, STYLE, 0x8001);
+        bus.host_cursor = true;
+        state.ir_pc = 0x2000;
+        state.pc = 0x2002;
+
+        bus.handle_native_gm(&mut state, GM_MARCHING_RECT);
+        assert_eq!(state.pc, 0x2000, "the call repeats while waiting");
+        assert_eq!(bus.peek_u16(STYLE), Some(0xC000));
+        let (_, target) = bus.vsync_wait.unwrap();
+
+        bus.mfp.vdisp_falls = target;
+        state.pc = 0x2002;
+        bus.handle_native_gm(&mut state, GM_MARCHING_RECT);
+        assert_eq!(state.pc, 0x2002, "the call completes after the edge");
+        assert_eq!(bus.vsync_wait, None);
+        assert_eq!(bus.peek_u16(STYLE), Some(0xC000), "the style advances once per call");
     }
 
     #[test]

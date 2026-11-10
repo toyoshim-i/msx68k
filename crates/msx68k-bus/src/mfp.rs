@@ -70,6 +70,8 @@ impl MfpTimer {
 pub struct Mfp {
     /// General Purpose I/O input pin levels (`GPIP`, `$E88001`).
     gpip: u8,
+    /// Number of V-DISP falling edges seen on `GPIP` bit 4.
+    pub(crate) vdisp_falls: u64,
     /// Active Edge Register (`AER`, `$E88003`).
     aer: u8,
     /// Data Direction Register (`DDR`, `$E88005`).
@@ -131,6 +133,7 @@ impl Mfp {
             // Bit 7 (HSYNC=1), Bit 6 (RINT=1 inactive), Bit 5 (1), Bit 4 (VDISP=0),
             // Bit 3 (OPMIRQ=1 inactive), Bit 2 (POWER=0), Bit 1 (EXPWON=1), Bit 0 (ALARM=0)
             gpip: 0b1110_1010,
+            vdisp_falls: 0,
             aer: 0x00,
             ddr: 0x00,
             ier: 0x0000,
@@ -226,6 +229,9 @@ impl Mfp {
         // Bit 4: V-DISP (1 = active display, 0 = V-Blank)
         let prev_vdisp = (self.gpip & 0x10) != 0;
         self.set_gpip_bit(4, sync.v_disp, Self::CH_GPIP4_VDISP);
+        if sync.v_disp_fell || (prev_vdisp && !sync.v_disp) {
+            self.vdisp_falls = self.vdisp_falls.wrapping_add(1);
+        }
 
         // Timer A Event Count mode (TACR bits 3..0 == 0b1000) counts V-DISP edges matching AER bit 4
         if (self.timers[0].control & 0x0F) == 0x08 && prev_vdisp != sync.v_disp {
@@ -236,6 +242,11 @@ impl Mfp {
                 self.request_interrupt(Self::CH_TIMER_A);
             }
         }
+    }
+
+    /// Returns `true` while `GPIP` bit 4 reports the active display period.
+    pub(crate) fn vdisp_active(&self) -> bool {
+        self.gpip & 0x10 != 0
     }
 
     /// Updates the OPM (`YM2151`) interrupt pin on `GPIP` bit 3 (active-low).
