@@ -4,7 +4,7 @@
 //! here one at a time. Every API returns [`TrapResult::PassToVector`] for cases it does not
 //! support, which leaves them to the original `SYS/FSX.X` code.
 
-use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_Z};
+use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
 
 use crate::bus::{X68kBus, EXT_TVRAM_BASE};
 
@@ -14,8 +14,11 @@ const GM_FILL_RECT: u16 = 0xA173;
 const GM_INVERT_RECT: u16 = 0xA1A3;
 /// Unnamed in the official headers: draws an animated dashed frame and waits for V-DISP.
 const GM_MARCHING_RECT: u16 = 0xA1A4;
+const GM_FRAME_RGN: u16 = 0xA17A;
 const GM_FILL_RGN: u16 = 0xA17B;
 const GM_COPY: u16 = 0xA17F;
+const GM_COPY_MASK: u16 = 0xA180;
+const GM_PLOT_IMG: u16 = 0xA182;
 const GM_PUT_RIMG: u16 = 0xA183;
 const GM_DUP_HRIMG: u16 = 0xA188;
 const GM_DUP_VRIMG: u16 = 0xA189;
@@ -105,11 +108,13 @@ impl Rect {
 
 /// The area a fill covers beyond the clipping regions.
 #[derive(Debug, Copy, Clone)]
-enum FillShape {
+enum FillShape<'a> {
     Rect,
     Region(u32),
     /// A rectangle with this hole left undrawn.
     Frame { hole: Rect },
+    /// A shape worked out on the host.
+    Spans(&'a RowSpans),
 }
 
 /// Row-by-row reader of a `Region`, whose rows toggle the set of covered X intervals.
@@ -158,8 +163,10 @@ impl PlanarBitmap {
 }
 
 /// A `GMCopy` style transfer between two planar bitmaps.
-struct Transfer {
+struct Transfer<'a> {
     source: PlanarBitmap,
+    /// Host-built source pixels addressed from offset 0 in place of guest memory at `source.base`.
+    source_bits: Option<&'a [u8]>,
     dest: PlanarBitmap,
     /// The destination `Bitmap` record, compared with the current graph's to decide clipping.
     dest_ptr: u32,
@@ -167,7 +174,18 @@ struct Transfer {
     dest_rect: Rect,
     mode: u16,
     mask_handle: u32,
+    /// A one-plane bitmap that selects which pixels are copied, as `GMCopyMask` takes.
+    bit_mask: Option<BitMask<'a>>,
     planes: u16,
+}
+
+/// The mask plane of a `GMCopyMask` style transfer.
+struct BitMask<'a> {
+    bitmap: PlanarBitmap,
+    bits: Option<&'a [u8]>,
+    /// Mask coordinates of the destination rectangle's top left.
+    left: i16,
+    top: i16,
 }
 
 /// Reads the eight bits of packed `bits` starting at `bit_offset`.
@@ -316,8 +334,11 @@ impl X68kBus {
         let handled = match opcode {
             GM_FRAME_RECT => self.gm_frame_rect(state, text_base),
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
+            GM_FRAME_RGN => self.gm_frame_rgn(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
             GM_COPY => self.gm_copy(state, text_base),
+            GM_COPY_MASK => self.gm_copy_mask(state, text_base),
+            GM_PLOT_IMG => self.gm_plot_img(state, text_base),
             GM_PUT_RIMG => self.gm_put_rimg(state, text_base),
             GM_DUP_HRIMG => self.gm_dup_hrimg(state, text_base),
             GM_DUP_VRIMG => self.gm_dup_vrimg(state, text_base),
@@ -359,6 +380,11 @@ impl X68kBus {
         let mode = self.peek_u16(args + 16)?;
         let mask_handle = self.peek_u32(args + 18)?;
 
+        let same_size = source_rect.right - source_rect.left == dest_rect.right - dest_rect.left
+            && source_rect.bottom - source_rect.top == dest_rect.bottom - dest_rect.top;
+        if !same_size {
+            return None;
+        }
         let (source, source_pages) = self.peek_planar_target(source_ptr)?;
         let (dest, dest_pages) = self.peek_planar_target(dest_ptr)?;
         if source_pages != dest_pages {
@@ -366,15 +392,220 @@ impl X68kBus {
         }
         let transfer = Transfer {
             source,
+            source_bits: None,
             dest,
             dest_ptr,
             source_rect,
             dest_rect,
             mode,
             mask_handle,
+            bit_mask: None,
             planes: dest_pages,
         };
         self.copy_bits(state, text_base, transfer)
+    }
+
+    /// `GMCopyMask`: copies the pixels whose `mask` bit is set, over the mask rectangle's size.
+    fn gm_copy_mask(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let args = state.a[7];
+        let source_ptr = self.peek_u32(args)?;
+        let dest_ptr = self.peek_u32(args + 4)?;
+        let mask_ptr = self.peek_u32(args + 8)?;
+        let source_rect = self.peek_rect(self.peek_u32(args + 12)?)?;
+        let x = self.peek_u16(args + 16)? as i16;
+        let y = self.peek_u16(args + 18)? as i16;
+        let mask_rect = self.peek_rect(self.peek_u32(args + 20)?)?;
+
+        let (source, _) = self.peek_planar_target(source_ptr)?;
+        let (dest, planes) = self.peek_planar_target(dest_ptr)?;
+        let mask = self.peek_mask_bitmap(mask_ptr)?;
+        // The guest counts the words to copy from the source extent but takes the pixels within
+        // them from the destination alone, so a source narrower than the mask also draws past
+        // its edge, and far enough to overrun the guest's own row buffer.
+        if source_rect.left < source.rect.left
+            || source_rect.right > source.rect.right
+            || source_rect.right.wrapping_sub(source_rect.left) < mask_rect.right.wrapping_sub(mask_rect.left)
+        {
+            return None;
+        }
+        let right = x.checked_add(mask_rect.right.wrapping_sub(mask_rect.left))?;
+        let bottom = y.checked_add(mask_rect.bottom.wrapping_sub(mask_rect.top))?;
+        let transfer = Transfer {
+            source,
+            source_bits: None,
+            dest,
+            dest_ptr,
+            source_rect,
+            dest_rect: Rect {
+                left: x,
+                top: y,
+                right,
+                bottom,
+            },
+            mode: 0,
+            mask_handle: 0,
+            bit_mask: Some(BitMask {
+                bitmap: mask,
+                bits: None,
+                left: mask_rect.left,
+                top: mask_rect.top,
+            }),
+            planes,
+        };
+        self.copy_masked(state, text_base, transfer)
+    }
+
+    /// Runs a `GMCopyMask` transfer, which into a hidden current graph draws nothing and
+    /// reports whether the source rectangle meets the source bitmap.
+    fn copy_masked(&mut self, state: &mut CpuState, text_base: u32, transfer: Transfer) -> Option<()> {
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let mut reach = transfer.dest_rect.intersect(transfer.dest.rect);
+        if self.peek_u32(graph + GRAPH_BITMAP)? == transfer.dest_ptr {
+            if (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0 {
+                let visible = !transfer.source_rect.intersect(transfer.source.rect).is_empty();
+                return_result(state, visible as u32);
+                state.set_flag(SR_N, true);
+                state.set_flag(SR_Z, false);
+                return Some(());
+            }
+            let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
+            let clipping = self.peek_region(graph + GRAPH_CLIPPING)?;
+            reach = reach
+                .intersect(self.peek_rect(graph + GRAPH_RECT)?)
+                .intersect(self.peek_region_bounds(visible)?)
+                .intersect(self.peek_region_bounds(clipping)?);
+        }
+        self.copy_bits(state, text_base, transfer)?;
+        if !reach.is_empty() {
+            // Past the destination clipping, the guest ends on the `subq` that counts down its
+            // cursor shielding to -1.
+            for flag in [SR_X, SR_N, SR_C] {
+                state.set_flag(flag, true);
+            }
+            state.set_flag(SR_Z, false);
+        }
+        Some(())
+    }
+
+    /// `GMPlotImg`: draws an icon image through its mask in one of the shading styles.
+    ///
+    /// Like the guest, this builds a source with as many planes as the image or the current
+    /// bitmap has, whichever is more, and copies it with `GMCopyMask` over those planes.
+    fn gm_plot_img(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let data = self.peek_u32(state.a[7])?;
+        let rect = self.peek_rect(self.peek_u32(state.a[7] + 4)?)?;
+        let mut pages = self.peek_u8(state.a[7] + 8)? as u32;
+        let style = self.peek_u8(state.a[7] + 9)?;
+        if pages >= 4 || style >= 10 {
+            return_result(state, u32::MAX);
+            return Some(());
+        }
+        if pages == 0 {
+            pages = 2;
+        }
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let dest_ptr = self.peek_u32(graph + GRAPH_BITMAP)?;
+        let active = self.peek_u16(dest_ptr + BITMAP_ACTIVE_PAGES)? & 15;
+        if active == 0 {
+            return_result(state, pages);
+            return Some(());
+        }
+        let total = pages.max(16 - active.leading_zeros());
+        let width = rect.right.wrapping_sub(rect.left);
+        let height = rect.bottom.wrapping_sub(rect.top);
+        if width <= 0 || height <= 0 {
+            return_result(state, rect.left as i32 as u32);
+            return Some(());
+        }
+
+        let line = ((width as u32 + 15) >> 4) * 2;
+        let page = (line * height as u32) as usize;
+        let image = data as usize;
+        let given_mask = image + pages as usize * page;
+        let guest = self.main_ram.get(image..given_mask + page)?;
+        let plane = |index: usize| &guest[index * page..(index + 1) * page];
+        let given_mask = &guest[pages as usize * page..];
+        let words_per_row = line as usize / 2;
+        // Applies `op` with a 16-bit pattern that `next` advances after each row.
+        let patterned = |bits: &[u8], first: u16, next: fn(u16) -> u16, op: fn(u16, u16) -> u16| {
+            let mut out = Vec::with_capacity(bits.len());
+            let mut pattern = first;
+            for row in bits.chunks(words_per_row * 2) {
+                for word in row.chunks(2) {
+                    let value = op(u16::from_be_bytes([word[0], word[1]]), pattern);
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+                pattern = next(pattern);
+            }
+            out
+        };
+        let alternate: fn(u16) -> u16 = |pattern| !pattern;
+        let and: fn(u16, u16) -> u16 = |value, pattern| value & pattern;
+        let or: fn(u16, u16) -> u16 = |value, pattern| value | pattern;
+
+        // Planes past the image's are clear except the fourth, which is set.
+        let mut source = vec![0u8; total as usize * page];
+        if total == 4 && pages < 4 {
+            source[3 * page..].fill(0xFF);
+        }
+        let mut mask = given_mask.to_vec();
+        let background = self.peek_u16(graph + GRAPH_BG_COLOR)?;
+        for index in 0..pages as usize {
+            let out: Vec<u8> = match style {
+                0 | 6 => plane(index).to_vec(),
+                1 | 7 if index < 2 => plane(index).iter().map(|byte| !byte).collect(),
+                1 | 7 => plane(index).to_vec(),
+                2 if index < 2 => patterned(plane(index), 0xAAAA, alternate, or),
+                2 | 3 => patterned(plane(index), 0x5555, alternate, and),
+                4 | 5 => vec![if background & (1 << index) != 0 { 0xFF } else { 0 }; page],
+                8 => patterned(given_mask, 0xAAAA, |pattern| pattern, and),
+                _ => patterned(given_mask, 0xDDDD, |pattern| pattern.rotate_right(2), and),
+            };
+            source[index * page..(index + 1) * page].copy_from_slice(&out);
+        }
+        if matches!(style, 6 | 7) {
+            mask = patterned(given_mask, 0xAAAA, alternate, and);
+        }
+
+        let (dest, _) = self.peek_planar_target(dest_ptr)?;
+        let image_rect = Rect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let image_bitmap = PlanarBitmap {
+            rect: image_rect,
+            base: 0,
+            line,
+            page: page as u32,
+        };
+        let transfer = Transfer {
+            source: image_bitmap,
+            source_bits: Some(&source),
+            dest,
+            dest_ptr,
+            source_rect: image_rect,
+            dest_rect: Rect {
+                left: rect.left,
+                top: rect.top,
+                right: rect.left.wrapping_add(width),
+                bottom: rect.top.wrapping_add(height),
+            },
+            mode: 0,
+            mask_handle: 0,
+            bit_mask: Some(BitMask {
+                bitmap: image_bitmap,
+                bits: Some(&mask),
+                left: 0,
+                top: 0,
+            }),
+            planes: [0x3, 0x1, 0x3, 0x7, 0xF][total as usize],
+        };
+        self.copy_masked(state, text_base, transfer)?;
+        // The guest passes on the copy's result with a `move.l`, which sets the flags anew.
+        return_result(state, state.d[0]);
+        Some(())
     }
 
     /// Draws a `RectImg` with its top left at `pt` through the copy path, as the guest does with
@@ -472,6 +703,7 @@ impl X68kBus {
             let row = ((dest_y as u16 as u32) % height as u32) as i16;
             let transfer = Transfer {
                 source,
+                source_bits: None,
                 dest,
                 dest_ptr,
                 source_rect: Rect {
@@ -488,6 +720,7 @@ impl X68kBus {
                 },
                 mode: 0,
                 mask_handle: 0,
+                bit_mask: None,
                 planes,
             };
             self.copy_bits(state, text_base, transfer)?;
@@ -524,6 +757,7 @@ impl X68kBus {
         let drawn = image_rect;
         let transfer = Transfer {
             source,
+            source_bits: None,
             dest,
             dest_ptr,
             source_rect: drawn,
@@ -535,6 +769,7 @@ impl X68kBus {
             },
             mode: 0,
             mask_handle: 0,
+            bit_mask: None,
             planes,
         };
         self.copy_bits(state, text_base, transfer)
@@ -544,20 +779,17 @@ impl X68kBus {
     fn copy_bits(&mut self, state: &mut CpuState, text_base: u32, transfer: Transfer) -> Option<()> {
         let Transfer {
             source,
+            source_bits,
             dest,
             dest_ptr,
             source_rect,
             dest_rect,
             mode,
             mask_handle,
+            bit_mask,
             planes: active_pages,
         } = transfer;
         if mode >= 8 {
-            return None;
-        }
-        let same_size = source_rect.right - source_rect.left == dest_rect.right - dest_rect.left
-            && source_rect.bottom - source_rect.top == dest_rect.bottom - dest_rect.top;
-        if !same_size {
             return None;
         }
         if !source.is_screen() && !dest.is_screen() {
@@ -638,36 +870,55 @@ impl X68kBus {
         }
 
         // Read everything before writing so overlapping copies see the original pixels.
+        let read = |bits: Option<&[u8]>, addr: u32| match bits {
+            Some(bits) => bits.get(addr as usize).copied(),
+            None => self.peek_u8(addr),
+        };
+        // Packs the row of `width` pixels from pixel `pixel` of the row at `start`.
+        let pack = |bits: Option<&[u8]>, start: u32, pixel: u32, width: u32| -> Option<Vec<u8>> {
+            let start = start + (pixel >> 3);
+            let shift = pixel & 7;
+            let mut packed = vec![0u8; (width as usize).div_ceil(8) + 1];
+            let mut current = read(bits, start)?;
+            for (i, out) in packed.iter_mut().enumerate() {
+                let next = read(bits, start + i as u32 + 1).unwrap_or(0);
+                *out = if shift == 0 {
+                    current
+                } else {
+                    (current << shift) | (next >> (8 - shift))
+                };
+                current = next;
+            }
+            Some(packed)
+        };
         let mut copies = Vec::with_capacity(spans.len());
+        let mut masks = Vec::new();
         for &(y, left, right) in &spans {
             let width = (right - left) as u32;
             let row = (y as i32 + dy - source.rect.top as i32) as u32;
             let pixel = (left as i32 + dx - source.rect.left as i32) as u32;
-            let bytes = (width as usize).div_ceil(8) + 1;
-            let shift = pixel & 7;
-            let mut planes = [vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes]];
+            let mut planes = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
             for (plane, packed) in planes.iter_mut().enumerate() {
-                if active_pages & (1 << plane) == 0 {
-                    continue;
-                }
-                let start = source.row_addr(plane, row) + (pixel >> 3);
-                let mut current = self.peek_u8(start)?;
-                for (i, out) in packed.iter_mut().enumerate() {
-                    let next = self.peek_u8(start + i as u32 + 1).unwrap_or(0);
-                    *out = if shift == 0 {
-                        current
-                    } else {
-                        (current << shift) | (next >> (8 - shift))
-                    };
-                    current = next;
+                if active_pages & (1 << plane) != 0 {
+                    *packed = pack(source_bits, source.row_addr(plane, row), pixel, width)?;
                 }
             }
             copies.push(planes);
+            if let Some(mask) = &bit_mask {
+                let row = y as i32 - dest_rect.top as i32 + mask.top as i32 - mask.bitmap.rect.top as i32;
+                let pixel =
+                    left as i32 - dest_rect.left as i32 + mask.left as i32 - mask.bitmap.rect.left as i32;
+                if row < 0 || pixel < 0 {
+                    return None;
+                }
+                let start = mask.bitmap.row_addr(0, row as u32);
+                masks.push(pack(mask.bits, start, pixel as u32, width)?);
+            }
         }
 
         let op = mode as u8;
         let invert = if op & 4 != 0 { 0xFFu8 } else { 0 };
-        for (&(y, left, right), planes) in spans.iter().zip(&copies) {
+        for (index, (&(y, left, right), planes)) in spans.iter().zip(&copies).enumerate() {
             let row = (y as i32 - dest.rect.top as i32) as u32;
             let first_pixel = (left as i32 - dest.rect.left as i32) as u32;
             let last_pixel = (right as i32 - dest.rect.left as i32) as u32 - 1;
@@ -686,7 +937,11 @@ impl X68kBus {
                     if byte == last_pixel >> 3 {
                         mask &= last_mask;
                     }
-                    let bits = packed_byte(packed, byte as i32 * 8 - first_pixel as i32) ^ invert;
+                    let offset = byte as i32 * 8 - first_pixel as i32;
+                    if let Some(selected) = masks.get(index) {
+                        mask &= packed_byte(selected, offset);
+                    }
+                    let bits = packed_byte(packed, offset) ^ invert;
                     let addr = line + byte;
                     let current = self.peek_u8(addr)?;
                     self.store_plane_byte(addr, combine(op, current, bits, mask));
@@ -847,6 +1102,17 @@ impl X68kBus {
         reachable.then_some((bitmap, self.peek_u16(addr + BITMAP_ACTIVE_PAGES)?))
     }
 
+    /// Reads the `Bitmap` a `GMCopyMask` mask names, of which the guest uses the first plane only.
+    fn peek_mask_bitmap(&self, addr: u32) -> Option<PlanarBitmap> {
+        let bitmap = PlanarBitmap {
+            rect: self.peek_rect(addr + BITMAP_RECT)?,
+            base: self.peek_u32(addr + BITMAP_BASE)?,
+            line: self.peek_u16(addr + BITMAP_LINE)? as u32,
+            page: self.peek_u32(addr + BITMAP_PAGE)?,
+        };
+        ((bitmap.base as usize) < self.main_ram.len()).then_some(bitmap)
+    }
+
     fn gm_frame_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
         let rect_ptr = self.peek_u32(state.a[7])?;
         let rect = self.peek_rect(rect_ptr)?;
@@ -882,13 +1148,62 @@ impl X68kBus {
         self.fill_area(state, text_base, bounds, FillShape::Region(region))
     }
 
+    /// `GMFrameRgn`: fills the part of a region that insetting it by the pen size removes.
+    fn gm_frame_rgn(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let handle = self.peek_u32(state.a[7])?;
+        if handle == 0 {
+            return None;
+        }
+        let region = self.peek_u32(handle)?;
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        let width = self.peek_u16(graph + GRAPH_PEN_SIZE)? as i16;
+        let height = self.peek_u16(graph + GRAPH_PEN_SIZE + 2)? as i16;
+        if width < 0 || height < 0 {
+            return None;
+        }
+        // With no pen at all, the guest fills a rectangle whole but draws a shaped region with
+        // stray dots outside it.
+        let is_rect = self.peek_u32(region)? == REGION_RECT_SIZE;
+        if (width, height) == (0, 0) && !is_rect {
+            return None;
+        }
+        let bounds = self.peek_region_bounds(region)?;
+        let shape = self.region_rows(region)?;
+        // Like the guest, an inset that leaves nothing frames the whole region.
+        let inner = shape.eroded(width, height);
+        let frame = if inner.is_empty() || (width, height) == (0, 0) {
+            shape
+        } else {
+            shape.minus(&inner)
+        };
+        self.fill_area(state, text_base, bounds, FillShape::Spans(&frame))
+    }
+
+    /// Reads every row of a `Region` within its bounds.
+    fn region_rows(&self, region: u32) -> Option<RowSpans> {
+        let bounds = self.peek_region_bounds(region)?;
+        let mut rows = Vec::new();
+        if !bounds.is_empty() {
+            let mut cursor = self.region_cursor(region, bounds.top)?;
+            for y in bounds.top..bounds.bottom {
+                self.advance_region(&mut cursor, y)?;
+                let row = spans(bounds, &cursor).into_iter().filter(|(left, right)| left < right);
+                rows.push(row.collect());
+            }
+        }
+        Some(RowSpans {
+            top: bounds.top,
+            rows,
+        })
+    }
+
     /// Fills `rect` on the screen, limited to `shape`, with the current pen.
     fn fill_area(
         &mut self,
         state: &mut CpuState,
         text_base: u32,
         rect: Rect,
-        shape: FillShape,
+        shape: FillShape<'_>,
     ) -> Option<()> {
         self.fill_with(state, text_base, rect, shape, None)
     }
@@ -900,7 +1215,7 @@ impl X68kBus {
         state: &mut CpuState,
         text_base: u32,
         rect: Rect,
-        shape: FillShape,
+        shape: FillShape<'_>,
         pen_override: Option<(PlanePen, u16)>,
     ) -> Option<()> {
         let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
@@ -964,6 +1279,11 @@ impl X68kBus {
                         }
                         if right > hole.right {
                             spans.push((y, left.max(hole.right), right));
+                        }
+                    }
+                    FillShape::Spans(shape) => {
+                        for (left, right) in intersect_spans(&[(left, right)], shape.row(y)) {
+                            spans.push((y, left, right));
                         }
                     }
                     _ => spans.push((y, left, right)),
@@ -1216,6 +1536,98 @@ fn spans(area: Rect, region: &RegionCursor) -> Vec<(i16, i16)> {
     }
 }
 
+/// The covered X intervals of each row of a shape, sorted and disjoint, from row `top`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowSpans {
+    top: i16,
+    rows: Vec<Vec<(i16, i16)>>,
+}
+
+impl RowSpans {
+    fn row(&self, y: i16) -> &[(i16, i16)] {
+        let index = y as i32 - self.top as i32;
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.rows.get(index))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.iter().all(Vec::is_empty)
+    }
+
+    /// Keeps the pixels whose surrounding box of `width` by `height` dots each way is covered,
+    /// as `InsetRgn` does by shrinking every row and then every column.
+    fn eroded(&self, width: i16, height: i16) -> RowSpans {
+        let shrunk: Vec<Vec<(i16, i16)>> = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter_map(|&(left, right)| {
+                        let (left, right) = (left as i32 + width as i32, right as i32 - width as i32);
+                        (left < right).then_some((left as i16, right as i16))
+                    })
+                    .collect()
+            })
+            .collect();
+        let reach = height as usize;
+        let rows = (0..shrunk.len())
+            .map(|index| {
+                if index < reach || index + reach >= shrunk.len() {
+                    return Vec::new();
+                }
+                shrunk[index - reach..=index + reach]
+                    .iter()
+                    .fold(shrunk[index].clone(), |row, other| intersect_spans(&row, other))
+            })
+            .collect();
+        RowSpans { top: self.top, rows }
+    }
+
+    fn minus(&self, other: &RowSpans) -> RowSpans {
+        let rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| subtract_spans(row, other.row(self.top + index as i16)))
+            .collect();
+        RowSpans { top: self.top, rows }
+    }
+}
+
+fn intersect_spans(a: &[(i16, i16)], b: &[(i16, i16)]) -> Vec<(i16, i16)> {
+    let mut result = Vec::new();
+    for &(left, right) in a {
+        for &(other_left, other_right) in b {
+            let span = (left.max(other_left), right.min(other_right));
+            if span.0 < span.1 {
+                result.push(span);
+            }
+        }
+    }
+    result
+}
+
+fn subtract_spans(a: &[(i16, i16)], b: &[(i16, i16)]) -> Vec<(i16, i16)> {
+    let mut result = Vec::new();
+    for &(mut left, right) in a {
+        for &(cut_left, cut_right) in b {
+            if cut_right <= left || cut_left >= right {
+                continue;
+            }
+            if cut_left > left {
+                result.push((left, cut_left));
+            }
+            left = left.max(cut_right);
+        }
+        if left < right {
+            result.push((left, right));
+        }
+    }
+    result
+}
+
 /// Returns the X intervals of the current row covered by every region within `area`.
 fn clipped_spans(area: Rect, regions: &[RegionCursor]) -> Vec<(i16, i16)> {
     let mut result = vec![(area.left, area.right)];
@@ -1385,6 +1797,44 @@ mod tests {
     }
 
     #[test]
+    fn frames_a_region_inside_its_outline() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SHAPE: u32 = 0x1700;
+        const SHAPE_HANDLE: u32 = 0x1308;
+        write_u32(&mut bus, SHAPE_HANDLE, SHAPE);
+        write_rect_region(&mut bus, SHAPE, [1, 1, 7, 6]);
+        write_u32(&mut bus, STACK, SHAPE_HANDLE);
+        write_u16(&mut bus, GRAPH + GRAPH_PEN_SIZE, 2);
+        write_u16(&mut bus, GRAPH + GRAPH_PEN_SIZE + 2, 1);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_FRAME_RGN),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        for y in 0..7 {
+            for x in 0..9 {
+                let outer = (1..7).contains(&x) && (1..6).contains(&y);
+                let hole = (3..5).contains(&x) && (2..5).contains(&y);
+                assert_eq!(pixel(&bus, x, y), if outer && !hole { 5 } else { 0 }, "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn insets_a_shape_by_a_box_of_the_pen_size() {
+        // An L shape: rows 0..4 cover 0..8, rows 4..8 cover 0..4.
+        let mut rows = vec![vec![(0, 8)]; 4];
+        rows.extend(vec![vec![(0, 4)]; 4]);
+        let shape = RowSpans { top: 10, rows };
+        let inner = shape.eroded(1, 1);
+        assert_eq!(inner.row(10), []);
+        assert_eq!(inner.row(11), [(1, 7)]);
+        assert_eq!(inner.row(13), [(1, 3)], "the lower arm limits the row above it");
+        assert_eq!(inner.row(16), [(1, 3)]);
+        assert_eq!(inner.row(17), []);
+        assert_eq!(shape.minus(&inner).row(11), [(0, 1), (7, 8)]);
+    }
+
+    #[test]
     fn frames_a_rectangle_with_the_pen_size() {
         let (mut bus, mut state) = test_bus([1, 1, 7, 6]);
         write_u16(&mut bus, GRAPH + GRAPH_PEN_SIZE, 2);
@@ -1438,6 +1888,69 @@ mod tests {
         );
         let row: Vec<u8> = (0..12).map(|x| pixel(&bus, x, 0)).collect();
         assert_eq!(row, [1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0]);
+    }
+
+    /// Writes a one-row, 16-dot `Bitmap` record at `record` whose planes hold `words`.
+    fn write_row_bitmap(bus: &mut X68kBus, record: u32, data: u32, words: &[u16]) {
+        write_rect(bus, record + BITMAP_RECT, [0, 0, 16, 1]);
+        write_u32(bus, record + BITMAP_BASE, data);
+        write_u16(bus, record + BITMAP_LINE, 2);
+        write_u32(bus, record + BITMAP_PAGE, 2);
+        write_u16(bus, record + BITMAP_ACTIVE_PAGES, 0xF);
+        for (i, word) in words.iter().enumerate() {
+            write_u16(bus, data + i as u32 * 2, *word);
+        }
+    }
+
+    #[test]
+    fn copies_only_the_pixels_the_mask_selects() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SOURCE: u32 = 0x1C00;
+        const MASK: u32 = 0x1C40;
+        const SOURCE_RECT: u32 = 0x1A00;
+        const MASK_RECT: u32 = 0x1A10;
+        write_row_bitmap(&mut bus, SOURCE, 0x2000, &[0xFFFF; 4]);
+        write_row_bitmap(&mut bus, MASK, 0x2100, &[0b0101_0000_0000_0000]);
+        write_rect(&mut bus, SOURCE_RECT, [0, 0, 8, 1]);
+        write_rect(&mut bus, MASK_RECT, [0, 0, 8, 1]);
+        write_u32(&mut bus, STACK, SOURCE);
+        write_u32(&mut bus, STACK + 4, BITMAP);
+        write_u32(&mut bus, STACK + 8, MASK);
+        write_u32(&mut bus, STACK + 12, SOURCE_RECT);
+        write_u16(&mut bus, STACK + 16, 2);
+        write_u16(&mut bus, STACK + 18, 0);
+        write_u32(&mut bus, STACK + 20, MASK_RECT);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_COPY_MASK),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        let row: Vec<u8> = (0..8).map(|x| pixel(&bus, x, 0)).collect();
+        assert_eq!(row, [0, 0, 0, 15, 0, 15, 0, 0]);
+        assert_eq!(state.d[0], 0);
+        assert!(state.flag(SR_N) && state.flag(SR_C), "flags of the guest's last subq");
+    }
+
+    #[test]
+    fn plots_an_image_through_its_mask_in_the_requested_style() {
+        let (mut bus, mut state) = test_bus([0, 0, 16, 1]);
+        const IMAGE: u32 = 0x2200;
+        // Two planes of 0xFFFF and 0x0000 followed by a mask of the first two dots.
+        for (i, word) in [0xFFFFu16, 0x0000, 0xC000].iter().enumerate() {
+            write_u16(&mut bus, IMAGE + i as u32 * 2, *word);
+        }
+        write_u32(&mut bus, STACK, IMAGE);
+        write_u32(&mut bus, STACK + 4, RECT_ARG);
+        write_u16(&mut bus, STACK + 8, 0x0201); // two pages, inverted
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_PLOT_IMG),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        // The first two planes are inverted, the third is clear, and the fourth is set.
+        assert_eq!(pixel(&bus, 0, 0), 0b1010);
+        assert_eq!(pixel(&bus, 1, 0), 0b1010);
+        assert_eq!(pixel(&bus, 2, 0), 0);
+        assert_eq!(state.d[0], 0);
+        assert!(state.flag(SR_Z));
     }
 
     #[test]
