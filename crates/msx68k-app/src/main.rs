@@ -495,6 +495,100 @@ impl Msx68kApp {
         }
     }
 
+    /// Presents the current guest screen and refreshes the window title.
+    fn render_frame(&mut self) {
+        let active_res = self.vm.bus.crtc.active_resolution();
+        let active_fs = self.vm.bus.fullscreen_mode;
+        if active_res != self.last_resolution || active_fs != self.last_fullscreen {
+            self.last_resolution = active_res;
+            self.last_fullscreen = active_fs;
+            if let Some(gpu) = &mut self.gpu {
+                if active_fs {
+                    gpu.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                    gpu.surface_config.width = active_res.0.max(1);
+                    gpu.surface_config.height = active_res.1.max(1);
+                    gpu.surface.configure(gpu.compositor.device(), &gpu.surface_config);
+                    println!(
+                        "Configured fullscreen mode for {}x{}",
+                        active_res.0, active_res.1
+                    );
+                } else {
+                    gpu.window.set_fullscreen(None);
+                    let new_w = active_res.0 * self.args.scale;
+                    let new_h = active_res.1 * self.args.scale;
+                    let applied = gpu
+                        .window
+                        .request_inner_size(PhysicalSize::new(new_w, new_h))
+                        .unwrap_or(PhysicalSize::new(new_w, new_h));
+                    gpu.surface_config.width = applied.width.max(1);
+                    gpu.surface_config.height = applied.height.max(1);
+                    gpu.surface
+                        .configure(gpu.compositor.device(), &gpu.surface_config);
+                    println!(
+                        "Auto-resized window to {}x{} (Guest resolution {}x{})",
+                        applied.width, applied.height, active_res.0, active_res.1
+                    );
+                }
+            }
+        }
+
+        if let Some(gpu) = &mut self.gpu {
+            let frame = match gpu.surface.get_current_texture() {
+                Ok(f) => f,
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    gpu.surface
+                        .configure(gpu.compositor.device(), &gpu.surface_config);
+                    return;
+                }
+                Err(_) => return,
+            };
+
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
+            gpu.compositor.render_bus_to_surface_view(
+                &self.vm.bus,
+                &gpu.presenter,
+                &view,
+                gpu.surface_config.width,
+                gpu.surface_config.height,
+            );
+
+            frame.present();
+            self.rendered_frames += 1;
+
+            if self.last_title_update.elapsed() >= Duration::from_millis(250) {
+                self.last_title_update = Instant::now();
+                let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
+                let speed_label = match self.vm.speed_mode() {
+                    CpuSpeedMode::Mhz10 => "10MHz",
+                    CpuSpeedMode::Mhz16 => "16MHz (XVI)",
+                    CpuSpeedMode::Mhz24 => "24MHz (RedZone)",
+                    CpuSpeedMode::Burst => "Burst",
+                    CpuSpeedMode::Custom(_) => "Custom",
+                };
+                let fdd_led = if self.vm.bus.fdc.drives[0].motor_on {
+                    "FD0:BUSY"
+                } else if self.vm.bus.fdc.drives[0].is_inserted() {
+                    "FD0:READY"
+                } else {
+                    "FD0:EJECT"
+                };
+                let scsi_led = if self.vm.bus.is_scsi_rom_enabled() {
+                    " | SCSI:ONLINE"
+                } else {
+                    ""
+                };
+                gpu.window.set_title(&format!(
+                    "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
+                    self.vm.cpu_state.pc
+                ));
+                self.flush_persistent_storage(false);
+            }
+        }
+    }
+
     fn frame_budget(&self) -> FrameBudget {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
@@ -600,17 +694,25 @@ impl ApplicationHandler for Msx68kApp {
             .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // FIFO can block until the compositor repaints, which would stall this thread and the
+        // guest with it.
+        let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+            .into_iter()
+            .find(|mode| caps.present_modes.contains(mode))
+            .unwrap_or(wgpu::PresentMode::Fifo);
+
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
+        println!("Using present mode: {present_mode:?}");
 
         let compositor = ViconGpuCompositor::from_device(device, queue, adapter_info);
         let presenter = compositor.create_surface_presenter(format);
@@ -763,100 +865,7 @@ impl ApplicationHandler for Msx68kApp {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => {
-                self.step_vm_one_frame();
-
-                let active_res = self.vm.bus.crtc.active_resolution();
-                let active_fs = self.vm.bus.fullscreen_mode;
-                if active_res != self.last_resolution || active_fs != self.last_fullscreen {
-                    self.last_resolution = active_res;
-                    self.last_fullscreen = active_fs;
-                    if let Some(gpu) = &mut self.gpu {
-                        if active_fs {
-                            gpu.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-                            gpu.surface_config.width = active_res.0.max(1);
-                            gpu.surface_config.height = active_res.1.max(1);
-                            gpu.surface.configure(gpu.compositor.device(), &gpu.surface_config);
-                            println!(
-                                "Configured fullscreen mode for {}x{}",
-                                active_res.0, active_res.1
-                            );
-                        } else {
-                            gpu.window.set_fullscreen(None);
-                            let new_w = active_res.0 * self.args.scale;
-                            let new_h = active_res.1 * self.args.scale;
-                            let applied = gpu
-                                .window
-                                .request_inner_size(PhysicalSize::new(new_w, new_h))
-                                .unwrap_or(PhysicalSize::new(new_w, new_h));
-                            gpu.surface_config.width = applied.width.max(1);
-                            gpu.surface_config.height = applied.height.max(1);
-                            gpu.surface
-                                .configure(gpu.compositor.device(), &gpu.surface_config);
-                            println!(
-                                "Auto-resized window to {}x{} (Guest resolution {}x{})",
-                                applied.width, applied.height, active_res.0, active_res.1
-                            );
-                        }
-                    }
-                }
-
-                if let Some(gpu) = &mut self.gpu {
-                    let frame = match gpu.surface.get_current_texture() {
-                        Ok(f) => f,
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            gpu.surface
-                                .configure(gpu.compositor.device(), &gpu.surface_config);
-                            return;
-                        }
-                        Err(_) => return,
-                    };
-
-                    let view = frame
-                        .texture
-                        .create_view(&wgpu::TextureViewDescriptor::default());
-
-                    gpu.compositor.render_bus_to_surface_view(
-                        &self.vm.bus,
-                        &gpu.presenter,
-                        &view,
-                        gpu.surface_config.width,
-                        gpu.surface_config.height,
-                    );
-
-                    frame.present();
-                    self.rendered_frames += 1;
-
-                    if self.last_title_update.elapsed() >= Duration::from_millis(250) {
-                        self.last_title_update = Instant::now();
-                        let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
-                        let speed_label = match self.vm.speed_mode() {
-                            CpuSpeedMode::Mhz10 => "10MHz",
-                            CpuSpeedMode::Mhz16 => "16MHz (XVI)",
-                            CpuSpeedMode::Mhz24 => "24MHz (RedZone)",
-                            CpuSpeedMode::Burst => "Burst",
-                            CpuSpeedMode::Custom(_) => "Custom",
-                        };
-                        let fdd_led = if self.vm.bus.fdc.drives[0].motor_on {
-                            "FD0:BUSY"
-                        } else if self.vm.bus.fdc.drives[0].is_inserted() {
-                            "FD0:READY"
-                        } else {
-                            "FD0:EJECT"
-                        };
-                        let scsi_led = if self.vm.bus.is_scsi_rom_enabled() {
-                            " | SCSI:ONLINE"
-                        } else {
-                            ""
-                        };
-                        gpu.window.set_title(&format!(
-                            "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
-                            self.vm.cpu_state.pc
-                        ));
-                        self.flush_persistent_storage(false);
-                    }
-                }
-            }
+            WindowEvent::RedrawRequested => self.render_frame(),
             _ => {}
         }
     }
@@ -873,9 +882,10 @@ impl ApplicationHandler for Msx68kApp {
         let frame_interval = Duration::from_micros(16_667); // ~60 Hz
         if now >= self.next_frame_deadline {
             self.next_frame_deadline = now + frame_interval;
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
+            // Run and present here rather than on redraw requests, which a compositor may withhold
+            // indefinitely, for example while the window is covered.
+            self.step_vm_one_frame();
+            self.render_frame();
         }
         // A GDB client waits for each reply, so keep round trips well below a frame.
         let wake_at = if gdb_connected {

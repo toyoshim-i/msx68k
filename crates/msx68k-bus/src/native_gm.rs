@@ -12,6 +12,7 @@ const SX_GET_DISP_RECT: u16 = 0xA432;
 const GM_FRAME_RECT: u16 = 0xA172;
 const GM_FILL_RECT: u16 = 0xA173;
 const GM_FILL_RGN: u16 = 0xA17B;
+const GM_COPY: u16 = 0xA17F;
 
 /// `text_base` offset of the pointer to the current `Graph` record.
 const CURRENT_GRAPH: u32 = 0x5523A;
@@ -104,15 +105,48 @@ struct PlanePen {
     op: u8,
 }
 
-impl PlanePen {
-    /// Combines `source` into `dest` within the bits of `mask`.
-    fn apply(&self, dest: u8, source: u8, mask: u8) -> u8 {
-        match self.op & 3 {
-            0 => (dest & !mask) | (source & mask),
-            1 => dest & (source | !mask),
-            2 => dest | (source & mask),
-            _ => dest ^ (source & mask),
-        }
+/// Combines `source` into `dest` within the bits of `mask` for a two-bit logical operation.
+fn combine(op: u8, dest: u8, source: u8, mask: u8) -> u8 {
+    match op & 3 {
+        0 => (dest & !mask) | (source & mask),
+        1 => dest & (source | !mask),
+        2 => dest | (source & mask),
+        _ => dest ^ (source & mask),
+    }
+}
+
+/// A four-plane `Bitmap` record that native code can reach directly.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct PlanarBitmap {
+    rect: Rect,
+    base: u32,
+    line: u32,
+    page: u32,
+}
+
+impl PlanarBitmap {
+    fn is_screen(&self) -> bool {
+        self.base == EXT_TVRAM_BASE
+    }
+
+    /// Guest address of the first byte of `row` in `plane`.
+    fn row_addr(&self, plane: usize, row: u32) -> u32 {
+        self.base + plane as u32 * self.page + row * self.line
+    }
+}
+
+/// Reads the eight bits of packed `bits` starting at `bit_offset`.
+fn packed_byte(bits: &[u8], bit_offset: i32) -> u8 {
+    if bit_offset < 0 {
+        return bits.first().copied().unwrap_or(0) >> (-bit_offset).min(7);
+    }
+    let index = (bit_offset >> 3) as usize;
+    let shift = (bit_offset & 7) as u32;
+    let high = bits.get(index).copied().unwrap_or(0);
+    if shift == 0 {
+        high
+    } else {
+        (high << shift) | (bits.get(index + 1).copied().unwrap_or(0) >> (8 - shift))
     }
 }
 
@@ -146,6 +180,7 @@ impl X68kBus {
             GM_FRAME_RECT => self.gm_frame_rect(state, text_base),
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
+            GM_COPY => self.gm_copy(state, text_base),
             _ => None,
         };
         match handled {
@@ -171,6 +206,188 @@ impl X68kBus {
         }
         return_result(state, 0);
         Some(())
+    }
+
+    fn gm_copy(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let args = state.a[7];
+        let source_ptr = self.peek_u32(args)?;
+        let dest_ptr = self.peek_u32(args + 4)?;
+        let source_rect = self.peek_rect(self.peek_u32(args + 8)?)?;
+        let dest_rect = self.peek_rect(self.peek_u32(args + 12)?)?;
+        let mode = self.peek_u16(args + 16)?;
+        let mask_handle = self.peek_u32(args + 18)?;
+
+        if mode >= 8 {
+            return None;
+        }
+        let same_size = source_rect.right - source_rect.left == dest_rect.right - dest_rect.left
+            && source_rect.bottom - source_rect.top == dest_rect.bottom - dest_rect.top;
+        if !same_size {
+            return None;
+        }
+        let source = self.peek_planar_bitmap(source_ptr)?;
+        let dest = self.peek_planar_bitmap(dest_ptr)?;
+        if !source.is_screen() && !dest.is_screen() {
+            return None;
+        }
+
+        let dx = source_rect.left as i32 - dest_rect.left as i32;
+        let dy = source_rect.top as i32 - dest_rect.top as i32;
+        let readable = source_rect.intersect(source.rect);
+        let mut area = dest_rect
+            .intersect(dest.rect)
+            .intersect(Rect {
+                left: (readable.left as i32 - dx) as i16,
+                top: (readable.top as i32 - dy) as i16,
+                right: (readable.right as i32 - dx) as i16,
+                bottom: (readable.bottom as i32 - dy) as i16,
+            });
+
+        let mut regions = Vec::new();
+        if mask_handle != 0 {
+            let mask = self.peek_u32(mask_handle)?;
+            area = area.intersect(self.peek_region_bounds(mask)?);
+            regions.push(mask);
+        }
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        if self.peek_u32(graph + GRAPH_BITMAP)? == dest_ptr {
+            if (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0
+                || self.peek_u16(graph + GRAPH_WORK_KIND)? >= 2
+                || self.peek_u32(graph + GRAPH_PROCS)? != 0
+            {
+                return None;
+            }
+            let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
+            let clipping = self.peek_region(graph + GRAPH_CLIPPING)?;
+            area = area
+                .intersect(self.peek_rect(graph + GRAPH_RECT)?)
+                .intersect(self.peek_region_bounds(visible)?)
+                .intersect(self.peek_region_bounds(clipping)?);
+            regions.push(visible);
+            regions.push(clipping);
+        }
+        if area.is_empty() {
+            return_result(state, 0);
+            return Some(());
+        }
+
+        let mut cursors = Vec::new();
+        for region in regions {
+            cursors.push(self.region_cursor(region, area.top)?);
+        }
+        let mut spans = Vec::new();
+        for y in area.top..area.bottom {
+            for cursor in &mut cursors {
+                self.advance_region(cursor, y)?;
+            }
+            for (left, right) in clipped_spans(area, &cursors) {
+                spans.push((y, left, right));
+            }
+        }
+
+        let touches = |zones: &[Rect; 2], y: i32, left: i32, right: i32| {
+            zones.iter().any(|zone| {
+                y >= zone.top as i32
+                    && y < zone.bottom as i32
+                    && left < zone.right as i32
+                    && right > zone.left as i32
+            })
+        };
+        let dest_zones = self.cursor_zones(text_base, dest.rect)?;
+        let source_zones = self.cursor_zones(text_base, source.rect)?;
+        let near_cursor = spans.iter().any(|&(y, left, right)| {
+            let (y, left, right) = (y as i32, left as i32, right as i32);
+            (dest.is_screen() && touches(&dest_zones, y, left, right))
+                || (source.is_screen() && touches(&source_zones, y + dy, left + dx, right + dx))
+        });
+        if near_cursor {
+            return None;
+        }
+
+        // Read everything before writing so overlapping copies see the original pixels.
+        let mut copies = Vec::with_capacity(spans.len());
+        for &(y, left, right) in &spans {
+            let width = (right - left) as u32;
+            let row = (y as i32 + dy - source.rect.top as i32) as u32;
+            let pixel = (left as i32 + dx - source.rect.left as i32) as u32;
+            let bytes = (width as usize).div_ceil(8) + 1;
+            let shift = pixel & 7;
+            let mut planes = [vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes], vec![0u8; bytes]];
+            for (plane, packed) in planes.iter_mut().enumerate() {
+                let start = source.row_addr(plane, row) + (pixel >> 3);
+                let mut current = self.peek_u8(start)?;
+                for (i, out) in packed.iter_mut().enumerate() {
+                    let next = self.peek_u8(start + i as u32 + 1).unwrap_or(0);
+                    *out = if shift == 0 {
+                        current
+                    } else {
+                        (current << shift) | (next >> (8 - shift))
+                    };
+                    current = next;
+                }
+            }
+            copies.push(planes);
+        }
+
+        let op = mode as u8;
+        let invert = if op & 4 != 0 { 0xFFu8 } else { 0 };
+        for (&(y, left, right), planes) in spans.iter().zip(&copies) {
+            let row = (y as i32 - dest.rect.top as i32) as u32;
+            let first_pixel = (left as i32 - dest.rect.left as i32) as u32;
+            let last_pixel = (right as i32 - dest.rect.left as i32) as u32 - 1;
+            let first_mask = 0xFFu8 >> (first_pixel & 7);
+            let last_mask = 0xFFu8 << (7 - (last_pixel & 7));
+            for (plane, packed) in planes.iter().enumerate() {
+                let line = dest.row_addr(plane, row);
+                for byte in (first_pixel >> 3)..=(last_pixel >> 3) {
+                    let mut mask = 0xFFu8;
+                    if byte == first_pixel >> 3 {
+                        mask &= first_mask;
+                    }
+                    if byte == last_pixel >> 3 {
+                        mask &= last_mask;
+                    }
+                    let bits = packed_byte(packed, byte as i32 * 8 - first_pixel as i32) ^ invert;
+                    let addr = line + byte;
+                    let current = self.peek_u8(addr)?;
+                    self.store_plane_byte(addr, combine(op, current, bits, mask));
+                }
+            }
+        }
+        return_result(state, 0);
+        Some(())
+    }
+
+    fn store_plane_byte(&mut self, addr: u32, value: u8) {
+        let (slice, offset) = if addr >= EXT_TVRAM_BASE {
+            let Some(buffer) = self.ext_tvram.as_mut() else {
+                return;
+            };
+            (buffer.as_mut_slice(), (addr - EXT_TVRAM_BASE) as usize)
+        } else {
+            (&mut self.main_ram[..], addr as usize)
+        };
+        if let Some(slot) = slice.get_mut(offset) {
+            *slot = value;
+        }
+    }
+
+    /// Reads a `Bitmap` that is planar with all four planes active and stored in Main RAM or
+    /// the screen, returning `None` for anything else.
+    fn peek_planar_bitmap(&self, addr: u32) -> Option<PlanarBitmap> {
+        if self.peek_u16(addr + BITMAP_TYPE)? != 0
+            || self.peek_u16(addr + BITMAP_ACTIVE_PAGES)? != 0xF
+        {
+            return None;
+        }
+        let bitmap = PlanarBitmap {
+            rect: self.peek_rect(addr + BITMAP_RECT)?,
+            base: self.peek_u32(addr + BITMAP_BASE)?,
+            line: self.peek_u16(addr + BITMAP_LINE)? as u32,
+            page: self.peek_u32(addr + BITMAP_PAGE)?,
+        };
+        let reachable = bitmap.is_screen() || (bitmap.base as usize) < self.main_ram.len();
+        reachable.then_some(bitmap)
     }
 
     fn gm_frame_rect(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
@@ -421,7 +638,7 @@ impl X68kBus {
                     word as u8
                 };
                 if let Some(slot) = buffer.get_mut(line + byte) {
-                    *slot = pen.apply(*slot, source, mask);
+                    *slot = combine(pen.op, *slot, source, mask);
                 }
             }
         }
@@ -720,6 +937,42 @@ mod tests {
             right: width as i16,
             bottom: height as i16,
         }));
+    }
+
+    #[test]
+    fn copies_overlapping_screen_areas_without_smearing() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SOURCE_RECT: u32 = 0x1A00;
+        const DEST_RECT: u32 = 0x1A10;
+        write_rect(&mut bus, SOURCE_RECT, [0, 0, 8, 1]);
+        write_rect(&mut bus, DEST_RECT, [3, 0, 11, 1]);
+        write_u32(&mut bus, STACK, BITMAP);
+        write_u32(&mut bus, STACK + 4, BITMAP);
+        write_u32(&mut bus, STACK + 8, SOURCE_RECT);
+        write_u32(&mut bus, STACK + 12, DEST_RECT);
+        write_u16(&mut bus, STACK + 16, 0);
+        write_u32(&mut bus, STACK + 18, 0);
+        bus.ext_tvram.as_mut().unwrap()[0] = 0b1010_0001;
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_COPY),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        let row: Vec<u8> = (0..12).map(|x| pixel(&bus, x, 0)).collect();
+        assert_eq!(row, [1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn leaves_scaled_copies_to_the_guest() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SOURCE_RECT: u32 = 0x1A00;
+        const DEST_RECT: u32 = 0x1A10;
+        write_rect(&mut bus, SOURCE_RECT, [0, 0, 8, 8]);
+        write_rect(&mut bus, DEST_RECT, [0, 0, 16, 16]);
+        write_u32(&mut bus, STACK, BITMAP);
+        write_u32(&mut bus, STACK + 4, BITMAP);
+        write_u32(&mut bus, STACK + 8, SOURCE_RECT);
+        write_u32(&mut bus, STACK + 12, DEST_RECT);
+        assert_eq!(bus.handle_native_gm(&mut state, GM_COPY), TrapResult::PassToVector);
     }
 
     #[test]
