@@ -1418,28 +1418,23 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     }
     assert_eq!(vm.bus.crtc.active_resolution(), (1024, 768), "SXMODE 1024x768 via gui_start must switch to 1024x768");
 
-    // Verify Fix 1 patch: Popup menu engine bounds patched to Global Screen Rect (text_base + 0x54372)
+    // Verify popup menu engine remains unpatched (original MOVEA.L 24(A6), A5)
     assert_eq!(
         vm.bus.read_u16(text_base + 0x049FE6, true).unwrap(),
-        0x4BF9,
-        "Popup menu bounds patch must use LEA (xxx).L"
-    );
-    assert_eq!(
-        vm.bus.read_u32(text_base + 0x049FE8, true).unwrap(),
-        text_base + 0x54372,
-        "Popup menu bounds patch must point to Global Screen Rect"
+        0x2A6E,
+        "Popup menu bounds must remain original MOVEA.L 24(A6), A5"
     );
 
-    // Verify Fix 2 patch: TMSetWrap patched for dynamic line wrapping
+    // Verify TMSetWrap remains unpatched (original BEQ.W +$84 and BNE.S)
     assert_eq!(
         vm.bus.read_u8(text_base + 0x00D838 + 8, true).unwrap(),
-        0x60,
-        "TMSetWrap branch must be patched to BRA.W"
+        0x67,
+        "TMSetWrap branch must remain original BEQ.W"
     );
     assert_eq!(
         vm.bus.read_u16(text_base + 0x00D8AC + 8, true).unwrap(),
-        0x4E71,
-        "TMSetWrap conditional branch must be NOPed out"
+        0x6610,
+        "TMSetWrap branch must remain original BNE.S"
     );
 
     // Verify Fix 3: soft_reset resets CRTC, extended modes, and re-mirrors IPLROM vectors
@@ -1721,14 +1716,27 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     let ext_y_word = u16::from_be_bytes([tv[ext_y_byte], tv[ext_y_byte + 1]]);
     assert_ne!(ext_y_word, 0, "Boot-time 1024x768 desktop must draw into extended vertical area (y > 512)");
 
-    // Verify popup menu clamping patch in FSX.X
-    let pop_patch = (text_base + 0x049FE6) as usize;
-    assert_eq!(&vm.bus.main_ram()[pop_patch..pop_patch + 2], &[0x4B, 0xF9]);
-    assert_eq!(&vm.bus.main_ram()[pop_patch + 6..pop_patch + 10], &[0x2C, 0x1D, 0x2E, 0x15]);
+    // Verify menuGrafPort was correctly initialized to 1024x768 from mode preset table
+    let menu_gp_ptr = vm.bus.read_u32(text_base + 0x54AE0, true).unwrap();
+    assert!(menu_gp_ptr > 0, "menuGrafPort must be allocated by MNInit");
+    let menu_gp_bm = vm.bus.read_u32(menu_gp_ptr, true).unwrap();
+    assert!(menu_gp_bm > 0);
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 6, true).unwrap(), 1024, "menuGrafPort bmap width must be 1024");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 8, true).unwrap(), 768, "menuGrafPort bmap height must be 768");
 
-    // Verify TextEdit TMSetWrap dynamic line wrapping patch
-    assert_eq!(vm.bus.main_ram()[(text_base + 0x00D840) as usize], 0x60);
-    assert_eq!(&vm.bus.main_ram()[(text_base + 0x00D8B4) as usize..(text_base + 0x00D8B6) as usize], &[0x4E, 0x71]);
+    // Verify popup menu engine remains unpatched (original MOVEA.L 24(A6), A5)
+    let pop_patch = (text_base + 0x049FE6) as usize;
+    assert_eq!(
+        &vm.bus.main_ram()[pop_patch..pop_patch + 10],
+        &[0x2A, 0x6E, 0x00, 0x18, 0x2C, 0x15, 0x2E, 0x2D, 0x00, 0x04]
+    );
+
+    // Verify TextEdit TMSetWrap dynamic line wrapping remains unpatched
+    assert_eq!(vm.bus.main_ram()[(text_base + 0x00D840) as usize], 0x67);
+    assert_eq!(
+        &vm.bus.main_ram()[(text_base + 0x00D8B4) as usize..(text_base + 0x00D8B6) as usize],
+        &[0x66, 0x10]
+    );
 
     // Verify all 7 preset mode table entries are synchronized
     for i in 0..7 {
@@ -1745,4 +1753,89 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     assert_eq!(vm.bus.max_desktop_size(), (0, 0));
     assert!(vm.bus.target_resolution.is_none());
     assert_eq!(&vm.bus.main_ram()[0..8], &ipl_data[ipl_data.len() - 64 * 1024..][..8]);
+}
+
+#[test]
+fn test_sxwin31_scsi_boot_with_1920x1080_initial_resolution() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ipl_path = workspace_root.join("roms/IPLROM.DAT");
+    let cgrom_path = workspace_root.join("roms/CGROM.DAT");
+    let human_path = workspace_root.join("disks/HUMAN302.XDF");
+
+    if !ipl_path.exists() || !cgrom_path.exists() || !human_path.exists() {
+        eprintln!("[SKIP] Required ROMs/disks not found for scsi_boot test");
+        return;
+    }
+
+    let ipl_data = std::fs::read(&ipl_path).expect("Read IPLROM");
+    let cgrom_data = std::fs::read(&cgrom_path).expect("Read CGROM");
+    let human_data = std::fs::read(&human_path).expect("Read HUMAN302.XDF");
+
+    let sx_disks = [
+        ("SXWIN311", workspace_root.join("disks/SXWIN311.XDF")),
+        ("SXWIN312", workspace_root.join("disks/SXWIN312.XDF")),
+        ("SXWIN313", workspace_root.join("disks/SXWIN313.XDF")),
+        ("SXWIN314", workspace_root.join("disks/SXWIN314.XDF")),
+        ("SXWIN315", workspace_root.join("disks/SXWIN315.XDF")),
+        ("SXWIN316", workspace_root.join("disks/SXWIN316.XDF")),
+    ];
+    let mut sx_loaded: Vec<(&str, Vec<u8>)> = Vec::new();
+    for (name, path) in &sx_disks {
+        if let Ok(bytes) = std::fs::read(path) {
+            sx_loaded.push((*name, bytes));
+        }
+    }
+    let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+
+    let mut vm = X68kVm::new(
+        VmConfig::master_sx()
+            .with_speed_mode(CpuSpeedMode::Burst)
+            .with_ram_mb(4),
+    );
+
+    vm.bus.load_cgrom(&cgrom_data);
+    vm.bus.load_ipl_rom(&ipl_data);
+
+    assert!(vm.bus.insert_scsi_hdd(0, hdd_image));
+    vm.bus.set_boot_from_scsi(true);
+
+    vm.reset().unwrap();
+
+    // Pre-configure initial resolution to 1920x1080 (as if passed via CLI --resolution 1920x1080 or MSX68K.CFG)
+    vm.bus.apply_screen_resolution(1920, 1080);
+
+    // Boot until SX-Window reaches desktop
+    for _chunk in 1..=90 {
+        vm.run_steps(250_000);
+        if vm.bus.vicon.r0_mode() == 0x0004 && vm.bus.vicon.r2_display() == 0x003F {
+            if let Some(tv) = vm.bus.active_tvram() {
+                let tv_non_zero = tv.iter().filter(|&&b| b != 0).count();
+                if tv_non_zero > 140_000 {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Verify CRTC resolution remained 1920x1080 throughout boot
+    assert_eq!(vm.bus.crtc.active_resolution(), (1920, 1080));
+    assert!(vm.bus.is_ext_tvram_active());
+    assert_eq!(vm.bus.active_tvram_row_bytes(), 240);
+
+    // Verify FSX.X structures in RAM
+    let iocs_mouse_vec = vm.bus.read_u32(0x0000_0938, true).unwrap();
+    let text_base = iocs_mouse_vec - 0x04F82A;
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 6, true).unwrap(), 1920);
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 8, true).unwrap(), 1080);
+
+    // Verify menuGrafPort was initialized to 1920x1080 with EXT_TVRAM_BASE directly from preset
+    let menu_gp_ptr = vm.bus.read_u32(text_base + 0x54AE0, true).unwrap();
+    assert!(menu_gp_ptr > 0, "menuGrafPort must be allocated by MNInit");
+    let menu_gp_bm = vm.bus.read_u32(menu_gp_ptr, true).unwrap();
+    assert!(menu_gp_bm > 0);
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 6, true).unwrap(), 1920, "menuGrafPort bmap width must be 1920");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 8, true).unwrap(), 1080, "menuGrafPort bmap height must be 1080");
+    assert_eq!(vm.bus.read_u32(menu_gp_bm + 10, true).unwrap(), msx68k_bus::EXT_TVRAM_BASE, "menuGrafPort baseAddr must be EXT_TVRAM_BASE");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 14, true).unwrap(), 240, "menuGrafPort rowBytes must be 240");
 }

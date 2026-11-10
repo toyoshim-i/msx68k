@@ -1107,31 +1107,20 @@ When resolution expands live:
    - Clears text scroll registers (`text_base + 0x15364`, `+0x5525A`) to (0, 0).
    - Patches Menubar GrafPort `portRect.right` (`menu_gp + 8`) and `menu_bm.bounds.right` (`menu_bm + 6`).
    - Clamps and updates `MouseWorkArea` bounds (`a4 + 0x34..3C`) and mouse position (`a4 + 0x0A..0E`).
-   - **Menu GrafPort & Menubar Window Rescaling (`*(text_base + 0x54AE0)`, `*(text_base + 0x543C6)`)**:
+   - **Menu GrafPort & Popup Clamping Value Chain (`0x552F6` -> `0x55278` -> `menuGrafPort` -> `MNSelect`)**:
      - `MNInit` (`0x049CB2`) allocates a 64-byte `GrafPort` at boot and stores its pointer in `menuGrafPort = *(text_base + 0x54AE0)`.
-     - When the user right-clicks (`E_MSRDOWN`), `SXWIN.X` invokes `MNSelect` (`Trap $A268` at `0x04A4AE`), setting the active port to `menuGrafPort`, clamping the popup rect against `menuGrafPort->bmap->rect`, saving the background via `GMCopyBits` from `menuGrafPort->bmap`, and rendering into `menuGrafPort` clipped to `menuGrafPort->visible`.
-     - `apply_screen_resolution` rescales `menuGrafPort`'s port rect (`+0x04`), bitmap (`+0x00`), `visRgn` (`+0x10`), and `clipRgn` (`+0x14`) to `(w, h)`, and points `baseAddr` to `EXT_TVRAM_BASE` (`$1000_0000`) with matching stride when extended resolutions are active.
+     - When `MNInit` initializes `menuGrafPort`, it invokes `GMInitGraph(0, menuGrafPort)`, which copies the active screen mode bitmap structure from `text_base + 0x55278` into `menuGrafPort->bmap`.
+     - At boot time, `SYS/FSX.X` invokes `GMInitScreen` (`Trap $A1C2` at `0x012F48`), copying the selected screen mode definition from the mode preset table (`text_base + 0x552F6..0x5537A`, 7 entries, stride 22 bytes) into `text_base + 0x55278`.
+     - When the user right-clicks on the desktop (`E_MSRDOWN`), `SXWIN.X` invokes `MNSelect` (`Trap $A268` at `0x04A4AE`), which sets the active port to `menuGrafPort` and passes `menuGrafPort->bmap->rect` as parameter `24(A6)` to the popup menu engine (`0x049F2A`). At `0x049FE6`, the engine reads `bounds.topleft` (`D6`) and `bounds.botright` (`D7`) from `24(A6)` and invokes `GMAdjustRect` (`0x04A002`) to clamp the menu inside this rectangle.
+     - Therefore, updating all 7 mode table presets (`0x552F6..0x5537A`), `0x55278`, `0x5528E`, and `menuGrafPort` (when already allocated) in `apply_screen_resolution` establishes the single source of truth across the entire system. `menuGrafPort->bmap->rect` naturally spans the full extended dimensions `(0, 0, width, height)` without requiring any binary code patches in `SYS/FSX.X`.
      - The Menubar window `*(text_base + 0x543C6)` has its port rect width and bitmap dimensions updated to `(width, menu_h)` so the menubar spans full screen width.
    - **Extended TVRAM Window Preservation Across Resolution Switching Cycles**:
      - When switching between extended and standard resolutions (e.g. `1920×1080 -> 768×512 -> 1920×1080`), `X68kBus.saved_ext_tvram` preserves the highest watermark extended framebuffer.
      - When re-entering an extended mode, `saved_ext_tvram` is restored before applying active scanline copies.
      - During desktop stipple fill in Step 5, a 16-bit `keep_mask` is computed for each column intersecting any visible window in `open_window_outside_rects`, preserving window frames and client pixels in the extended desktop area.
-   - **Popup Menu Bounds Patch (`text_base + 0x049FE6`)**:
-     - In `SYS/FSX.X`, the popup menu engine at `0x049F2A` is invoked by `MNSelect` (`$A268`), `MMPopUp` (`$A26A`), `MMPopUp2` (`$A26C`), and recursive submenus (`0x04A282`).
-     - Callers of `MMPopUp` or submenus pass a bounds rect pointer in parameter `24(A6)` that defaults to `(0, 0, 768, 512)`. At `text_base + 0x049FE6`, the original code loaded `bounds.topleft` (`D6`) and `bounds.botright` (`D7`) from `24(A6)`:
-       ```m68k
-       00049fe6: 2a6e 0018      movea.l 24(a6), a5   ; Parameter 5: bounds rect pointer
-       00049fea: 2c15           move.l  (a5), d6     ; bounds.topleft
-       00049fec: 2e2d 0004      move.l  4(a5), d7    ; bounds.botright
-       ```
-     - This caused `GMAdjustRect` at `0x04A002` to clamp popup menu positions inside `(0, 0, 768, 512)`, preventing popup menus from appearing in extended screen space when right-clicking past `x = 768` or `y = 512`.
-     - `apply_screen_resolution` patches `text_base + 0x049FE6..0x049FF0` (10 bytes: `lea (text_base + 0x54372).l, a5; move.l (a5)+, d6; move.l (a5), d7`) to directly load the clamping bounds from the Global Screen Rect (`text_base + 0x54372`), enabling popup menus anywhere across the extended desktop.
-   - **TextEdit Dynamic Line-Wrapping Patch (`TMSetWrap` at `text_base + 0x00D840` and `0x00D8B4`)**:
-     - In `SYS/FSX.X` TextEdit, sentinel value `0x04000400` (`te->wrapRecord == NULL`) indicates that text wraps dynamically to match the window's `destRect.right` width.
-     - However, applications like `シャーペン.X` call `TMSetWrap(te, 768)` (`Trap $A488` at `text_base + 0x00D80E`) with their 96-column (768 px) default ruler setting, enforcing a rigid 768-pixel right margin regardless of how wide the window is resized.
-     - `apply_screen_resolution` patches `TMSetWrap`:
-       - At `text_base + 0x00D840`: converts conditional branch `beq.w +$84` (`[0x67, 0x00, 0x00, 0x84]`) to unconditional branch `bra.w +$84` (`[0x60, 0x00, 0x00, 0x84]`), routing all wrap requests to dynamic wrap setup at `0x00D8C6`.
-       - At `text_base + 0x00D8B4`: NOPs out `bne.s` (`0x66 0x10` -> `[0x4E, 0x71]`) so existing fixed wrap handles at `0x86(A5)` are safely disposed when windows resize.
+   - **Application Window Geometries and Ruler Margins Across Resolution Switches**:
+     - Applications running during a runtime resolution switch (e.g. via `SXMODE.X`) retain their previously configured window bounds and cached geometries. Classic SX-Window has no system-wide window reconfiguration broadcast or notification event mechanism, which is an accepted limitation of 1990s desktop operating systems.
+     - In text editor applications such as `シャーペン.X` (Sharpen), text line wrapping defaults to 96 columns (768 px = 96 × 8 pixels). This is Sharpen's own internal default ruler setting (configurable via command-line option `-M<columns>` or interactively via the in-app ruler dialog with `ESC+!`), not a hardcoded screen size constraint. `SYS/FSX.X` TextEdit remains completely unpatched.
    - **Font Manager (`IFM.X`) Vector Table (`$A500..$A516`, `$A198`) & Burst Frame Pacing**:
      - `IFM.X` installs 23 A-line trap vectors (`$A500` through `$A516`) for outline font handling (font open/close, metrics, Bezier curve evaluation, polygon triangulation, and glyph caching) and hooks `$A198` (`GMDrawText`) to intercept and render outline fonts into any active `GrafPort`.
      - Outline font path rendering performs intensive floating-point and fixed-point Bezier subdivision. In `msx68k-app`, `CpuSpeedMode::Burst` executes up to `1,000,000` instructions per 1/60s frame while maintaining exact `TARGET_TICKS_60HZ` (166,667 cycles) peripheral pacing, accelerating `IFM.X` font rendering by 4×–5× without breaking V-Blank or timer IRQ accuracy.
