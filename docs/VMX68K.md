@@ -108,6 +108,11 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 ## 5. Known Facts
 
 - `X68kVm` is `Send`, so a VM can move to and run on a thread of its own.
+- `VmThread` (`crates/msx68k-bus/src/vm_thread.rs`) runs a VM on a thread of its own, one frame
+  of guest time at a time, at real-time pace or unthrottled for tests. Other threads reach the
+  VM only through requests it carries out between frames. On it, Human68k 3.02 boots from
+  `disks/HUMAN302.XDF` to the `A>` prompt in about 10 s of guest time at 10 MHz
+  (`crates/msx68k-vicon/tests/vm_thread_boot.rs`).
 - The VICON compositor (`crates/msx68k-vicon`) currently uploads the whole TVRAM, GVRAM, and
   palette every frame, and draws the host cursor into its TVRAM copy; both change with Section
   3.3.

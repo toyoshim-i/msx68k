@@ -18,6 +18,7 @@ pub mod sxwin;
 pub mod timing;
 pub mod vicon;
 pub mod vm;
+pub mod vm_thread;
 
 pub use msx68k_cpu::{Bus, BusFault, CpuModel, NoopTrapHandler, TrapHandler};
 pub use bus::{
