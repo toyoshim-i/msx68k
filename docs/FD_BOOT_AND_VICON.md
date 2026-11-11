@@ -43,6 +43,7 @@ Implemented in [`crates/msx68k-bus/src/fdc.rs`](../crates/msx68k-bus/src/fdc.rs)
    - Writing `$E94007` with bit 7 (`Motor ON`) on a drive with an inserted disk transitions the drive to `Ready` (`ST3_RY = 0x20`) and raises an Attention Interrupt (`ST0 = 0xC0 | unit`, `PCN`) serviced via `SENSE INTERRUPT STATUS` (`0x08`).
 3. **Sector DMA Transfers (`READ DATA` `0x06`, `WRITE DATA` `0x05`)**:
    - Supports standard 2HD `.XDF` (`1,261,568` bytes: `77` cylinders × `2` heads × `8` sectors × `1024` bytes, `N = 3`) as well as 9-sector 2HD, 18-sector 2HQ, and 2DD disk geometries.
+   - `.DIM` images of 2HD, 2HC, and 2HQ media are expanded into raw sector images on insertion; tracks flagged absent in the DIM header read as `$E5` filler.
    - Multi-sector (`EOT`) and multi-track (`MT = 0x80`) reads/writes stream bytes through **HD63450 DMAC Channel 0** (`No Chaining`, `Array Chaining`, and `Link Array Chaining`), updating `MAR`/`MTC`, setting `CSR_COC` (`0x80`), and asserting both DMAC Level 3 and FDC Level 1 interrupts upon completion.
 
 ---

@@ -53,7 +53,7 @@ For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing
 
 ## 2. Quick Start
 
-Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and floppy disk images (`.XDF` / `.2HD`) in `disks/`:
+Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and floppy disk images (`.XDF` / `.2HD` / `.DIM`) in `disks/`:
 
 ```bash
 # Boot all-in-one SX-Window v3.1 from Virtual SCSI HDD (auto-builds disks/SXWIN31.HDS on first run):

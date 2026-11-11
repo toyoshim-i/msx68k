@@ -232,6 +232,57 @@ impl FloppyGeometry {
         }
     }
 
+    /// Expands a `.DIM` image (2HD, 2HC, or 2HQ) into the raw sector image of its geometry.
+    ///
+    /// A DIM image is a 256-byte header followed by track data. Header byte 0 is the media type,
+    /// and bytes 1.. flag the tracks present; absent tracks may be left out of the data, and they
+    /// expand to unformatted-looking `$E5` filler.
+    pub fn expand_dim(data: &[u8]) -> Option<(Self, Vec<u8>)> {
+        const HEADER_BYTES: usize = 256;
+        let geometry = match *data.first()? {
+            0 => Self::XDF_2HD,
+            2 => Self {
+                cylinders: 80,
+                heads: 2,
+                sectors_per_track: 15,
+                sector_size_code: 2,
+                first_sector_id: 1,
+            },
+            9 => Self {
+                cylinders: 80,
+                heads: 2,
+                sectors_per_track: 18,
+                sector_size_code: 2,
+                first_sector_id: 1,
+            },
+            _ => return None,
+        };
+        let tracks = geometry.cylinders as usize * geometry.heads as usize;
+        let track_bytes = geometry.sectors_per_track as usize * geometry.sector_bytes();
+        let present = data.get(1..1 + tracks)?;
+        let present_count = present.iter().filter(|&&flag| flag != 0).count();
+        let body = data.get(HEADER_BYTES..)?;
+        let absent_stored = if body.len() == tracks * track_bytes {
+            true
+        } else if body.len() == present_count * track_bytes {
+            false
+        } else {
+            return None;
+        };
+        let mut image = vec![0xE5; tracks * track_bytes];
+        let mut src = 0;
+        for (track, &flag) in present.iter().enumerate() {
+            if flag != 0 {
+                image[track * track_bytes..][..track_bytes]
+                    .copy_from_slice(&body[src..src + track_bytes]);
+            }
+            if flag != 0 || absent_stored {
+                src += track_bytes;
+            }
+        }
+        Some((geometry, image))
+    }
+
     #[inline]
     pub const fn sector_bytes(&self) -> usize {
         128usize << self.sector_size_code
@@ -359,13 +410,17 @@ impl Fdc {
         ioi.set_fdc_signal(false);
     }
 
-    /// Inserts a floppy disk image (`.XDF` / `.2HD` / `.2DD`) into drive `unit` (`0..=3`).
+    /// Inserts a floppy disk image (`.XDF` / `.2HD` / `.2DD` / `.DIM`) into drive `unit` (`0..=3`).
     pub fn insert_disk(&mut self, unit: usize, data: Vec<u8>, write_protected: bool) -> bool {
         if unit >= 4 {
             return false;
         }
-        let Some(geometry) = FloppyGeometry::from_image_len(data.len()) else {
-            return false;
+        let (geometry, data) = match FloppyGeometry::from_image_len(data.len()) {
+            Some(geometry) => (geometry, data),
+            None => match FloppyGeometry::expand_dim(&data) {
+                Some(expanded) => expanded,
+                None => return false,
+            },
         };
         let drv = &mut self.drives[unit];
         drv.connected = true;
@@ -776,5 +831,36 @@ impl Fdc {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_dim_fills_absent_tracks() {
+        let track_bytes = 8 * 1024;
+        let mut dim = vec![0u8; 256];
+        dim[1..1 + 154].fill(1);
+        dim[1 + 3] = 0;
+        for track in (0..154).filter(|&t| t != 3) {
+            dim.extend(std::iter::repeat_n(track as u8, track_bytes));
+        }
+
+        let (geometry, image) = FloppyGeometry::expand_dim(&dim).expect("2HD DIM");
+        assert_eq!(geometry, FloppyGeometry::XDF_2HD);
+        assert_eq!(image.len(), 1_261_568);
+        assert!(image[2 * track_bytes..][..track_bytes].iter().all(|&b| b == 2));
+        assert!(image[3 * track_bytes..][..track_bytes].iter().all(|&b| b == 0xE5));
+        assert!(image[153 * track_bytes..].iter().all(|&b| b == 153));
+    }
+
+    #[test]
+    fn expand_dim_rejects_truncated_data() {
+        let mut dim = vec![0u8; 256];
+        dim[1..1 + 154].fill(1);
+        dim.extend(std::iter::repeat_n(0, 1_261_568 - 1));
+        assert!(FloppyGeometry::expand_dim(&dim).is_none());
     }
 }

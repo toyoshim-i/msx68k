@@ -267,8 +267,8 @@ impl AppArgs {
                          Options:\n  \
                            --ipl <path>         Path to the IPL ROM (default: {DEFAULT_IPL_PATH}, {DEFAULT_IPL30_PATH} for 68030)\n  \
                            --cgrom <path>       Path to CGROM.DAT  (default: {DEFAULT_CGROM_PATH})\n  \
-                           --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD)\n  \
-                           --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
+                           --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD/.DIM)\n  \
+                           --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD/.DIM)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \

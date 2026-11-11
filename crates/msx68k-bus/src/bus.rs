@@ -489,7 +489,7 @@ impl X68kBus {
         }
     }
 
-    /// Inserts a floppy disk image (`.XDF` / `.2HD` / `.2DD`) into FDD unit `unit` (`0..=3`).
+    /// Inserts a floppy disk image (`.XDF` / `.2HD` / `.2DD` / `.DIM`) into FDD unit `unit` (`0..=3`).
     pub fn insert_floppy(&mut self, unit: usize, data: Vec<u8>, write_protected: bool) -> bool {
         self.fdc.insert_disk(unit, data, write_protected)
     }
