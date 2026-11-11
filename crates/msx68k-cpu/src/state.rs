@@ -192,6 +192,8 @@ pub struct CpuState {
     pub dfc: u8,
     /// MC68030 MMU registers, written and read by `PMOVE`.
     pub mmu: MmuRegisters,
+    /// MC68030 cache tags and instruction overlap, used for cycle-accurate timing.
+    pub timing030: crate::timing030::Timing030,
     /// `true` when the CPU is halted in `STOP` state waiting for an interrupt/reset.
     pub stopped: bool,
     /// Current external interrupt priority level (`0`..=`7`).
@@ -237,6 +239,7 @@ impl CpuState {
             sfc: 0,
             dfc: 0,
             mmu: MmuRegisters::new(),
+            timing030: crate::timing030::Timing030::new(),
             stopped: false,
             pending_ipl: 0,
             nmi_pending: false,

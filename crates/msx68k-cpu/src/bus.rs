@@ -67,6 +67,27 @@ pub struct NoopTrapHandler;
 
 impl<B> TrapHandler<B> for NoopTrapHandler {}
 
+/// Bus cycle parameters of an address for an MC68030.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct BusCycle030 {
+    /// Wait states (clocks beyond the 2-clock minimum bus cycle).
+    pub wait: u8,
+    /// The port is 16 bits wide, so a long word takes two bus cycles.
+    pub port16: bool,
+    /// The address may be cached (the system does not assert `CIIN`).
+    pub cacheable: bool,
+}
+
+impl Default for BusCycle030 {
+    fn default() -> Self {
+        Self {
+            wait: 0,
+            port16: false,
+            cacheable: true,
+        }
+    }
+}
+
 /// Memory and I/O bus interface for the MC68000 CPU.
 ///
 /// The MC68000 has a 16-bit external data bus and a 24-bit address bus (`$000000`–`$FFFFFF`).
@@ -107,6 +128,14 @@ pub trait Bus {
     #[inline]
     fn wait_cycles_16(&mut self, _addr: u32, _is_write: bool) -> u32 {
         0
+    }
+
+    /// Returns the MC68030 bus cycle parameters of `addr`.
+    ///
+    /// Called only by a cycle-tracked MC68030 policy.
+    #[inline]
+    fn bus_cycle_030(&mut self, _addr: u32) -> BusCycle030 {
+        BusCycle030::default()
     }
 
     /// Asserts the hardware `RESET` line to external peripherals (invoked by `RESET` opcode).

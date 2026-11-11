@@ -2,7 +2,7 @@
 //! region-aware wait-state lookup, and full on-board peripheral emulation
 //! (CRTC, VICON/Palette, DMAC, MFP, RTC, System Port, OPM, ADPCM, FDC/FDD, SASI HDC, SCC, PPI, IOI).
 
-use msx68k_cpu::{Bus, BusFault};
+use msx68k_cpu::{Bus, BusCycle030, BusFault, CpuModel};
 
 use crate::crtc::Crtc;
 use crate::dmac::Dmac;
@@ -161,6 +161,8 @@ pub struct X68kBus {
     /// whose `HUMAN.SYS` and `SYS/FSX.X` use no address bits above 24 as flags. Otherwise the
     /// range mirrors the 24-bit space like every other address above it, for compatibility.
     pub extensions_reserved: bool,
+    /// CPU the VM runs, for the system port's MPU identification and MC68030 bus timing.
+    pub cpu_model: CpuModel,
     /// Lets guest code read and write the extended screen, as verification against the guest
     /// drawing routines needs. Otherwise such accesses are dropped and counted as illegal.
     pub guest_screen_mapped: bool,
@@ -242,6 +244,7 @@ impl X68kBus {
             native_gm_enabled: true,
             native_gm_calls: 0,
             extensions_reserved: false,
+            cpu_model: CpuModel::Mc68000,
             guest_screen_mapped: false,
             illegal_reserved_accesses: 0,
             last_a_line: (0, 0),
@@ -639,6 +642,16 @@ impl Bus for X68kBus {
         self.wait_table.wait_for_addr(addr)
     }
 
+    fn bus_cycle_030(&mut self, addr: u32) -> BusCycle030 {
+        if self.in_reserved_range(addr) {
+            // msx68k extensions answer from the host, without bus cycles worth modelling.
+            return BusCycle030::default();
+        }
+        let a = addr & 0x00FF_FFFF;
+        let (rom_wait, ram_wait) = self.sysport.x68030_memory_waits();
+        MemoryRegion::from_addr(a).x68030_bus_cycle(a, rom_wait, ram_wait)
+    }
+
     fn reset_peripherals(&mut self) {
         self.dmac.reset();
         self.mfp.reset();
@@ -718,6 +731,10 @@ impl Bus for X68kBus {
                 if (a & 1) == 0 {
                     Ok(0xFF)
                 } else {
+                    if (a & 0x0F) == 0x0B && self.cpu_model == CpuModel::Mc68030 {
+                        // MPU type and clock of the 25 MHz X68030.
+                        return Ok(0xDC);
+                    }
                     Ok(self.sysport.read_u8(a, self.wait_table.config().cpu_mhz))
                 }
             }

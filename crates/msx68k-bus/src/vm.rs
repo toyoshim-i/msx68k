@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use msx68k_cpu::{
     Burst030Policy, BurstPolicy, BusFault, CpuCore, CpuModel, CpuPolicy, CpuState, StepOutcome,
-    TrackedPolicy, TrapHandler,
+    Tracked030Policy, TrackedPolicy, TrapHandler,
 };
 
 use crate::bus::{X68kBus, MAX_MAIN_RAM_BYTES};
@@ -123,7 +123,8 @@ fn iocs_sys_stat(state: &mut CpuState, bus: &mut X68kBus) -> msx68k_cpu::TrapRes
 macro_rules! with_policy {
     ($self:ident, $method:ident $(::<$($rest:ty),*>)? ($($arg:expr),*)) => {
         match ($self.cpu_state.model, $self.is_running_burst()) {
-            (CpuModel::Mc68030, _) => $self.$method::<Burst030Policy $($(, $rest)*)?>($($arg),*),
+            (CpuModel::Mc68030, true) => $self.$method::<Burst030Policy $($(, $rest)*)?>($($arg),*),
+            (CpuModel::Mc68030, false) => $self.$method::<Tracked030Policy $($(, $rest)*)?>($($arg),*),
             (CpuModel::Mc68000, true) => $self.$method::<BurstPolicy $($(, $rest)*)?>($($arg),*),
             (CpuModel::Mc68000, false) => $self.$method::<TrackedPolicy $($(, $rest)*)?>($($arg),*),
         }
@@ -152,8 +153,7 @@ pub struct VmConfig {
     pub ram_size_bytes: usize,
     /// Whether to temporarily switch to `Burst` mode during disk I/O operations.
     pub burst_on_disk_io: bool,
-    /// Emulated CPU. An MC68030 always runs in Burst mode, since its cycle timing is not
-    /// modelled yet.
+    /// Emulated CPU. An MC68030 is cycle-accurate at [`CpuSpeedMode::Mhz25`] (the X68030).
     pub cpu_model: CpuModel,
 }
 
@@ -282,6 +282,8 @@ pub struct X68kVm {
     pub(crate) debug: DebugState,
     /// Host time reference for [`FrameBudget::RealTime`].
     pub(crate) host_clock: HostClock,
+    /// CPU cycles times 10 not yet turned into whole 10 MHz peripheral ticks.
+    tick_remainder: u32,
 }
 
 impl X68kVm {
@@ -292,6 +294,7 @@ impl X68kVm {
         // Only the master SX-Window VM runs software known not to use upper address bits as
         // flags, so other VMs keep the 68000's mirroring for compatibility.
         bus.extensions_reserved = config.role == VmRole::MasterSx;
+        bus.cpu_model = config.cpu_model;
         Self {
             config,
             cpu_state: CpuState::with_model(config.cpu_model),
@@ -299,6 +302,7 @@ impl X68kVm {
             disk_io_burst_active: false,
             debug: DebugState::default(),
             host_clock: HostClock::default(),
+            tick_remainder: 0,
         }
     }
 
@@ -357,9 +361,7 @@ impl X68kVm {
     /// or, for an MC68030, [`Burst030Policy`]).
     #[inline]
     pub const fn is_running_burst(&self) -> bool {
-        self.disk_io_burst_active
-            || self.config.speed_mode.is_burst()
-            || matches!(self.cpu_state.model, CpuModel::Mc68030)
+        self.disk_io_burst_active || self.config.speed_mode.is_burst()
     }
 
     /// Returns the emulated CPU.
@@ -391,11 +393,16 @@ impl X68kVm {
     }
 
     /// Peripheral time, in 10 MHz ticks, that one instruction of `outcome` stands for.
+    ///
+    /// Tracked cycles carry their remainder over, since an MC68030 instruction often takes
+    /// less than one 10 MHz tick.
     #[inline(always)]
-    fn peripheral_ticks<P: CpuPolicy>(&self, outcome: StepOutcome) -> u32 {
+    fn peripheral_ticks<P: CpuPolicy>(&mut self, outcome: StepOutcome) -> u32 {
         if P::TRACK_CYCLES {
             let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
-            (outcome.cycles.saturating_mul(10) / cpu_mhz).max(1)
+            let total = outcome.cycles.saturating_mul(10) + self.tick_remainder;
+            self.tick_remainder = total % cpu_mhz;
+            total / cpu_mhz
         } else if outcome.stopped {
             64
         } else {
@@ -474,13 +481,21 @@ impl X68kVm {
             with_policy!(self, run_steps_with::<_>(target_cycles as usize, trap_handler));
             return 0;
         }
-        let mut core = CpuCore::<TrackedPolicy>::from_state(std::mem::take(&mut self.cpu_state));
+        with_policy!(self, run_cycles_with::<_>(target_cycles, trap_handler))
+    }
+
+    fn run_cycles_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
+        &mut self,
+        target_cycles: u32,
+        trap_handler: &mut T,
+    ) -> u32 {
+        let mut core = CpuCore::<P>::from_state(std::mem::take(&mut self.cpu_state));
         let mut elapsed = 0u32;
         while elapsed < target_cycles {
             core.state.set_ipl(self.bus.highest_pending_ipl());
             let out = core.step(&mut self.bus, trap_handler);
             elapsed = elapsed.saturating_add(out.cycles);
-            let ticks = self.peripheral_ticks::<TrackedPolicy>(out);
+            let ticks = self.peripheral_ticks::<P>(out);
             self.bus.advance_peripherals(ticks);
         }
         core.state.set_ipl(self.bus.highest_pending_ipl());

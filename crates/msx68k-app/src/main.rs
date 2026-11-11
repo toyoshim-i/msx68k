@@ -106,14 +106,6 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(sc)
 }
 
-/// Speed mode `vm` actually runs at. An MC68030 has no cycle-accurate mode yet.
-fn effective_speed_mode(vm: &X68kVm) -> CpuSpeedMode {
-    match vm.cpu_model() {
-        CpuModel::Mc68030 => CpuSpeedMode::Burst,
-        CpuModel::Mc68000 => vm.speed_mode(),
-    }
-}
-
 /// Host time left free each frame for rendering while Burst runs flat out.
 const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
 
@@ -126,7 +118,8 @@ struct AppArgs {
     fd1_path: Option<PathBuf>,
     hdd0_path: Option<PathBuf>,
     sram_path: PathBuf,
-    speed_mode: CpuSpeedMode,
+    /// Speed given by `--speed`; otherwise 10 MHz for the MC68000 and 25 MHz for the MC68030.
+    speed_mode: Option<CpuSpeedMode>,
     cpu_model: CpuModel,
     ram_mb: usize,
     scale: u32,
@@ -160,7 +153,7 @@ impl Default for AppArgs {
             fd1_path,
             hdd0_path,
             sram_path,
-            speed_mode: CpuSpeedMode::Mhz10,
+            speed_mode: None,
             cpu_model: CpuModel::Mc68000,
             ram_mb: 4,
             scale: 1,
@@ -210,13 +203,14 @@ impl AppArgs {
                 "--speed" => {
                     if let Some(s) = args.next() {
                         cfg.speed_mode = match s.to_ascii_lowercase().as_str() {
-                            "10" | "10mhz" => CpuSpeedMode::Mhz10,
-                            "16" | "16mhz" => CpuSpeedMode::Mhz16,
-                            "24" | "24mhz" => CpuSpeedMode::Mhz24,
-                            "burst" | "0" => CpuSpeedMode::Burst,
+                            "10" | "10mhz" => Some(CpuSpeedMode::Mhz10),
+                            "16" | "16mhz" => Some(CpuSpeedMode::Mhz16),
+                            "24" | "24mhz" => Some(CpuSpeedMode::Mhz24),
+                            "25" | "25mhz" => Some(CpuSpeedMode::Mhz25),
+                            "burst" | "0" => Some(CpuSpeedMode::Burst),
                             _ => {
-                                eprintln!("Unknown --speed '{}', defaulting to 10MHz", s);
-                                CpuSpeedMode::Mhz10
+                                eprintln!("Unknown --speed '{}', using the CPU's default", s);
+                                None
                             }
                         };
                     }
@@ -276,8 +270,8 @@ impl AppArgs {
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
-                           --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
-                           --cpu <model>        CPU: 68000 | 68030 (default: 68000; 68030 always runs as burst)\n  \
+                           --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
+                           --cpu <model>        CPU: 68000 | 68030 (default: 68000)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
@@ -322,7 +316,10 @@ impl Msx68kApp {
     fn new(args: AppArgs) -> Self {
         let mut vm = X68kVm::new(
             VmConfig::master_sx()
-                .with_speed_mode(args.speed_mode)
+                .with_speed_mode(args.speed_mode.unwrap_or(match args.cpu_model {
+                    CpuModel::Mc68000 => CpuSpeedMode::Mhz10,
+                    CpuModel::Mc68030 => CpuSpeedMode::Mhz25,
+                }))
                 .with_cpu_model(args.cpu_model)
                 .with_ram_mb(args.ram_mb),
         );
@@ -470,7 +467,7 @@ impl Msx68kApp {
         println!(
             "Initialized X68000 VM ({:?} {:?}, {} MB RAM, initial PC=${:06X})",
             vm.cpu_model(),
-            effective_speed_mode(&vm),
+            vm.speed_mode(),
             args.ram_mb,
             vm.cpu_state.pc
         );
@@ -586,10 +583,11 @@ impl Msx68kApp {
             if self.last_title_update.elapsed() >= Duration::from_millis(250) {
                 self.last_title_update = Instant::now();
                 let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
-                let speed_label = match effective_speed_mode(&self.vm) {
+                let speed_label = match self.vm.speed_mode() {
                     CpuSpeedMode::Mhz10 => "10MHz",
                     CpuSpeedMode::Mhz16 => "16MHz (XVI)",
                     CpuSpeedMode::Mhz24 => "24MHz (RedZone)",
+                    CpuSpeedMode::Mhz25 => "25MHz (X68030)",
                     CpuSpeedMode::Burst => "Burst",
                     CpuSpeedMode::Custom(_) => "Custom",
                 };
@@ -619,7 +617,7 @@ impl Msx68kApp {
     }
 
     fn frame_budget(&self) -> FrameBudget {
-        match effective_speed_mode(&self.vm) {
+        match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
                 let deadline = self.next_frame_deadline - BURST_RENDER_RESERVE;
                 if self.vm.bus.is_mouse_polling_active() {

@@ -296,4 +296,27 @@ mod tests {
         vm.set_disk_io_active(false);
         assert!(!vm.is_running_burst());
     }
+
+    #[test]
+    fn test_x68030_bus_cycles_follow_the_system_port_waits() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Mhz25.timing_config());
+        bus.cpu_model = CpuModel::Mc68030;
+        assert_eq!(bus.read_u8(0x00E8_E00B, true).unwrap(), 0xDC);
+
+        // Until the IPL ROM writes $E8E009, ROM and RAM run without waits.
+        assert_eq!(bus.bus_cycle_030(0x1000).wait, 0);
+        bus.write_u8(0x00E8_E009, 0x10, true).unwrap();
+        let ram = bus.bus_cycle_030(0x1000);
+        let rom = bus.bus_cycle_030(0x00FF_0000);
+        assert_eq!((ram.wait, ram.port16, ram.cacheable), (0, false, true));
+        assert_eq!((rom.wait, rom.port16, rom.cacheable), (3, false, true));
+        bus.write_u8(0x00E8_E009, 0x02, true).unwrap();
+        assert_eq!(bus.bus_cycle_030(0x1000).wait, 4);
+
+        let tvram = bus.bus_cycle_030(0x00E0_0000);
+        assert_eq!((tvram.wait, tvram.port16, tvram.cacheable), (7, true, false));
+        assert_eq!(bus.bus_cycle_030(0x00E8_2000).wait, 11, "palette");
+        assert_eq!(bus.bus_cycle_030(0x00E8_2400).wait, 6, "video controller");
+        assert_eq!(bus.bus_cycle_030(0x00E8_8001).wait, 19, "MFP");
+    }
 }

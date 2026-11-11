@@ -33,13 +33,22 @@ impl CpuPolicy for BurstPolicy {
 }
 
 /// Uncapped zero-wait execution policy for an MC68030 CPU.
-///
-/// There is no cycle-tracked MC68030 policy yet: the MC68030's instruction timing (caches,
-/// pipelining, 32-bit bus) differs too much from the MC68000 tables to reuse them.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Burst030Policy;
 
 impl CpuPolicy for Burst030Policy {
     const TRACK_CYCLES: bool = false;
+    const MC68030: bool = true;
+}
+
+/// Cycle-accurate MC68030 execution policy (the 25 MHz X68030).
+///
+/// Instruction timing follows Section 11 of the MC68030 User's Manual
+/// ([`crate::timing030`]), with the bus wait states of [`crate::Bus::bus_cycle_030`].
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct Tracked030Policy;
+
+impl CpuPolicy for Tracked030Policy {
+    const TRACK_CYCLES: bool = true;
     const MC68030: bool = true;
 }

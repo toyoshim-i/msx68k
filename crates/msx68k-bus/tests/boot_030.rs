@@ -8,10 +8,17 @@ use msx68k_bus::{Bus, CpuModel, CpuSpeedMode, VmConfig, X68kVm};
 /// Human68k's MPU type byte (`0` for the MC68000, `3` for the MC68030).
 const MPU_TYPE: u32 = 0x0CBC;
 
-fn boot(cpu_model: CpuModel, hdd: Vec<u8>, ipl: &[u8], cgrom: &[u8]) -> X68kVm {
+fn boot(
+    cpu_model: CpuModel,
+    speed: CpuSpeedMode,
+    hdd: Vec<u8>,
+    ipl: &[u8],
+    cgrom: &[u8],
+) -> X68kVm {
     let mut vm = X68kVm::new(
         VmConfig::master_sx()
-            .with_speed_mode(CpuSpeedMode::Burst)
+            .with_speed_mode(speed)
+            .with_burst_on_disk_io(false)
             .with_ram_mb(4)
             .with_cpu_model(cpu_model),
     );
@@ -24,7 +31,10 @@ fn boot(cpu_model: CpuModel, hdd: Vec<u8>, ipl: &[u8], cgrom: &[u8]) -> X68kVm {
 }
 
 fn desktop_shown(vm: &X68kVm) -> bool {
-    let tv_non_zero = vm.bus.tvram().map_or(0, |tv| tv.iter().filter(|&&b| b != 0).count());
+    let tv_non_zero = vm
+        .bus
+        .tvram()
+        .map_or(0, |tv| tv.iter().filter(|&&b| b != 0).count());
     vm.bus.vicon.r0_mode() == 0x0004 && vm.bus.vicon.r2_display() == 0x003F && tv_non_zero > 140_000
 }
 
@@ -53,44 +63,81 @@ fn media() -> Option<Media> {
 }
 
 fn rom(name: &str) -> Option<Vec<u8>> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../roms").join(name)).ok()
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../roms")
+            .join(name),
+    )
+    .ok()
 }
 
-/// Boots SX-Window on `cpu_model` with `ipl`, checks the desktop and the MPU type Human68k
-/// found, and compares the settled desktop with an MC68000 boot on IPL ROM 1.0.
-fn check_desktop(cpu_model: CpuModel, ipl: &[u8], media: &Media) {
-    let mut vm = boot(cpu_model, media.hdd.clone(), ipl, &media.cgrom);
+/// Boots SX-Window on an MC68030 at `speed` with `ipl`, checks the desktop and the MPU type
+/// Human68k found, and compares the settled desktop with an MC68000 boot on IPL ROM 1.0.
+/// Returns the VM at the desktop.
+fn check_desktop(speed: CpuSpeedMode, ipl: &[u8], media: &Media) -> X68kVm {
+    let mut vm = boot(
+        CpuModel::Mc68030,
+        speed,
+        media.hdd.clone(),
+        ipl,
+        &media.cgrom,
+    );
     for _ in 0..120 {
-        vm.run_steps(250_000);
+        if speed == CpuSpeedMode::Burst {
+            vm.run_steps(250_000);
+        } else {
+            // A quarter of a second of 25 MHz cycles.
+            vm.run_cycles(25_000_000 / 4);
+        }
         if desktop_shown(&vm) {
             break;
         }
     }
     assert!(
         desktop_shown(&vm),
-        "SX-Window desktop did not appear on {cpu_model:?} (pc={:08X})",
+        "SX-Window desktop did not appear on the MC68030 at {speed:?} (pc={:08X})",
         vm.cpu_state.pc
     );
-    assert_eq!(vm.bus.read_u8(MPU_TYPE, true).unwrap(), 3, "Human68k must detect the MC68030");
+    assert_eq!(
+        vm.bus.read_u8(MPU_TYPE, true).unwrap(),
+        3,
+        "Human68k must detect the MC68030"
+    );
 
     // Once settled, the desktop matches the one drawn on an MC68000.
     vm.run_steps(5_000_000);
-    let mut reference = boot(CpuModel::Mc68000, media.hdd.clone(), &rom("IPLROM.DAT").unwrap(), &media.cgrom);
+    let mut reference = boot(
+        CpuModel::Mc68000,
+        CpuSpeedMode::Burst,
+        media.hdd.clone(),
+        &rom("IPLROM.DAT").unwrap(),
+        &media.cgrom,
+    );
     reference.run_steps(30_000_000);
     assert_eq!(reference.bus.read_u8(MPU_TYPE, true).unwrap(), 0);
     assert!(
         vm.bus.tvram().unwrap() == reference.bus.tvram().unwrap(),
         "MC68030 desktop differs from the MC68000 one"
     );
+    vm
 }
 
 #[test]
-fn sxwin31_boots_on_x68030_ipl_rom() {
+fn sxwin31_boots_cycle_accurately_on_x68030_ipl_rom() {
     let (Some(media), Some(ipl)) = (media(), rom("IPLROM30.DAT")) else {
         eprintln!("X68030 IPL ROM, CGROM, or disks not found, skipping");
         return;
     };
-    check_desktop(CpuModel::Mc68030, &ipl, &media);
+    let vm = check_desktop(CpuSpeedMode::Mhz25, &ipl, &media);
+    // The IPL ROM sets ROM and RAM waits, and Human68k turns the caches on.
+    assert_ne!(vm.bus.sysport.wait_ctrl, 0xFF);
+    assert_ne!(vm.cpu_state.cacr & 0x0101, 0);
+    // Booting takes about 13 s of emulated time; disk I/O itself is instant here.
+    let seconds = vm.cpu_state.total_cycles / 25_000_000;
+    assert!(
+        (5..30).contains(&seconds),
+        "boot took {seconds} s at 25 MHz"
+    );
 }
 
 /// An MC68030 on the X68000 IPL ROM 1.0 relies on the native `_SYS_STAT`.
@@ -100,5 +147,5 @@ fn sxwin31_boots_on_mc68030_with_x68000_ipl_rom() {
         eprintln!("IPL ROM, CGROM, or disks not found, skipping");
         return;
     };
-    check_desktop(CpuModel::Mc68030, &ipl, &media);
+    check_desktop(CpuSpeedMode::Burst, &ipl, &media);
 }

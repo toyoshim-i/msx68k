@@ -21,7 +21,9 @@ use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
 };
 use gdbstub::target::{Target, TargetError, TargetResult};
-use msx68k_cpu::{Burst030Policy, BurstPolicy, CpuCore, CpuModel, CpuPolicy, TrackedPolicy};
+use msx68k_cpu::{
+    Burst030Policy, BurstPolicy, CpuCore, CpuModel, CpuPolicy, Tracked030Policy, TrackedPolicy,
+};
 
 use crate::vm::{BusTrapHandler, FrameBudget, X68kVm, BURST_SYNC_INSTRUCTIONS};
 

@@ -3,8 +3,8 @@
 //! Encodings come from the GNU assembler (`m68k-linux-gnu-as -m68030`).
 
 use msx68k_cpu::{
-    Burst030Policy, Bus, BusFault, CpuCore, CpuModel, CpuState, NoopTrapHandler, SR_C, SR_M,
-    SR_N, SR_S, SR_V, SR_Z,
+    Burst030Policy, Bus, BusCycle030, BusFault, CpuCore, CpuModel, CpuState, NoopTrapHandler,
+    Tracked030Policy, SR_C, SR_M, SR_N, SR_S, SR_V, SR_Z,
 };
 
 const CODE: u32 = 0x1000;
@@ -15,6 +15,8 @@ struct FlatBus {
     mem: Vec<u8>,
     /// A write-only register: reading it raises a bus error.
     write_only: u32,
+    /// Wait states of every bus cycle.
+    wait: u8,
 }
 
 impl Bus for FlatBus {
@@ -25,15 +27,19 @@ impl Bus for FlatBus {
                 is_write: false,
             });
         }
-        self.mem.get(addr as usize).copied().ok_or(BusFault::BusError {
-            addr,
-            is_write: false,
-        })
+        self.mem
+            .get(addr as usize)
+            .copied()
+            .ok_or(BusFault::BusError {
+                addr,
+                is_write: false,
+            })
     }
 
     fn read_u16(&mut self, addr: u32, supervisor: bool) -> Result<u16, BusFault> {
         assert_eq!(addr & 1, 0, "the core must split misaligned words");
-        Ok(((self.read_u8(addr, supervisor)? as u16) << 8) | self.read_u8(addr + 1, supervisor)? as u16)
+        Ok(((self.read_u8(addr, supervisor)? as u16) << 8)
+            | self.read_u8(addr + 1, supervisor)? as u16)
     }
 
     fn write_u8(&mut self, addr: u32, val: u8, _supervisor: bool) -> Result<(), BusFault> {
@@ -50,9 +56,20 @@ impl Bus for FlatBus {
         self.write_u8(addr, (val >> 8) as u8, supervisor)?;
         self.write_u8(addr + 1, val as u8, supervisor)
     }
+
+    fn bus_cycle_030(&mut self, _addr: u32) -> BusCycle030 {
+        self.cycle()
+    }
 }
 
 impl FlatBus {
+    fn cycle(&self) -> BusCycle030 {
+        BusCycle030 {
+            wait: self.wait,
+            ..BusCycle030::default()
+        }
+    }
+
     fn words(&mut self, addr: u32, words: &[u16]) {
         for (i, w) in words.iter().enumerate() {
             let a = addr as usize + i * 2;
@@ -65,11 +82,19 @@ impl FlatBus {
     }
 
     fn peek_u16(&self, addr: u32) -> u16 {
-        u16::from_be_bytes(self.mem[addr as usize..addr as usize + 2].try_into().unwrap())
+        u16::from_be_bytes(
+            self.mem[addr as usize..addr as usize + 2]
+                .try_into()
+                .unwrap(),
+        )
     }
 
     fn peek_u32(&self, addr: u32) -> u32 {
-        u32::from_be_bytes(self.mem[addr as usize..addr as usize + 4].try_into().unwrap())
+        u32::from_be_bytes(
+            self.mem[addr as usize..addr as usize + 4]
+                .try_into()
+                .unwrap(),
+        )
     }
 }
 
@@ -77,6 +102,7 @@ fn machine(code: &[u16]) -> (CpuCore<Burst030Policy>, FlatBus) {
     let mut bus = FlatBus {
         mem: vec![0; 0x10000],
         write_only: u32::MAX,
+        wait: 0,
     };
     bus.long(0, STACK);
     bus.long(4, CODE);
@@ -95,7 +121,9 @@ fn step(cpu: &mut CpuCore<Burst030Policy>, bus: &mut FlatBus, count: usize) {
 #[test]
 fn long_multiply_and_divide() {
     // mulu.l d1,d2 / muls.l d1,d3:d2 / divs.l d1,d3:d2 / divul.l d1,d3:d2
-    let (mut cpu, mut bus) = machine(&[0x4C01, 0x2000, 0x4C01, 0x2C03, 0x4C41, 0x2C03, 0x4C41, 0x2003]);
+    let (mut cpu, mut bus) = machine(&[
+        0x4C01, 0x2000, 0x4C01, 0x2C03, 0x4C41, 0x2C03, 0x4C41, 0x2003,
+    ]);
     cpu.state.d[1] = 0x10000;
     cpu.state.d[2] = 0x12345;
     step(&mut cpu, &mut bus, 1);
@@ -128,9 +156,17 @@ fn divide_by_zero_pushes_a_format_2_frame() {
     let sp = cpu.state.a[7];
     assert_eq!(sp, STACK - 12);
     assert_eq!(bus.peek_u16(sp), SR_S | 0x0700);
-    assert_eq!(bus.peek_u32(sp + 2), CODE + 4, "return to the next instruction");
+    assert_eq!(
+        bus.peek_u32(sp + 2),
+        CODE + 4,
+        "return to the next instruction"
+    );
     assert_eq!(bus.peek_u16(sp + 6), 0x2014);
-    assert_eq!(bus.peek_u32(sp + 8), CODE, "address of the faulting instruction");
+    assert_eq!(
+        bus.peek_u32(sp + 8),
+        CODE,
+        "address of the faulting instruction"
+    );
 }
 
 #[test]
@@ -334,7 +370,11 @@ fn interrupt_on_master_stack_leaves_a_throwaway_frame() {
     cpu.state.set_ipl(5);
     step(&mut cpu, &mut bus, 1);
     assert_eq!(cpu.state.pc, 0x2000);
-    assert_eq!(cpu.state.a[7], STACK - 8, "handler runs on the interrupt stack");
+    assert_eq!(
+        cpu.state.a[7],
+        STACK - 8,
+        "handler runs on the interrupt stack"
+    );
     assert_eq!(bus.peek_u16(STACK - 8 + 6), 0x1074);
     assert_eq!(bus.peek_u16(0x6000 - 8 + 6), 0x0074);
 
@@ -352,7 +392,11 @@ fn clr_writes_without_reading() {
     bus.write_only = 0x6001;
     bus.mem[0x6001] = 0xAA;
     step(&mut cpu, &mut bus, 1);
-    assert_eq!(cpu.state.pc, CODE + 6, "no bus error from reading the register");
+    assert_eq!(
+        cpu.state.pc,
+        CODE + 6,
+        "no bus error from reading the register"
+    );
     assert_eq!(bus.mem[0x6001], 0);
     assert!(cpu.state.flag(SR_Z));
 }
@@ -375,7 +419,10 @@ fn mmu_registers_move_without_translation() {
     step(&mut cpu, &mut bus, 4);
     assert_eq!(cpu.state.mmu.crp, 0x7FFF_0002_0000_3000);
     assert_eq!(cpu.state.mmu.tc, 0x80D8_3440);
-    assert_eq!((bus.peek_u32(DATA + 16), bus.peek_u32(DATA + 20)), (0x7FFF_0002, 0x3000));
+    assert_eq!(
+        (bus.peek_u32(DATA + 16), bus.peek_u32(DATA + 20)),
+        (0x7FFF_0002, 0x3000)
+    );
     assert_eq!(cpu.state.pc, CODE + 16);
 
     // The MMU instructions are privileged.
@@ -383,4 +430,76 @@ fn mmu_registers_move_without_translation() {
     cpu.state.set_sr(0);
     step(&mut cpu, &mut bus, 1);
     assert_eq!(cpu.state.pc, 0x2000);
+}
+
+/// The instruction sequence of the MC68030 User's Manual, Section 11.3.4.
+const MANUAL_EXAMPLE: [u16; 8] = [
+    0xD2A1, // add.l -(a1),d1
+    0xC3B2, 0x0151, // and.l d1,([a2])
+    0x2356, 0x0008, // move.l (a6),(8,a1)
+    0x4ADB, // tas (a3)+
+    0x4483, // neg.l d3
+    0x60F0, // bra.s to the start
+];
+
+/// Runs the manual example once to fill the instruction cache, then returns the clocks of
+/// its five instructions on the second pass.
+fn manual_example_clocks(wait: u8, cacr: u32) -> u32 {
+    let mut bus = FlatBus {
+        mem: vec![0; 0x10000],
+        write_only: u32::MAX,
+        wait,
+    };
+    bus.long(0, STACK);
+    bus.long(4, CODE);
+    bus.words(CODE, &MANUAL_EXAMPLE);
+    bus.long(0x5000, DATA);
+    let mut cpu = CpuCore::<Tracked030Policy>::from_state(CpuState::with_model(CpuModel::Mc68030));
+    cpu.reset(&mut bus).unwrap();
+    cpu.state.cacr = cacr;
+    let setup = |cpu: &mut CpuCore<Tracked030Policy>| {
+        cpu.state.a[1] = DATA + 0x100;
+        cpu.state.a[2] = 0x5000;
+        cpu.state.a[3] = DATA + 0x200;
+        cpu.state.a[6] = DATA + 0x300;
+    };
+    setup(&mut cpu);
+    for _ in 0..6 {
+        cpu.step(&mut bus, &mut NoopTrapHandler);
+    }
+    assert_eq!(cpu.state.pc, CODE, "the loop branches back");
+    setup(&mut cpu);
+    // The branch's tail is 0, so the first instruction starts without overlap, as in the manual.
+    (0..5)
+        .map(|_| cpu.step(&mut bus, &mut NoopTrapHandler).cycles)
+        .sum()
+}
+
+#[test]
+fn cycle_tracking_matches_the_manual_example() {
+    const EI: u32 = 0x0001;
+    assert_eq!(manual_example_clocks(0, EI), 40);
+}
+
+#[test]
+fn instruction_cache_misses_take_the_no_cache_case() {
+    // With the instruction cache off every prefetch misses: NCC times without overlap.
+    // fea -(An) 4 + ADD 2, fea ([B]) 10 + AND 4, fea (An) 3 + MOVE 5, cea 2 + TAS 12, NEG 2.
+    assert_eq!(
+        manual_example_clocks(0, 0),
+        4 + 2 + 10 + 4 + 3 + 5 + 2 + 12 + 2
+    );
+}
+
+#[test]
+fn wait_states_lengthen_data_cycles() {
+    const EI: u32 = 0x0001;
+    // Two wait states on every access, all reads missing the (disabled) data cache:
+    // ADD.L -(A1),D1: fea 4+2, tail 2+2 | ADD 2 - min(0, 4)
+    // AND.L D1,([A2]): fea ([B]) 10+2+2, tail 0+2 | AND 3+2 - min(0, 2), tail 1+2
+    // MOVE.L (A6),(8,A1): fea 3+2 - min(1, 3), tail 1+2 | MOVE 4+2 - min(2, 3), tail 0+2
+    // TAS (A3)+: cea 2 - min(0, 2) | TAS 12+2+2 - min(3, 0), tail 0+2
+    // NEG.L D3: 2 - min(2, 2), hidden entirely behind the write of TAS
+    let expected = 6 + 2 + 14 + 5 + 4 + 4 + 2 + 16;
+    assert_eq!(manual_example_clocks(2, EI), expected);
 }

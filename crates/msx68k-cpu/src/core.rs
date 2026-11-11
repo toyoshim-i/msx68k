@@ -8,6 +8,7 @@ use crate::alu::{
 };
 use crate::bus::{Bus, BusFault, TrapHandler, TrapResult};
 use crate::policy::CpuPolicy;
+use crate::timing030::{Ea, Full, Trace, access_wait, cacr};
 use crate::state::{
     CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_M, SR_N, SR_S, SR_T, SR_T0, SR_V,
     SR_X, SR_Z,
@@ -36,6 +37,8 @@ pub struct StepOutcome {
 pub struct CpuCore<P: CpuPolicy> {
     pub state: CpuState,
     step_cycles: u32,
+    /// What the current instruction did, for MC68030 cycle accounting.
+    trace: Trace,
     _policy: PhantomData<P>,
 }
 
@@ -51,6 +54,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         Self {
             state: CpuState::new(),
             step_cycles: 0,
+            trace: Trace::new(),
             _policy: PhantomData,
         }
     }
@@ -60,6 +64,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         Self {
             state,
             step_cycles: 0,
+            trace: Trace::new(),
             _policy: PhantomData,
         }
     }
@@ -69,9 +74,12 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state
     }
 
+    /// Whether MC68030 cycles are tracked; the MC68000 cycle counts are then ignored.
+    const TRACK_030: bool = P::MC68030 && P::TRACK_CYCLES;
+
     #[inline(always)]
     fn add_cycles(&mut self, cycles: u32) {
-        if P::TRACK_CYCLES {
+        if P::TRACK_CYCLES && !P::MC68030 {
             self.step_cycles = self.step_cycles.wrapping_add(cycles);
         }
     }
@@ -100,9 +108,54 @@ impl<P: CpuPolicy> CpuCore<P> {
         Ok(self.step_cycles)
     }
 
+    /// Records an MC68030 data access for cycle accounting and updates the data cache tags.
+    fn note_access_030<B: Bus>(&mut self, bus: &mut B, addr: u32, size: DataSize, is_write: bool) {
+        let cycle = bus.bus_cycle_030(addr);
+        let supervisor = self.state.is_supervisor();
+        let control = self.state.cacr;
+        let cache = &mut self.state.timing030.dcache;
+        let enabled = cycle.cacheable && (control & cacr::ED) != 0;
+        let can_fill = enabled && (control & cacr::FD) == 0;
+        let hit = enabled && cache.hit(addr, supervisor);
+        if !hit && can_fill && (!is_write || (control & cacr::WA) != 0) {
+            cache.fill(addr, supervisor);
+        }
+        // Writes go through to memory even when they hit.
+        let cached = hit && !is_write;
+        let wait = if cached {
+            0
+        } else {
+            access_wait(cycle.wait, cycle.port16, size)
+        };
+        self.trace.record_access(is_write, wait, cached);
+    }
+
+    /// Accounts an MC68030 instruction prefetch of the long word holding `pc`.
+    fn note_fetch_030<B: Bus>(&mut self, bus: &mut B, pc: u32) {
+        let long = pc & !3;
+        let timing = &mut self.state.timing030;
+        if timing.holding == long {
+            return;
+        }
+        timing.holding = long;
+        let cycle = bus.bus_cycle_030(long);
+        let supervisor = (self.state.sr & SR_S) != 0;
+        let enabled = cycle.cacheable && (self.state.cacr & cacr::EI) != 0;
+        if enabled && timing.icache.hit(long, supervisor) {
+            return;
+        }
+        if enabled && (self.state.cacr & cacr::FI) == 0 {
+            timing.icache.fill(long, supervisor);
+        }
+        self.trace.fetch_misses += 1;
+        self.trace.fetch_wait = access_wait(cycle.wait, cycle.port16, DataSize::Long);
+    }
+
     #[inline(always)]
     fn bus_read_u8<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u8, BusFault> {
-        if P::TRACK_CYCLES {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Byte, false);
+        } else if P::TRACK_CYCLES {
             let w = bus.wait_cycles_16(addr, false);
             self.add_cycles(w);
         }
@@ -111,6 +164,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_read_u16<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u16, BusFault> {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Word, false);
+        }
         if P::MC68030 && (addr & 1) != 0 {
             // The MC68030 splits misaligned operands into several bus cycles.
             let hi = bus.read_u8(addr, self.state.is_supervisor())? as u16;
@@ -123,7 +179,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 is_write: false,
             });
         }
-        if P::TRACK_CYCLES {
+        if P::TRACK_CYCLES && !P::MC68030 {
             let w = bus.wait_cycles_16(addr, false);
             self.add_cycles(w);
         }
@@ -132,6 +188,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_read_u32<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u32, BusFault> {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Long, false);
+        }
         if P::MC68030 && (addr & 1) != 0 {
             let hi = self.bus_read_u16(bus, addr)? as u32;
             let lo = self.bus_read_u16(bus, addr.wrapping_add(2))? as u32;
@@ -143,7 +202,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 is_write: false,
             });
         }
-        if P::TRACK_CYCLES {
+        if P::TRACK_CYCLES && !P::MC68030 {
             let w0 = bus.wait_cycles_16(addr, false);
             let w1 = bus.wait_cycles_16(addr.wrapping_add(2), false);
             self.add_cycles(w0 + w1);
@@ -153,7 +212,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_write_u8<B: Bus>(&mut self, bus: &mut B, addr: u32, val: u8) -> Result<(), BusFault> {
-        if P::TRACK_CYCLES {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Byte, true);
+        } else if P::TRACK_CYCLES {
             let w = bus.wait_cycles_16(addr, true);
             self.add_cycles(w);
         }
@@ -162,6 +223,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_write_u16<B: Bus>(&mut self, bus: &mut B, addr: u32, val: u16) -> Result<(), BusFault> {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Word, true);
+        }
         if P::MC68030 && (addr & 1) != 0 {
             let supervisor = self.state.is_supervisor();
             bus.write_u8(addr, (val >> 8) as u8, supervisor)?;
@@ -173,7 +237,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 is_write: true,
             });
         }
-        if P::TRACK_CYCLES {
+        if P::TRACK_CYCLES && !P::MC68030 {
             let w = bus.wait_cycles_16(addr, true);
             self.add_cycles(w);
         }
@@ -182,6 +246,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_write_u32<B: Bus>(&mut self, bus: &mut B, addr: u32, val: u32) -> Result<(), BusFault> {
+        if Self::TRACK_030 {
+            self.note_access_030(bus, addr, DataSize::Long, true);
+        }
         if P::MC68030 && (addr & 1) != 0 {
             self.bus_write_u16(bus, addr, (val >> 16) as u16)?;
             return self.bus_write_u16(bus, addr.wrapping_add(2), val as u16);
@@ -192,7 +259,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 is_write: true,
             });
         }
-        if P::TRACK_CYCLES {
+        if P::TRACK_CYCLES && !P::MC68030 {
             let w0 = bus.wait_cycles_16(addr, true);
             let w1 = bus.wait_cycles_16(addr.wrapping_add(2), true);
             self.add_cycles(w0 + w1);
@@ -209,6 +276,13 @@ impl<P: CpuPolicy> CpuCore<P> {
                 addr: pc,
                 is_write: false,
             });
+        }
+        if Self::TRACK_030 {
+            // Prefetches are accounted per long word, not as data accesses.
+            self.note_fetch_030(bus, pc);
+            let word = bus.read_u16(pc, self.state.is_supervisor())?;
+            self.state.pc = pc.wrapping_add(2);
+            return Ok(word);
         }
         let word = self.bus_read_u16(bus, pc)?;
         self.state.pc = pc.wrapping_add(2);
@@ -305,6 +379,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state.set_sr(new_sr);
 
         let vec_no = bus.acknowledge_interrupt(ipl).unwrap_or(24 + ipl);
+        self.trace.interrupt = Some(P::MC68030 && (new_sr & SR_M) != 0);
         self.push_frame(bus, 0, vec_no, self.state.pc, saved_sr)?;
         if P::MC68030 && (new_sr & SR_M) != 0 {
             // Interrupts run on the interrupt stack, leaving a throwaway frame there that
@@ -328,6 +403,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         base_cycles: u32,
     ) -> Result<(), BusFault> {
         self.state.stopped = false;
+        self.trace.push_exception(vector_no);
         let saved_sr = self.state.sr;
         self.state.set_sr((saved_sr & !(SR_T | SR_T0)) | SR_S);
         let format = if P::MC68030
@@ -353,6 +429,7 @@ impl<P: CpuPolicy> CpuCore<P> {
     /// Raises a Group 0 fault (Bus Error or Address Error, 7-word MC68000 stack frame).
     fn raise_group0_fault<B: Bus>(&mut self, bus: &mut B, fault: BusFault) {
         self.state.stopped = false;
+        self.trace.bus_fault = true;
         let saved_sr = self.state.sr;
         self.state.set_sr((saved_sr & !SR_T) | SR_S);
 
@@ -425,6 +502,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             let new_pc = self.pop_u32(bus)?;
             if P::MC68030 {
                 let format = self.pop_u16(bus)? >> 12;
+                self.trace.push_rte_format(format as u8);
                 let extra = match format {
                     0 | 1 => 0,
                     2 => 4,
@@ -481,37 +559,29 @@ impl<P: CpuPolicy> CpuCore<P> {
         trap_handler: &mut T,
     ) -> StepOutcome {
         self.step_cycles = 0;
+        if Self::TRACK_030 {
+            self.trace = Trace::new();
+        }
 
         match self.check_interrupts(bus) {
-            Ok(true) => {
-                if P::TRACK_CYCLES {
-                    self.state.total_cycles =
-                        self.state.total_cycles.wrapping_add(self.step_cycles as u64);
-                }
-                return StepOutcome {
-                    cycles: self.step_cycles,
-                    stopped: self.state.stopped,
-                };
-            }
+            Ok(true) => return self.finish_step(),
             Err(fault) => {
                 self.raise_group0_fault(bus, fault);
-                if P::TRACK_CYCLES {
-                    self.state.total_cycles =
-                        self.state.total_cycles.wrapping_add(self.step_cycles as u64);
-                }
-                return StepOutcome {
-                    cycles: self.step_cycles,
-                    stopped: self.state.stopped,
-                };
+                return self.finish_step();
             }
             Ok(false) => {}
         }
 
         if self.state.stopped {
-            self.add_cycles(4);
-            if P::TRACK_CYCLES {
-                self.state.total_cycles =
-                    self.state.total_cycles.wrapping_add(self.step_cycles as u64);
+            if Self::TRACK_030 {
+                self.step_cycles = 4;
+                self.state.total_cycles = self.state.total_cycles.wrapping_add(4);
+            } else {
+                self.add_cycles(4);
+                if P::TRACK_CYCLES {
+                    self.state.total_cycles =
+                        self.state.total_cycles.wrapping_add(self.step_cycles as u64);
+                }
             }
             return StepOutcome {
                 cycles: self.step_cycles,
@@ -532,10 +602,18 @@ impl<P: CpuPolicy> CpuCore<P> {
             }
         }
 
+        self.finish_step()
+    }
+
+    /// Totals the cycles of the step that just ran.
+    fn finish_step(&mut self) -> StepOutcome {
+        if Self::TRACK_030 {
+            let zero = self.state.flag(SR_Z);
+            self.step_cycles = self.state.timing030.evaluate(self.state.ir, &self.trace, zero);
+        }
         if P::TRACK_CYCLES {
             self.state.total_cycles = self.state.total_cycles.wrapping_add(self.step_cycles as u64);
         }
-
         StepOutcome {
             cycles: self.step_cycles,
             stopped: self.state.stopped,
@@ -550,6 +628,26 @@ impl<P: CpuPolicy> CpuCore<P> {
         reg: u8,
         size: DataSize,
     ) -> Result<EaLocation, BusFault> {
+        if Self::TRACK_030 {
+            let ea = match (mode & 7, reg & 7) {
+                (0, _) => Some(Ea::Dn),
+                (1, _) => Some(Ea::An),
+                (2, _) => Some(Ea::Ind),
+                (3, _) => Some(Ea::PostInc),
+                (4, _) => Some(Ea::PreDec),
+                (5, _) | (7, 2) => Some(Ea::Disp16),
+                (7, 0) => Some(Ea::AbsW),
+                (7, 1) => Some(Ea::AbsL),
+                (7, 4) => Some(Ea::Imm {
+                    long: size == DataSize::Long,
+                }),
+                // Indexed modes are recorded once their extension word is known.
+                _ => None,
+            };
+            if let Some(ea) = ea {
+                self.trace.push_ea(ea);
+            }
+        }
         let r = (reg & 7) as usize;
         match mode & 7 {
             0 => Ok(EaLocation::DataReg(r)),
@@ -664,8 +762,23 @@ impl<P: CpuPolicy> CpuCore<P> {
         }
         index <<= (ext >> 9) & 3;
         if (ext & 0x0100) == 0 {
+            if Self::TRACK_030 {
+                self.trace.push_ea(Ea::Brief);
+            }
             let disp = (ext as u8 as i8) as i32;
             return Ok(base.wrapping_add(disp as u32).wrapping_add(index));
+        }
+        if Self::TRACK_030 {
+            let size = |bits: u16| match bits {
+                2 => 1,
+                3 => 2,
+                _ => 0,
+            };
+            self.trace.push_ea(Ea::Full(Full {
+                base_disp: size((ext >> 4) & 3),
+                indirect: (ext & 7) != 0,
+                outer_disp: size(ext & 3),
+            }));
         }
 
         let base = if (ext & 0x0080) != 0 { 0 } else { base };
@@ -687,13 +800,21 @@ impl<P: CpuPolicy> CpuCore<P> {
             3 => self.fetch_u32(bus)?,
             _ => 0,
         };
-        if index_suppressed || (indirection & 4) == 0 {
-            // Pre-indexed (or no index): ([bd,An,Xn],od)
-            let ptr = self.bus_read_u32(bus, base.wrapping_add(base_disp).wrapping_add(index))?;
+        let pre_indexed = index_suppressed || (indirection & 4) == 0;
+        let ptr_addr = if pre_indexed {
+            // ([bd,An,Xn],od), or no index
+            base.wrapping_add(base_disp).wrapping_add(index)
+        } else {
+            // ([bd,An],Xn,od)
+            base.wrapping_add(base_disp)
+        };
+        self.trace.fetching_pointer = true;
+        let ptr = self.bus_read_u32(bus, ptr_addr);
+        self.trace.fetching_pointer = false;
+        let ptr = ptr?;
+        if pre_indexed {
             Ok(ptr.wrapping_add(outer_disp))
         } else {
-            // Post-indexed: ([bd,An],Xn,od)
-            let ptr = self.bus_read_u32(bus, base.wrapping_add(base_disp))?;
             Ok(ptr.wrapping_add(index).wrapping_add(outer_disp))
         }
     }
@@ -777,6 +898,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 let ir_pc = self.state.ir_pc;
                 match trap_handler.on_a_line(&mut self.state, bus, op, ir_pc) {
                     TrapResult::Handled { extra_cycles } => {
+                        self.trace.native = Some(extra_cycles);
                         self.add_cycles(4 + extra_cycles);
                         Ok(())
                     }
@@ -798,6 +920,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 let ir_pc = self.state.ir_pc;
                 match trap_handler.on_f_line(&mut self.state, bus, op, ir_pc) {
                     TrapResult::Handled { extra_cycles } => {
+                        self.trace.native = Some(extra_cycles);
                         self.add_cycles(4 + extra_cycles);
                         Ok(())
                     }
@@ -836,6 +959,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
         // For -(An) destination on MOVE, MC68000 takes 2 fewer cycles than standard EA resolve
         let dst_loc = if dst_mode == 4 {
+            if Self::TRACK_030 {
+                self.trace.push_ea(Ea::PreDec);
+            }
             let r = dst_reg as usize;
             let step = if r == 7 && size == DataSize::Byte {
                 2
@@ -1087,6 +1213,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             _ => DataSize::Long,
         };
         let ext = self.fetch_u16(bus)?;
+        self.trace.ext = ext;
         let mode = ((op >> 3) & 7) as u8;
         let EaLocation::Memory(addr) = self.resolve_ea(bus, mode, (op & 7) as u8, size)? else {
             return self.illegal(bus);
@@ -1201,6 +1328,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             _ => return self.illegal(bus),
         };
         let ext = self.fetch_u16(bus)?;
+        self.trace.ext = ext;
         let EaLocation::Memory(addr) =
             self.resolve_ea(bus, ((op >> 3) & 7) as u8, (op & 7) as u8, size)?
         else {
@@ -1346,6 +1474,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             let trap_pc = self.state.pc;
             match trap_handler.on_trap(&mut self.state, bus, trap_no, trap_pc) {
                 TrapResult::Handled { extra_cycles } => {
+                    self.trace.native = Some(extra_cycles);
                     self.add_cycles(4 + extra_cycles);
                     return Ok(());
                 }
@@ -1460,6 +1589,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         // MOVEM
         if (op & 0xFB80) == 0x4880 {
             let mask = self.fetch_u16(bus)?;
+            self.trace.registers = mask.count_ones() as u16;
             let dir_mem_to_reg = (op & 0x0400) != 0;
             let size = if (op & 0x0040) != 0 {
                 DataSize::Long
@@ -1788,6 +1918,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             return self.privilege_violation(bus);
         }
         let ext = self.fetch_u16(bus)?;
+        self.trace.ext = ext;
         let reg = ((ext >> 12) & 7) as usize;
         let is_addr = (ext & 0x8000) != 0;
         // CACR bits the MC68030 implements; the clear bits (CEI, CI, CED, CD) always read 0.
@@ -1818,7 +1949,21 @@ impl<P: CpuPolicy> CpuCore<P> {
             match ext & 0x0FFF {
                 0x000 => self.state.sfc = (val & 7) as u8,
                 0x001 => self.state.dfc = (val & 7) as u8,
-                0x002 => self.state.cacr = val & CACR_STORED,
+                0x002 => {
+                    self.state.cacr = val & CACR_STORED;
+                    let caar = self.state.caar;
+                    let timing = &mut self.state.timing030;
+                    if (val & cacr::CI) != 0 {
+                        timing.icache.clear();
+                    } else if (val & cacr::CEI) != 0 {
+                        timing.icache.clear_entry(caar);
+                    }
+                    if (val & cacr::CD) != 0 {
+                        timing.dcache.clear();
+                    } else if (val & cacr::CED) != 0 {
+                        timing.dcache.clear_entry(caar);
+                    }
+                }
                 0x800 => self.state.set_usp(val),
                 0x801 => self.state.vbr = val,
                 0x802 => self.state.caar = val,
@@ -1867,6 +2012,7 @@ impl<P: CpuPolicy> CpuCore<P> {
     /// `DIVU.L` / `DIVS.L` / `DIVUL.L` / `DIVSL.L` (MC68030).
     fn exec_div_long<B: Bus>(&mut self, bus: &mut B, mode: u8, reg: u8) -> Result<(), BusFault> {
         let ext = self.fetch_u16(bus)?;
+        self.trace.ext = ext;
         let loc = self.resolve_ea(bus, mode, reg, DataSize::Long)?;
         let divisor = self.read_ea(bus, loc, DataSize::Long)?;
         let dq = ((ext >> 12) & 7) as usize;
@@ -1948,8 +2094,10 @@ impl<P: CpuPolicy> CpuCore<P> {
                     self.state.write_d(r, DataSize::Word, low as u32);
                     if low != 0xFFFF {
                         self.state.pc = self.state.pc.wrapping_sub(2).wrapping_add(disp as u32);
+                        self.trace.branch_taken = true;
                         self.add_cycles(10);
                     } else {
+                        self.trace.count_expired = true;
                         self.add_cycles(14);
                     }
                 } else {
@@ -2025,6 +2173,9 @@ impl<P: CpuPolicy> CpuCore<P> {
             (disp8 as i8) as i32
         };
 
+        if Self::TRACK_030 {
+            self.trace.branch_taken = cond != 1 && eval_cc(self.state.sr, cond);
+        }
         if cond == 1 {
             // BSR
             self.push_u32(bus, self.state.pc)?;
@@ -2491,6 +2642,9 @@ impl<P: CpuPolicy> CpuCore<P> {
             c_or_r as u32
         };
 
+        if Self::TRACK_030 {
+            self.trace.long_shift = count > size.bytes() * 8;
+        }
         let val = self.state.read_d(reg, size);
         let res = alu_shift_rotate(&mut self.state, size, val, count, left, kind);
         self.state.write_d(reg, size, res);
@@ -2552,6 +2706,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             let addr = base.wrapping_add((offset >> 3) as u32);
             let bit = (offset & 7) as u32;
             let bytes = (bit + width).div_ceil(8);
+            self.trace.wide_field = bytes > 4;
             let mut window = 0u64;
             for i in 0..bytes {
                 window |= (self.bus_read_u8(bus, addr.wrapping_add(i))? as u64) << (56 - 8 * i);

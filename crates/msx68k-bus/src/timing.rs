@@ -1,5 +1,7 @@
 //! X68000 CPU clock modes, System Bus frequency configuration, and per-region memory wait-state model.
 
+use msx68k_cpu::BusCycle030;
+
 /// Number of 4 KB pages in the 24-bit (`16 MB`) MC68000 address space.
 pub const PAGE_COUNT_4K: usize = 4096;
 /// Shift amount to convert a 24-bit address to a 4 KB page index.
@@ -34,6 +36,8 @@ pub enum CpuSpeedMode {
     Mhz16,
     /// X68000 XVI RedZone: 24 MHz CPU, 16 MHz System Bus.
     Mhz24,
+    /// X68030: 25 MHz MC68030 with its own bus timing (see [`MemoryRegion::x68030_bus_cycle`]).
+    Mhz25,
     /// Uncapped host speed with zero system-bus or memory wait states.
     Burst,
     /// Custom CPU and System Bus clock configuration.
@@ -48,6 +52,7 @@ impl CpuSpeedMode {
             Self::Mhz10 => BusTimingConfig::mhz10(),
             Self::Mhz16 => BusTimingConfig::mhz16_xvi(),
             Self::Mhz24 => BusTimingConfig::mhz24_redzone(),
+            Self::Mhz25 => BusTimingConfig::mhz25_x68030(),
             Self::Burst => BusTimingConfig::burst(),
             Self::Custom(cfg) => cfg,
         }
@@ -105,6 +110,17 @@ impl BusTimingConfig {
         Self {
             cpu_mhz: 24,
             system_bus_mhz: 16,
+            wait_enabled: true,
+            vram_display_contention: false,
+        }
+    }
+
+    /// 25 MHz MC68030 (X68030). Its bus waits come from [`MemoryRegion::x68030_bus_cycle`]
+    /// rather than the MC68000 wait table this configuration also builds.
+    pub const fn mhz25_x68030() -> Self {
+        Self {
+            cpu_mhz: 25,
+            system_bus_mhz: 25,
             wait_enabled: true,
             vram_display_contention: false,
         }
@@ -242,6 +258,35 @@ pub enum MemoryRegion {
 }
 
 impl MemoryRegion {
+    /// Returns the X68030 bus cycle of this region at the 24-bit address `a`, given the ROM
+    /// and RAM waits set through the system port.
+    ///
+    /// Wait states are in 25 MHz clocks beyond a 2-clock cycle, after XEiJ's X68030 model.
+    /// Only Main RAM and ROM are cacheable; every I/O and VRAM port is 16 bits wide.
+    pub const fn x68030_bus_cycle(self, a: u32, rom_wait: u8, ram_wait: u8) -> BusCycle030 {
+        let (wait, port16, cacheable) = match self {
+            Self::MainRam => (ram_wait, false, true),
+            Self::Rom => (rom_wait, false, true),
+            Self::Sram => (2, true, false),
+            Self::AreaSet | Self::Printer | Self::SysPort => (4, true, false),
+            Self::Gvram | Self::Crtc | Self::SpriteBg => (6, true, false),
+            Self::Tvram => (7, true, false),
+            // The palette sits below the video controller registers.
+            Self::PaletteVicon => (if (a & 0x1FFF) < 0x400 { 11 } else { 6 }, true, false),
+            Self::Opm | Self::Adpcm | Self::Fdc | Self::Hdc | Self::Ppi | Self::Ioi => (15, true, false),
+            Self::ExpansionIo => (15, true, false),
+            Self::Mfp => (19, true, false),
+            Self::Rtc => (28, true, false),
+            Self::Dmac => (34, true, false),
+            Self::Scc => (38, true, false),
+        };
+        BusCycle030 {
+            wait,
+            port16,
+            cacheable,
+        }
+    }
+
     /// Classifies any 24-bit physical address into its [`MemoryRegion`].
     #[inline]
     pub const fn from_addr(addr: u32) -> Self {

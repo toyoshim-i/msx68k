@@ -512,6 +512,19 @@ impl SystemPort {
         }
     }
 
+    /// ROM and RAM wait states of an X68030, in 25 MHz clocks, as set through `$E8E009`.
+    ///
+    /// The high nibble sets ROM waits (`n + 2`). The low nibble sets RAM waits (`n + 2`), and
+    /// 0 selects static column mode without waits. Until the IPL ROM writes it, both are 0.
+    pub const fn x68030_memory_waits(&self) -> (u8, u8) {
+        if self.wait_ctrl == 0xFF {
+            return (0, 0);
+        }
+        let ram = self.wait_ctrl & 15;
+        let ram = if ram == 0 { 0 } else { ram + 2 };
+        ((self.wait_ctrl >> 4) + 2, ram)
+    }
+
     pub fn read_u8(&self, addr: u32, cpu_mhz: u32) -> u8 {
         let a = addr & 0x00FF_FFFF;
         match a & 0x0F {
