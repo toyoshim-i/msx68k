@@ -46,7 +46,7 @@ run in a VM of their own from the start.
 
 ---
 
-## 3. VM Threads and Disk Requests
+## 3. VM Threads, Disks, and Screens
 
 The master VM and VMX68K.SX keep running on the main thread. Each VM runs on a host thread of its
 own and owns its `X68kVm`, at the pace of real time for its speed mode.
@@ -67,6 +67,30 @@ asks the host for pending requests with a hypercall, carries them out, and retur
 Its loop waits for events in a way that also returns when there are none, so it keeps polling
 while idle.
 
+### 3.3 Screens
+All composition runs in GPU shaders, once per frame. Effects that change registers within a frame,
+such as raster scrolling and raster palettes, reach the shader as a table of each scanline's
+state (CRTC scroll, palette, priority), recorded as the scanlines are processed. VMs shown in
+windows work the same way as the master VM.
+
+- **Each VM thread composites its own screen.** VMs share the GPU device and queue, which `wgpu`
+  allows across threads. Each VM has its own VRAM, palette, and scanline state buffers, its own
+  compute pass, and two output textures, one being written while the other is complete; an
+  atomic frame number tells which one is complete.
+- **Only changed pages travel.** VRAM writes are recorded per 4 KB page. At each vertical blank
+  of the VM, its thread uploads the changed pages, the scanline table, the palette, and the
+  sprite, BG, and page registers straight to its own GPU buffers, and dispatches its compute
+  pass. VRAM never leaves the CPU except for that one upload, and no VRAM is copied between
+  threads. The master VM's screen moves to the same scheme instead of uploading every buffer
+  every frame.
+- **The final pass runs on the main thread.** It draws the master VM's screen, then each VM's
+  completed texture into its window's content rectangle, clipped to the window's visible region
+  as a list of scissor rectangles, then the cursor as a layer of its own.
+- **The load is bounded.** A still screen uploads a few kilobytes per frame. Even when every VRAM
+  page changes every frame, the upload cannot exceed the VRAM itself, about 1 MB per frame,
+  whatever speed the VM runs at.
+- Windows start at the VM's native size; scaling comes later.
+
 ## 4. First Goal
 
 Boot Human68k 3.02 from `HUMAN302.XDF` as drive A in a VM, shown in a VMX68K.SX window. The
@@ -78,21 +102,18 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 
 - `X68kVm` is `Send`, so a VM can move to and run on a thread of its own.
 - The VICON compositor (`crates/msx68k-vicon`) currently uploads the whole TVRAM, GVRAM, and
-  palette every frame, and draws the host cursor into its TVRAM copy.
+  palette every frame, and draws the host cursor into its TVRAM copy; both change with Section
+  3.3.
 
 ---
 
 ## 6. Open Questions
 
-- **Screen integration.** How the VM's screen is composed into the window efficiently: proposed
-  were one compositor per VM sharing the GPU device, dirty-page uploads at each vertical blank
-  through a triple buffer, one final pass that draws each VM into its window's content rectangle
-  clipped to the window's visible region, and the cursor as a separate overlay.
 - **Bridge hook point.** DOS calls (`$FFxx`) directly, or a remote drive device driver in the VM's
   Human68k.
 - **Input routing.** Keyboard and mouse to the VM while its window is active, and how focus
   returns to the desktop.
 - **Settings file format** and how double-clicking a settings file opens VMX68K.SX with it.
-- **Display scaling** when the VM's screen is larger than the window or the desktop.
+- **Display scaling**: how a VM screen is scaled, once windows go beyond native size.
 - **The special hook** for booting in the master VM's environment.
 - **Startup speed** of a VM, and how several VMs and their sound are scheduled and mixed.
