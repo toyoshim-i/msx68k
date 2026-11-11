@@ -63,6 +63,27 @@ flowchart LR
 
 - Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions in the master SX-Window VM, and the extended screen uses the first 16 MB block. Partial and full VMs mirror the range to the 24-bit space as on the 68000 (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5).
 
+### 2.1.1 Planned: One Opcode, Recognized by Address
+The range above takes 15 opcodes, one per hypercall, from the F-Line space, which is not ours to
+spend: Human68k gives `$FFxx` to DOS calls and `$FExx` to FE function calls, and both can be
+taken over by programs (`_INTVCS`, `__FEVECS`). The gateway is to be rebuilt as follows.
+
+- **One F-Line opcode** for every hypercall, chosen from those the X68000 community has not used.
+- **The calling PC decides the hypercall.** Whoever installs a hypercall (a patch over
+  `SYS/FSX.X`, a stub in a ROM msx68k provides) registers its exact address and the function it
+  stands for. The opcode at any other address is an ordinary F-Line exception, as on the real
+  machine.
+- **Function calls where there is room.** Where space and registers allow, one registered
+  address serves several functions, and a register carries the function number, so the registry
+  stays small. A call is carried out only when it comes to a registered address and its function
+  number is valid; nothing more is checked.
+- **The entry for msx68k's own applications** (`SXMODE.X`, VMX68K.SX) sits in the internal SCSI
+  ROM window (`$FC0000`–`$FDFFFF`), outside the SCSI ROM itself. It must never make msx68k look
+  like it has an internal SCSI ROM when none is emulated.
+
+Still open: which opcode; the exact address of the application entry and how an application
+finds it; whether a full X68030 ROM image would occupy the end of the window.
+
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
 - While physical RAM addresses shift depending on preceding device drivers (`text_base = $05817C` on floppy boot vs. `$0581E4` on SCSI HDD boot), **offsets relative to `text_base` (`text_base + offset`) and non-relocated instruction opcodes are 100% invariant**.
