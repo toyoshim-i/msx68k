@@ -38,6 +38,32 @@ const RECT_PROC: u32 = 0x20B68;
 /// `text_base` offsets of the latched and last drawn cursor positions.
 const CURSOR_POS: u32 = 0x549F6;
 const CURSOR_DRAWN_POS: u32 = 0x5CA44 + 0x1E;
+/// `text_base` offset of the routine that draws one row of text into a planar bitmap.
+const TEXT_SPAN: u32 = 0x381FE;
+/// Its first instruction, `MOVEM.L D3-D7/A1-A4,-(SP)`, and the `TST.B 40(A0)` after it.
+const TEXT_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x1F, 0x78, 0x4A, 0x28, 0x00, 0x28];
+/// Hypercall that replaces the first instruction of the text span routine.
+const TEXT_SPAN_HYPERCALL: [u8; 2] = [0xFE, 0x8B];
+
+// Text span context offsets, as the text drawing setup at `text_base + 0x39D36` fills them.
+const SPAN_ROUTINES: u32 = 4;
+const SPAN_INVERT: u32 = 20;
+const SPAN_SOURCE_LEFT: u32 = 28;
+const SPAN_DEST_LEFT: u32 = 30;
+const SPAN_SOURCE_PAGE: u32 = 32;
+const SPAN_DEST_PAGE: u32 = 36;
+const SPAN_REVERSED: u32 = 40;
+
+// `text_base` offsets of the per-plane span routines the context can name.
+const SPAN_CLEAR: u32 = 0x372CA;
+const SPAN_SET: u32 = 0x372C6;
+const SPAN_KEEP: u32 = 0x372C4;
+const SPAN_INVERT_DEST: u32 = 0x374D2;
+const SPAN_COPY: u32 = 0x3839C;
+const SPAN_KEEP_PLANE: u32 = 0x382D0;
+const SPAN_AND: u32 = 0x3851E;
+const SPAN_OR: u32 = 0x385E8;
+const SPAN_XOR: u32 = 0x386D6;
 /// Margin around the cursor position within which drawing is left to the 68000 cursor shielding.
 const CURSOR_MARGIN: i16 = 64;
 /// `text_base` offsets of the routines that draw and erase the software cursor in VRAM.
@@ -129,6 +155,16 @@ struct RegionCursor {
     /// Sorted interval edges covering the current row; `None` for a bare rectangle.
     edges: Option<Vec<i16>>,
     next_row: u32,
+}
+
+/// What a per-plane text span routine does to the destination dots of its span.
+#[derive(Debug, Copy, Clone)]
+enum SpanAction {
+    Keep,
+    Fill(u8),
+    Invert,
+    /// Combines the source, XORed with the byte, by the two-bit logical operation.
+    Source(u8, u8),
 }
 
 /// A pen resolved to source bits for each plane and pattern row, in bitmap pixel alignment.
@@ -229,6 +265,13 @@ impl X68kBus {
                 self.main_ram[addr..addr + 2].copy_from_slice(&[0x4E, 0x75]); // RTS
             }
             self.host_cursor = true;
+        }
+
+        // Text from every font reaches the screen one row at a time through a routine that is
+        // called directly rather than through an A-Line API.
+        let span = (text_base + TEXT_SPAN) as usize;
+        if self.main_ram.get(span..span + TEXT_SPAN_PROLOGUE.len()) == Some(&TEXT_SPAN_PROLOGUE[..]) {
+            self.main_ram[span..span + 2].copy_from_slice(&TEXT_SPAN_HYPERCALL);
         }
     }
 
@@ -898,27 +941,7 @@ impl X68kBus {
         active_pages: u16,
     ) -> Option<()> {
         // Read everything before writing so overlapping copies see the original pixels.
-        let read = |bits: Option<&[u8]>, addr: u32| match bits {
-            Some(bits) => bits.get(addr as usize).copied(),
-            None => self.peek_u8(addr),
-        };
-        // Packs the row of `width` pixels from pixel `pixel` of the row at `start`.
-        let pack = |bits: Option<&[u8]>, start: u32, pixel: u32, width: u32| -> Option<Vec<u8>> {
-            let start = start + (pixel >> 3);
-            let shift = pixel & 7;
-            let mut packed = vec![0u8; (width as usize).div_ceil(8) + 1];
-            let mut current = read(bits, start)?;
-            for (i, out) in packed.iter_mut().enumerate() {
-                let next = read(bits, start + i as u32 + 1).unwrap_or(0);
-                *out = if shift == 0 {
-                    current
-                } else {
-                    (current << shift) | (next >> (8 - shift))
-                };
-                current = next;
-            }
-            Some(packed)
-        };
+        let pack = |bits, start, pixel, width| self.packed_row(bits, start, pixel, width);
         let mut copies = Vec::with_capacity(spans.len());
         let mut masks = Vec::new();
         for &(y, left, right) in spans {
@@ -977,6 +1000,139 @@ impl X68kBus {
             }
         }
         Some(())
+    }
+
+    /// Handles the hypercall that replaces the first instruction of the text span routine, which
+    /// draws every row of text from the system fonts or from `IFM.X` into a planar bitmap.
+    ///
+    /// When the native version cannot run, this performs the replaced
+    /// `MOVEM.L D3-D7/A1-A4,-(SP)` and continues with the guest routine after it.
+    pub(crate) fn hypercall_text_span(&mut self, state: &mut CpuState) -> TrapResult {
+        let entry = state.ir_pc;
+        // The guest shields its own cursor around the whole run, so only a host cursor is safe here.
+        let handled = self.native_gm_enabled
+            && self.host_cursor
+            && self.is_ext_tvram_active()
+            && self.text_span(state).is_some();
+        if handled {
+            self.native_gm_calls += 1;
+            return TrapResult::Handled { extra_cycles: 0 };
+        }
+        let saved = [
+            state.d[3], state.d[4], state.d[5], state.d[6], state.d[7],
+            state.a[1], state.a[2], state.a[3], state.a[4],
+        ];
+        let stack = state.a[7].wrapping_sub(4 * saved.len() as u32);
+        for (i, byte) in saved.iter().flat_map(|value| value.to_be_bytes()).enumerate() {
+            self.poke_u8(stack.wrapping_add(i as u32), byte);
+        }
+        state.a[7] = stack;
+        state.pc = entry.wrapping_add(4);
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// The text span routine: with the context `A0` that the text drawing setup prepared, draws
+    /// dots `D0` to `D1` (exclusive, bitmap coordinates) of the destination row `A1` from the
+    /// one-plane source row `A2` starting at dot `D2`, and returns.
+    ///
+    /// The context holds a routine and a source inversion word for each plane, chosen from the
+    /// text mode and the colors, which this maps to the operation they perform.
+    fn text_span(&mut self, state: &mut CpuState) -> Option<()> {
+        let context = state.a[0];
+        if self.peek_u8(context + SPAN_REVERSED)? != 0 {
+            return None;
+        }
+        let text_base = self.native_gm_text_base?;
+        let left = self.peek_u16(context + SPAN_DEST_LEFT)? as i16;
+        let source_left = self.peek_u16(context + SPAN_SOURCE_LEFT)? as i16;
+        let source_page = self.peek_u32(context + SPAN_SOURCE_PAGE)?;
+        let page = self.peek_u32(context + SPAN_DEST_PAGE)?;
+        let start = (state.d[0] as i16).wrapping_sub(left);
+        let end = (state.d[1] as i16).wrapping_sub(left);
+        let pixel = (state.d[2] as i16).wrapping_sub(source_left);
+        let return_address = self.peek_u32(state.a[7])?;
+        if start < 0 || pixel < 0 {
+            return None;
+        }
+
+        let mut planes = Vec::with_capacity(4);
+        for plane in 0..4u32 {
+            let routine = self.peek_u32(context + SPAN_ROUTINES + plane * 4)?;
+            let invert = self.peek_u16(context + SPAN_INVERT + plane * 2)? as u8;
+            let action = match routine.wrapping_sub(text_base) {
+                SPAN_CLEAR => SpanAction::Fill(0),
+                SPAN_SET => SpanAction::Fill(0xFF),
+                SPAN_KEEP | SPAN_KEEP_PLANE => SpanAction::Keep,
+                SPAN_INVERT_DEST => SpanAction::Invert,
+                SPAN_COPY => SpanAction::Source(0, invert),
+                SPAN_AND => SpanAction::Source(1, invert),
+                SPAN_OR => SpanAction::Source(2, invert),
+                SPAN_XOR => SpanAction::Source(3, invert),
+                _ => return None,
+            };
+            planes.push(action);
+        }
+
+        if end > start {
+            let width = (end - start) as u32;
+            let first = start as u32;
+            let last = first + width - 1;
+            for (plane, action) in planes.into_iter().enumerate() {
+                let source_row = state.a[2].wrapping_add(source_page.wrapping_mul(plane as u32));
+                let bits = match action {
+                    SpanAction::Source(..) => self.packed_row(None, source_row, pixel as u32, width)?,
+                    _ => Vec::new(),
+                };
+                let line = state.a[1].wrapping_add(page.wrapping_mul(plane as u32));
+                for byte in (first >> 3)..=(last >> 3) {
+                    let mut mask = 0xFFu8;
+                    if byte == first >> 3 {
+                        mask &= 0xFF >> (first & 7);
+                    }
+                    if byte == last >> 3 {
+                        mask &= 0xFF << (7 - (last & 7));
+                    }
+                    let addr = line + byte;
+                    let current = self.peek_u8(addr)?;
+                    let value = match action {
+                        SpanAction::Keep => continue,
+                        SpanAction::Fill(value) => (current & !mask) | (value & mask),
+                        SpanAction::Invert => current ^ mask,
+                        SpanAction::Source(op, invert) => {
+                            let set = packed_byte(&bits, byte as i32 * 8 - first as i32) ^ invert;
+                            combine(op, current, set, mask)
+                        }
+                    };
+                    self.store_plane_byte(addr, value);
+                }
+            }
+        }
+        state.a[7] = state.a[7].wrapping_add(4);
+        state.pc = return_address;
+        Some(())
+    }
+
+    /// Packs `width` pixels starting at pixel `pixel` of the row at `start`, from `bits` when
+    /// given (addressed from 0) or from guest memory.
+    fn packed_row(&self, bits: Option<&[u8]>, start: u32, pixel: u32, width: u32) -> Option<Vec<u8>> {
+        let read = |addr: u32| match bits {
+            Some(bits) => bits.get(addr as usize).copied(),
+            None => self.peek_u8(addr),
+        };
+        let start = start + (pixel >> 3);
+        let shift = pixel & 7;
+        let mut packed = vec![0u8; (width as usize).div_ceil(8) + 1];
+        let mut current = read(start)?;
+        for (i, out) in packed.iter_mut().enumerate() {
+            let next = read(start + i as u32 + 1).unwrap_or(0);
+            *out = if shift == 0 {
+                current
+            } else {
+                (current << shift) | (next >> (8 - shift))
+            };
+            current = next;
+        }
+        Some(packed)
     }
 
     fn store_plane_byte(&mut self, addr: u32, value: u8) {
@@ -2065,6 +2221,49 @@ mod tests {
         assert_eq!(pixel(&bus, 8, 3), 0);
         assert_eq!(bus.peek_rect(UPDATE + 4), Some(Rect { left: 0, top: 3, right: 8, bottom: 4 }));
         assert_eq!(state.d[0], 0);
+    }
+
+    #[test]
+    fn draws_a_text_span_with_each_plane_routine_and_returns() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.host_cursor = true;
+        const CONTEXT: u32 = 0x1D00;
+        const SOURCE: u32 = 0x2000;
+        let routines = [SPAN_COPY, SPAN_OR, SPAN_CLEAR, SPAN_KEEP];
+        for (plane, routine) in routines.iter().enumerate() {
+            write_u32(&mut bus, CONTEXT + SPAN_ROUTINES + plane as u32 * 4, TEXT_BASE + routine);
+        }
+        write_u16(&mut bus, CONTEXT + SPAN_INVERT + 2, 0xFFFF); // plane 1 ORs the inverse
+        write_u32(&mut bus, CONTEXT + SPAN_DEST_PAGE, PLANE_BYTES as u32);
+        write_u16(&mut bus, SOURCE, 0b0101_0000_0000_0000);
+        bus.ext_tvram.as_mut().unwrap()[2 * PLANE_BYTES] = 0xFF; // plane 2 starts set
+        bus.ext_tvram.as_mut().unwrap()[3 * PLANE_BYTES] = 0xFF; // plane 3 starts set
+        write_u32(&mut bus, STACK, 0x4000); // return address
+        state.a[0] = CONTEXT;
+        state.a[1] = EXT_TVRAM_BASE;
+        state.a[2] = SOURCE;
+        state.d[0] = 2;
+        state.d[1] = 6;
+        state.d[2] = 0;
+        state.ir_pc = 0x3000;
+        assert_eq!(bus.hypercall_text_span(&mut state), TrapResult::Handled { extra_cycles: 0 });
+        assert_eq!((state.pc, state.a[7]), (0x4000, STACK + 4));
+        // Dots 2..6 take source dots 0..4 = 0, 1, 0, 1.
+        let row: Vec<u8> = (0..8).map(|x| pixel(&bus, x, 0)).collect();
+        assert_eq!(row, [12, 12, 10, 9, 10, 9, 12, 12]);
+    }
+
+    #[test]
+    fn leaves_unknown_text_span_routines_to_the_guest() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.host_cursor = true;
+        state.a[0] = 0x1D00;
+        state.d[3] = 0x1234_5678;
+        state.ir_pc = 0x3000;
+        assert_eq!(bus.hypercall_text_span(&mut state), TrapResult::Handled { extra_cycles: 0 });
+        assert_eq!(state.pc, 0x3004, "continues after the replaced MOVEM");
+        assert_eq!(state.a[7], STACK - 36);
+        assert_eq!(bus.peek_u32(STACK - 36), Some(0x1234_5678), "D3 is stored first");
     }
 
     #[test]

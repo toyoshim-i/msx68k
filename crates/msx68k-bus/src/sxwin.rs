@@ -27,6 +27,9 @@ pub enum HypercallId {
     ScsiDriverInterrupt = 0xFE87,
     /// Dynamic resolution & screen mode switch (Step 1: up to 1024x1024 full display).
     SxSetScreenMode = 0xFE88,
+    /// Native replacement of the `SYS/FSX.X` text span routine, patched over its first
+    /// instruction.
+    GmTextSpan = 0xFE8B,
 }
 
 impl HypercallId {
@@ -41,6 +44,7 @@ impl HypercallId {
             0xFE86 => Some(Self::ScsiDriverStrategy),
             0xFE87 => Some(Self::ScsiDriverInterrupt),
             0xFE88 => Some(Self::SxSetScreenMode),
+            0xFE8B => Some(Self::GmTextSpan),
             _ => None,
         }
     }
@@ -67,6 +71,7 @@ impl X68kBus {
             HypercallId::ScsiDriverStrategy => self.hypercall_scsi_driver_strategy(state),
             HypercallId::ScsiDriverInterrupt => self.hypercall_scsi_driver_interrupt(state),
             HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
+            HypercallId::GmTextSpan => self.hypercall_text_span(state),
         }
     }
 
