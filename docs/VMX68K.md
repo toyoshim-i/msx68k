@@ -124,9 +124,14 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   10 KB when the cursor blinks (`crates/msx68k-vicon/tests/vm_screen.rs`).
 - The compositor shader has no scanline table, sprites, or BG yet; it composites text and
   graphic page 0 from the state at the end of the frame.
+- The final pass (`render_bus_to_surface_view`) draws the master VM's screen, then each
+  `VmLayer` (a VM's latest completed texture at a position on the master VM's screen) once per
+  rectangle of its visible region, as a scissor rectangle; rectangles are scaled with the
+  master VM's screen and clipped to the target (`crates/msx68k-vicon/tests/vm_layer.rs`). The
+  app passes no layers until VMX68K.SX reports its windows.
 - The master VM's VICON compositor (`crates/msx68k-vicon`) still uploads the whole TVRAM, GVRAM,
-  and palette every frame, and draws the host cursor into its TVRAM copy; both change with
-  Section 3.3.
+  and palette every frame, and draws the host cursor into its TVRAM copy, so the cursor would
+  go under VM layers; both change with Section 3.3.
 
 ---
 

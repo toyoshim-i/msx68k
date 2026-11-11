@@ -56,51 +56,62 @@ impl VmScreenOutput {
     /// Reads the latest completed frame back from the GPU, for tests.
     pub fn read_back(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<RenderedFrame> {
         let frame = self.completed()?;
-        let row_bytes = frame.width * 4;
-        let padded = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vm_screen_read_back"),
-            size: (padded * frame.height) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            frame.texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: None,
-                },
-            },
-            wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(Some(encoder.finish()));
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
-        device.poll(wgpu::Maintain::Wait);
-        rx.recv().ok()?.ok()?;
-        let data = slice.get_mapped_range();
-        let rgba8 = data
-            .chunks_exact(padded as usize)
-            .flat_map(|row| &row[..row_bytes as usize])
-            .copied()
-            .collect();
-        Some(RenderedFrame {
-            width: frame.width,
-            height: frame.height,
-            rgba8,
-        })
+        read_back_texture(device, queue, frame.texture, frame.width, frame.height)
     }
+}
+
+/// Reads the top-left `width × height` RGBA8 pixels of `texture` back from the GPU, for tests.
+pub fn read_back_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Option<RenderedFrame> {
+    let row_bytes = width * 4;
+    let padded = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("read_back_texture"),
+        size: (padded * height) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let rgba8 = data
+        .chunks_exact(padded as usize)
+        .flat_map(|row| &row[..row_bytes as usize])
+        .copied()
+        .collect();
+    Some(RenderedFrame {
+        width,
+        height,
+        rgba8,
+    })
 }
 
 /// Composites one VM's screen on the GPU, on the VM's thread.
@@ -324,5 +335,212 @@ impl VmScreen {
         self.output.sizes[index].store(uniforms.width << 16 | uniforms.height, Ordering::Relaxed);
         self.output.completed.store(number + 1, Ordering::Release);
         uploaded
+    }
+}
+
+/// A rectangle of the master VM's screen in its pixels, right and bottom exclusive.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// A VM's screen drawn over the master VM's screen, where its window shows it.
+pub struct VmLayer<'a> {
+    pub output: &'a VmScreenOutput,
+    /// Position of the frame's top-left pixel on the master VM's screen.
+    pub left: i32,
+    pub top: i32,
+    /// Visible region of the window's content rectangle.
+    pub visible: &'a [ScreenRect],
+}
+
+/// Where the master VM's screen lands on the render target.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct Placement {
+    /// Viewport `x, y, width, height` on the target.
+    pub viewport: [f32; 4],
+    /// Size of the master VM's screen.
+    pub screen: (u32, u32),
+    /// Size of the render target.
+    pub target: (u32, u32),
+}
+
+impl Placement {
+    fn to_target(self, x: i32, y: i32) -> (f32, f32) {
+        let [vx, vy, vw, vh] = self.viewport;
+        (
+            vx + x as f32 * vw / self.screen.0.max(1) as f32,
+            vy + y as f32 * vh / self.screen.1.max(1) as f32,
+        )
+    }
+
+    /// The part of `rect` on the target as a scissor rectangle, or `None` if nothing shows.
+    fn scissor(&self, rect: &ScreenRect) -> Option<[u32; 4]> {
+        let (x0, y0) = self.to_target(rect.left, rect.top);
+        let (x1, y1) = self.to_target(rect.right, rect.bottom);
+        let clamp = |v: f32, max: u32| (v.round().max(0.0) as u32).min(max);
+        let (x0, x1) = (clamp(x0, self.target.0), clamp(x1, self.target.0));
+        let (y0, y1) = (clamp(y0, self.target.1), clamp(y1, self.target.1));
+        (x0 < x1 && y0 < y1).then_some([x0, y0, x1 - x0, y1 - y0])
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LayerUniforms {
+    dest: [f32; 4],
+    size: [u32; 2],
+    _pad: [u32; 2],
+}
+
+/// Draws [`VmLayer`]s in the final pass.
+pub(crate) struct LayerPipeline {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+}
+
+/// A layer ready to draw: its bindings and scissor rectangles.
+pub(crate) struct PreparedLayer {
+    bind_group: wgpu::BindGroup,
+    scissors: Vec<[u32; 4]>,
+}
+
+impl LayerPipeline {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("msx68k_vm_layer_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("layer.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vm_layer_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vm_layer_pipeline_layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vm_layer_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        Self { pipeline, layout }
+    }
+
+    /// Binds each layer's latest completed frame. Layers with no frame yet, or nothing
+    /// visible, are left out.
+    pub fn prepare(
+        &self,
+        device: &wgpu::Device,
+        layers: &[VmLayer<'_>],
+        placement: &Placement,
+    ) -> Vec<PreparedLayer> {
+        use wgpu::util::DeviceExt;
+
+        let (tw, th) = (placement.target.0.max(1) as f32, placement.target.1.max(1) as f32);
+        layers
+            .iter()
+            .filter_map(|layer| {
+                let frame = layer.output.completed()?;
+                let scissors: Vec<_> =
+                    layer.visible.iter().filter_map(|r| placement.scissor(r)).collect();
+                if scissors.is_empty() {
+                    return None;
+                }
+                let (x0, y0) = placement.to_target(layer.left, layer.top);
+                let (x1, y1) = placement.to_target(
+                    layer.left + frame.width as i32,
+                    layer.top + frame.height as i32,
+                );
+                let uniforms = LayerUniforms {
+                    dest: [x0 / tw * 2.0 - 1.0, 1.0 - y0 / th * 2.0, x1 / tw * 2.0 - 1.0, 1.0 - y1 / th * 2.0],
+                    size: [frame.width, frame.height],
+                    _pad: [0; 2],
+                };
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vm_layer_uniforms"),
+                    contents: bytemuck::bytes_of(&uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("vm_layer_bind_group"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(frame.view),
+                        },
+                    ],
+                });
+                Some(PreparedLayer { bind_group, scissors })
+            })
+            .collect()
+    }
+
+    /// Draws `layers` in order, each once per scissor rectangle.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, layers: &[PreparedLayer]) {
+        if layers.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        for layer in layers {
+            pass.set_bind_group(0, &layer.bind_group, &[]);
+            for &[x, y, w, h] in &layer.scissors {
+                pass.set_scissor_rect(x, y, w, h);
+                pass.draw(0..6, 0..1);
+            }
+        }
     }
 }

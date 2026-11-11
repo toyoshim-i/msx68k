@@ -609,6 +609,8 @@ impl Msx68kApp {
                 &view,
                 gpu.surface_config.width,
                 gpu.surface_config.height,
+                // VM windows join once VMX68K.SX reports them.
+                &[],
             );
 
             frame.present();

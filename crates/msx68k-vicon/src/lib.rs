@@ -14,7 +14,10 @@ use bytemuck::{Pod, Zeroable};
 use msx68k_bus::{X68kBus, GVRAM_BYTES, TVRAM_BYTES, TVRAM_PLANE_BYTES};
 
 mod vm_screen;
-pub use vm_screen::{CompletedFrame, VmScreen, VmScreenOutput, VM_SCREEN_MAX};
+pub use vm_screen::{
+    read_back_texture, CompletedFrame, ScreenRect, VmLayer, VmScreen, VmScreenOutput, VM_SCREEN_MAX,
+};
+use vm_screen::{LayerPipeline, Placement};
 
 /// Maximum framebuffer dimension (`3840 × 2160`).
 pub const MAX_FB_WIDTH: u32 = 3840;
@@ -87,6 +90,7 @@ impl RenderedFrame {
 pub struct ViconSurfacePresenter {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    layers: LayerPipeline,
 }
 
 /// Hardware-accelerated `wgpu` VICON compositor.
@@ -427,6 +431,7 @@ impl ViconGpuCompositor {
         ViconSurfacePresenter {
             pipeline,
             bind_group,
+            layers: LayerPipeline::new(&self.device, surface_format),
         }
     }
 
@@ -469,7 +474,8 @@ impl ViconGpuCompositor {
     }
 
     /// Composites `bus` video memory on the GPU and blits the result directly into `target_view`
-    /// (with aspect-ratio-preserving letterboxing for window dimensions `surface_width × surface_height`).
+    /// (with aspect-ratio-preserving letterboxing for window dimensions `surface_width × surface_height`),
+    /// then draws the `layers` of VMs over it in order, each clipped to its visible region.
     pub fn render_bus_to_surface_view(
         &mut self,
         bus: &X68kBus,
@@ -477,8 +483,19 @@ impl ViconGpuCompositor {
         target_view: &wgpu::TextureView,
         surface_width: u32,
         surface_height: u32,
+        layers: &[VmLayer<'_>],
     ) {
         let uniforms = self.upload_bus_buffers(bus);
+        let viewport = letterbox(uniforms.width, uniforms.height, surface_width, surface_height);
+        let layers = presenter.layers.prepare(
+            &self.device,
+            layers,
+            &Placement {
+                viewport,
+                screen: (uniforms.width, uniforms.height),
+                target: (surface_width, surface_height),
+            },
+        );
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -515,24 +532,15 @@ impl ViconGpuCompositor {
                 occlusion_query_set: None,
             });
 
-            // Compute aspect-ratio-preserving letterbox/pillarbox viewport
-            let sw = surface_width.max(1) as f32;
-            let sh = surface_height.max(1) as f32;
-            let target_aspect = (uniforms.width.max(1) as f32) / (uniforms.height.max(1) as f32);
-            let window_aspect = sw / sh;
-
-            let (vp_x, vp_y, vp_w, vp_h) = if window_aspect > target_aspect {
-                let w = sh * target_aspect;
-                ((sw - w) * 0.5, 0.0, w, sh)
-            } else {
-                let h = sw / target_aspect;
-                (0.0, (sh - h) * 0.5, sw, h)
-            };
-
+            let [vp_x, vp_y, vp_w, vp_h] = viewport;
             rpass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
             rpass.set_pipeline(&presenter.pipeline);
             rpass.set_bind_group(0, &presenter.bind_group, &[]);
             rpass.draw(0..3, 0..1);
+
+            // Layer quads are placed in target coordinates.
+            rpass.set_viewport(0.0, 0.0, surface_width.max(1) as f32, surface_height.max(1) as f32, 0.0, 1.0);
+            presenter.layers.draw(&mut rpass, &layers);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -619,6 +627,22 @@ impl ViconGpuCompositor {
             height: uniforms.height,
             rgba8,
         }
+    }
+}
+
+/// Aspect-ratio-preserving letterbox/pillarbox viewport `x, y, width, height` of a
+/// `width × height` screen on a `surface_width × surface_height` target.
+fn letterbox(width: u32, height: u32, surface_width: u32, surface_height: u32) -> [f32; 4] {
+    let sw = surface_width.max(1) as f32;
+    let sh = surface_height.max(1) as f32;
+    let target_aspect = (width.max(1) as f32) / (height.max(1) as f32);
+    let window_aspect = sw / sh;
+    if window_aspect > target_aspect {
+        let w = sh * target_aspect;
+        [(sw - w) * 0.5, 0.0, w, sh]
+    } else {
+        let h = sw / target_aspect;
+        [0.0, (sh - h) * 0.5, sw, h]
     }
 }
 
