@@ -43,7 +43,8 @@ flowchart LR
 - We reserve a dedicated range of unallocated F-Line opcodes (`$FE80`–`$FE8F`, declared in [`HypercallId`](../crates/msx68k-bus/src/sxwin.rs) and dispatched by `X68kBus::handle_hypercall`) as **Native Hypercalls**.
 - When the monomorphized MC68000 core fetches an F-Line opcode in `$FE80`–`$FE8F`, `BusTrapHandler::on_f_line` delegates to `X68kBus::handle_hypercall`, which traps directly into the Rust hypercall handlers in **0 emulated CPU cycles**, without pushing a 68000 exception frame or traversing RAM vectors.
   - SX-Window integration and host display/mouse synchronization hypercalls (`$FE81` `SxMouseSync`, `$FE88` `SxSetScreenMode`) are routed to [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs).
-  - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiIocs`, `$FE83` `ScsiBootRom`, `$FE84` `ScsiRomdbInit`, `$FE85` `ScsiDriverCmd`, `$FE86` `ScsiHddRead`, `$FE87` `ScsiHddWrite`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
+  - `$FE8B` `GmTextSpan` replaces the first instruction of the `SYS/FSX.X` text span routine and is handled in [`crates/msx68k-bus/src/native_gm.rs`](../crates/msx68k-bus/src/native_gm.rs) (Section 2.3, pattern 3).
+  - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiRomBoot`, `$FE83` `ScsiRomdbBuild`, `$FE84` `ScsiIocsInstall`, `$FE85` `ScsiIocsDispatch`, `$FE86` `ScsiDriverStrategy`, `$FE87` `ScsiDriverInterrupt`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
   - All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
 - In addition to F-Line hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
   - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).
@@ -56,7 +57,7 @@ flowchart LR
   +2: $4E75                  ; RTS (returns cleanly to 68k caller)
   ```
 
-- SX-Window APIs are replaced natively through `TrapHandler::on_a_line` without patching guest memory. See Section 5.7 of [the SX-Window reference](SX_WINDOW_API_AND_HOOK_STATUS.md).
+- SX-Window APIs are replaced natively through `TrapHandler::on_a_line` without patching guest memory. Drawing that `SYS/FSX.X` reaches through direct calls rather than A-Line APIs uses pattern 3 of Section 2.3. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md) and [NATIVE_FONTS.md](NATIVE_FONTS.md).
 
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
@@ -72,6 +73,10 @@ flowchart LR
 2. **Internal Subroutine Prologue Patching (`SYS/FSX.X` Internal Level)**:
    - Used when an internal subsystem of `SYS/FSX.X` already sets up internal register pointers (such as `A4` pointing to the private `MouseWorkArea` structure) immediately before calling a helper subroutine.
    - Overwriting the first 4 bytes of that helper subroutine with `[Hypercall] + [RTS]` allows the Rust handler to read and update the exact internal structure via `A4` without searching RAM for private global pointers.
+3. **Replaced First Instruction with Guest Fallback (`SYS/FSX.X` Internal Level)**:
+   - Used when a routine is called directly, with no A-Line API in front of it, and the native version must be able to decline some calls. Only the first word of the routine is overwritten with the hypercall, so no guest memory is consumed.
+   - When the native version handles the call, the hypercall performs the routine's `RTS` itself. Otherwise it performs the replaced instruction on the CPU state and continues at the instruction after it, so the original routine runs unchanged.
+   - `$FE8B` `GmTextSpan` replaces `MOVEM.L D3-D7/A1-A4,-(SP)` at `text_base + 0x381FE` this way. The cursor routines at `text_base + 0x521BA` and `+ 0x521DC` are patched to a bare `RTS` because the host draws the cursor.
 
 ---
 
@@ -111,13 +116,14 @@ Disassembly of `IPLROM.DAT` (`$FF0000`) and `HUMAN.SYS` v3.02 (`$00AC9C`) reveal
 1. **Virtual SCSI ROM Header (`$FC0000`) & `romdb` Protocol**:
    - `IPLROM` and `HUMAN.SYS` check **`$FC0024` for the 6-byte ASCII signature `"SCSIIN"`**.
    - At `$FC0000`, the longword pointer `P = $00FC_0050` serves both as the ROM boot entry point and as the anchor for `HUMAN.SYS`'s `romdb` block device handshake:
-     - `P - 16` (`$FC0040`): Pointer (`$00FC_0060`) to the `romdb` initialization stub (`$FE84` `ScsiRomdbInit` + `RTS`).
-     - `P - 12` (`$FC0044`): Pointer (`$00FC_0064`) to the `IOCS $F5` handler stub (`$FE82` `ScsiIocs` + `RTS`).
+     - `P` (`$FC0050`): the cold boot stub (`$FE82` `ScsiRomBoot` + `RTS`).
+     - `P - 16` (`$FC0040`): Pointer (`$00FC_0060`) to the `romdb` builder stub (`$FE83` `ScsiRomdbBuild` + `RTS`).
+     - `P - 12` (`$FC0044`): Pointer (`$00FC_0064`) to the `IOCS $F5` installer stub (`$FE84` `ScsiIocsInstall` + `RTS`), which points vector `$F5` (`$0007D4`) at the handler stub at `$FC0068` (`$FE85` `ScsiIocsDispatch` + `RTS`).
      - `P - 8 .. P` (`$FC0048..$FC004F`): 8-byte ASCII magic **`"Human68k"`**.
-2. **`romdb` Block Device Driver Construction (`$FE84` & `$FE85`)**:
-   - During kernel startup, `HUMAN.SYS` verifies `"Human68k"` at `P - 8` and calls `*(P - 16)` (`ScsiRomdbInit`) with `A4` pointing to free kernel driver memory.
-   - `ScsiRomdbInit` writes a standard 22-byte Human68k block device header at `(A4)` (device type `0x2000`, strategy entry at `A4 + 22`, interrupt entry at `A4 + 28` invoking `$FE85` `ScsiDriverCmd`) and sets `[A4 - 2] = 0` so `HUMAN.SYS` scans the `X68SCSI1` partition table at 1024-byte sector `4` (`0x1000`) and mounts the `Human68k` partition (`A:`).
-   - `ScsiDriverCmd` (`$FE85`) handles Human68k block driver commands `0` (`INIT`), `1`/`2` (`CHECK MEDIA` / `BUILD BPB`), `4` (`READ`), `5` (`MEDIA SENSE / _DRVCTRL`, returning `req[13] = 0x02` media ready), and `8`/`9` (`WRITE`).
+2. **`romdb` Block Device Driver Construction (`$FE83`, `$FE86`, and `$FE87`)**:
+   - During kernel startup, `HUMAN.SYS` verifies `"Human68k"` at `P - 8` and calls `*(P - 16)` (`ScsiRomdbBuild`) with `A4` pointing to free kernel driver memory.
+   - `ScsiRomdbBuild` writes a 22-byte Human68k block device header at `(A4)` whose strategy and interrupt entries point at the ROM stubs `$FC006C` (`$FE86` `ScsiDriverStrategy`) and `$FC0070` (`$FE87` `ScsiDriverInterrupt`), followed by a BPB pointer at `A4 + 22` and the BPB of the `Human68k` partition (`A:`) at `A4 + 26`.
+   - `ScsiDriverStrategy` latches the request packet in `A5`, and `ScsiDriverInterrupt` (`$FE87`) handles Human68k block driver commands `0` (`INIT`), `1`/`2` (`CHECK MEDIA` / `BUILD BPB`), `4` (`READ`), `5` (`MEDIA SENSE / _DRVCTRL`, returning `req[13] = 0x02` media ready), and `8`/`9` (`WRITE`).
 3. **Supported `IOCS $F5` (`_SCSIDRV`) Sub-functions (`D1.B`)**:
    - `$00` (`_S_RESET`), `$01`..`$09` (low-level bus phase stubs), `$20` (`_S_INQUIRY`), `$21` (`_S_READ`), `$22` (`_S_WRITE`), `$23` (`_S_FORMAT`), `$24` (`_S_TESTUNIT`), `$25` (`_S_READCAP`), `$26` (`_S_READEXT`), `$27` (`_S_WRITEEXT`), `$2F` (`_S_REZERO`), and `$30` (`_S_REQUEST`).
 
