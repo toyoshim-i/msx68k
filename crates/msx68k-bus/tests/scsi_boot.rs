@@ -1854,3 +1854,100 @@ fn test_sxwin31_scsi_boot_with_1920x1080_initial_resolution() {
     assert_eq!(vm.bus.read_u32(menu_gp_bm + 10, true).unwrap(), msx68k_bus::EXT_TVRAM_BASE, "menuGrafPort baseAddr must be EXT_TVRAM_BASE");
     assert_eq!(vm.bus.read_u16(menu_gp_bm + 14, true).unwrap(), 240, "menuGrafPort rowBytes must be 240");
 }
+
+#[test]
+fn test_sxwin31_switches_to_a_1366x768_screen() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ipl_path = workspace_root.join("roms/IPLROM.DAT");
+    let cgrom_path = workspace_root.join("roms/CGROM.DAT");
+    let human_path = workspace_root.join("disks/HUMAN302.XDF");
+
+    if !ipl_path.exists() || !cgrom_path.exists() || !human_path.exists() {
+        eprintln!("[SKIP] Required ROMs/disks not found for scsi_boot test");
+        return;
+    }
+
+    let ipl_data = std::fs::read(&ipl_path).expect("Read IPLROM");
+    let cgrom_data = std::fs::read(&cgrom_path).expect("Read CGROM");
+    let human_data = std::fs::read(&human_path).expect("Read HUMAN302.XDF");
+
+    let sx_disks = [
+        ("SXWIN311", workspace_root.join("disks/SXWIN311.XDF")),
+        ("SXWIN312", workspace_root.join("disks/SXWIN312.XDF")),
+        ("SXWIN313", workspace_root.join("disks/SXWIN313.XDF")),
+        ("SXWIN314", workspace_root.join("disks/SXWIN314.XDF")),
+        ("SXWIN315", workspace_root.join("disks/SXWIN315.XDF")),
+        ("SXWIN316", workspace_root.join("disks/SXWIN316.XDF")),
+    ];
+    let mut sx_loaded: Vec<(&str, Vec<u8>)> = Vec::new();
+    for (name, path) in &sx_disks {
+        if let Ok(bytes) = std::fs::read(path) {
+            sx_loaded.push((*name, bytes));
+        }
+    }
+    let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+
+    let mut vm = X68kVm::new(
+        VmConfig::master_sx()
+            .with_speed_mode(CpuSpeedMode::Burst)
+            .with_ram_mb(4),
+    );
+
+    vm.bus.load_cgrom(&cgrom_data);
+    vm.bus.load_ipl_rom(&ipl_data);
+
+    assert!(vm.bus.insert_scsi_hdd(0, hdd_image));
+    vm.bus.set_boot_from_scsi(true);
+
+    vm.reset().unwrap();
+
+
+    // Boot until SX-Window reaches desktop
+    for _chunk in 1..=90 {
+        vm.run_steps(250_000);
+        if vm.bus.vicon.r0_mode() == 0x0004 && vm.bus.vicon.r2_display() == 0x003F {
+            if let Some(tv) = vm.bus.active_tvram() {
+                let tv_non_zero = tv.iter().filter(|&&b| b != 0).count();
+                if tv_non_zero > 140_000 {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Switch to a common laptop panel, whose width is not a multiple of the CRTC's 8-dot columns
+    switch_resolution_at_task_turn(&mut vm, 1366, 768);
+    vm.run_steps(2_000_000);
+
+    // The desktop pattern reaches the last column, which sits in a partly used planar word.
+    let (w, h, rgba) = render_bus_tvram_rgba(&vm.bus);
+    assert_eq!((w, h), (1366, 768));
+    for y in [50u32, 400, 700] {
+        let at = ((y * w + 1365) * 4) as usize;
+        let (r, g, b) = (rgba[at], rgba[at + 1], rgba[at + 2]);
+        let is_desktop = (r, g, b) == (116, 125, 125) || (r, g, b) == (177, 185, 185);
+        assert!(is_desktop, "desktop pattern missing at (1365, {y}): {:?}", (r, g, b));
+    }
+
+    // The exact width stays, with planar rows padded to whole words
+    assert_eq!(vm.bus.crtc.active_resolution(), (1366, 768));
+    assert!(vm.bus.is_ext_tvram_active());
+    assert_eq!(vm.bus.active_tvram_row_bytes(), 172);
+
+    // Verify FSX.X structures in RAM
+    let iocs_mouse_vec = vm.bus.read_u32(0x0000_0938, true).unwrap();
+    let text_base = iocs_mouse_vec - 0x04F82A;
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 6, true).unwrap(), 1366);
+    assert_eq!(vm.bus.read_u16(text_base + 0x55278 + 8, true).unwrap(), 768);
+
+    // Verify menuGrafPort was initialized to 1366x768 with EXT_TVRAM_BASE directly from preset
+    let menu_gp_ptr = vm.bus.read_u32(text_base + 0x54AE0, true).unwrap();
+    assert!(menu_gp_ptr > 0, "menuGrafPort must be allocated by MNInit");
+    let menu_gp_bm = vm.bus.read_u32(menu_gp_ptr, true).unwrap();
+    assert!(menu_gp_bm > 0);
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 6, true).unwrap(), 1366, "menuGrafPort bmap width must be 1366");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 8, true).unwrap(), 768, "menuGrafPort bmap height must be 768");
+    assert_eq!(vm.bus.read_u32(menu_gp_bm + 10, true).unwrap(), msx68k_bus::EXT_TVRAM_BASE, "menuGrafPort baseAddr must be EXT_TVRAM_BASE");
+    assert_eq!(vm.bus.read_u16(menu_gp_bm + 14, true).unwrap(), 172, "menuGrafPort rowBytes must be 172");
+}

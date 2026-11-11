@@ -934,7 +934,8 @@ impl Bus for X68kBus {
                         let reg_idx = offset >> 1;
                         if matches!(reg_idx, 2 | 3 | 4 | 6 | 7 | 10 | 11 | 20) {
                             self.crtc.regs[2] = 0;
-                            self.crtc.regs[3] = (w / 8) as u16;
+                            self.crtc.regs[3] = w.div_ceil(8) as u16;
+                            self.crtc.exact_width = (!w.is_multiple_of(8)).then_some(w);
                             self.crtc.regs[4] = (h as u16) + 32;
                             self.crtc.regs[6] = 0;
                             self.crtc.regs[7] = h as u16;

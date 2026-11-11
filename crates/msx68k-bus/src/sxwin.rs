@@ -466,7 +466,8 @@ impl X68kBus {
     /// planar framebuffer (standard TVRAM or EXT_TVRAM at $1000_0000), battery-backed SRAM settings,
     /// and resident SYS/FSX.X kernel structures.
     pub fn apply_screen_resolution(&mut self, width: u32, height: u32) {
-        let width = ((width.clamp(256, 3840) + 15) & !15).clamp(256, 3840);
+        // Planar rows are padded to whole words below, so the width itself need not be.
+        let width = width.clamp(256, 3840);
         let height = height.clamp(256, 2160);
         self.target_resolution = Some((width, height));
 
@@ -493,7 +494,9 @@ impl X68kBus {
         };
 
         // 1. Program CRTC registers
-        let h_cols = (width / 8) as u16;
+        // The CRTC counts 8-dot columns; it keeps the exact width for one that is not a multiple.
+        let h_cols = width.div_ceil(8) as u16;
+        self.crtc.exact_width = (!width.is_multiple_of(8)).then_some(width);
         self.crtc.regs[2] = 0;
         self.crtc.regs[3] = h_cols;
         self.crtc.regs[4] = (height as u16) + 32;
@@ -1190,7 +1193,7 @@ impl X68kBus {
                 // Fill horizontal extension (x = fill_w..new_w, y = 0..fill_h)
                 for y in 0..fill_h {
                     let ty = y % 16;
-                    for col in (fill_w / 16)..(new_w / 16) {
+                    for col in (fill_w / 16)..new_w.div_ceil(16) {
                         let word = tile[ty * 2 + (col % 2)];
                         let dst_off = plane_base + y * stride + col * 2;
                         if dst_off + 2 <= tv.len() {
@@ -1209,7 +1212,7 @@ impl X68kBus {
                 // Fill vertical extension (x = 0..new_w, y = fill_h..new_h)
                 for y in fill_h..new_h {
                     let ty = y % 16;
-                    for col in 0..(new_w / 16) {
+                    for col in 0..new_w.div_ceil(16) {
                         let word = tile[ty * 2 + (col % 2)];
                         let dst_off = plane_base + y * stride + col * 2;
                         if dst_off + 2 <= tv.len() {

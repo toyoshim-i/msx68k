@@ -54,6 +54,9 @@ pub struct Crtc {
     rint_active: bool,
     /// Monotonic frame counter incremented at the start of every V-Blank.
     frame_count: u64,
+    /// Width in dots of an extended screen whose width is not a multiple of the 8-dot character
+    /// column, such as 1366. It applies only while the columns of `R02` and `R03` still span it.
+    pub exact_width: Option<u32>,
 }
 
 impl Default for Crtc {
@@ -88,6 +91,7 @@ impl Crtc {
             v_disp: false,
             rint_active: false,
             frame_count: 0,
+            exact_width: None,
         }
     }
 
@@ -139,6 +143,9 @@ impl Crtc {
     pub fn active_resolution(&self) -> (u32, u32) {
         let h_cols = self.regs[3].saturating_sub(self.regs[2]) as u32;
         let width = match h_cols * 8 {
+            w if self.exact_width.is_some_and(|exact| exact.div_ceil(8) * 8 == w) => {
+                self.exact_width.unwrap_or(w)
+            }
             w if (256..=4096).contains(&w) => w,
             _ => match self.regs[20] & 0x0003 {
                 0 => 256,

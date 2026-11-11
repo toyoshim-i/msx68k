@@ -691,7 +691,7 @@ impl ApplicationHandler for Msx68kApp {
 
         if let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) {
             let msize = monitor.size();
-            let nw = ((msize.width.clamp(768, 3840) + 15) & !15).clamp(768, 3840);
+            let nw = msize.width.clamp(768, 3840);
             let nh = msize.height.clamp(512, 2160);
             self.vm.bus.host_native_resolution = (nw, nh);
         }
