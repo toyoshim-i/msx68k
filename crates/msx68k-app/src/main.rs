@@ -121,7 +121,8 @@ struct AppArgs {
     /// Speed given by `--speed`; otherwise 10 MHz for the MC68000 and 25 MHz for the MC68030.
     speed_mode: Option<CpuSpeedMode>,
     cpu_model: CpuModel,
-    ram_mb: usize,
+    /// RAM size given by `--ram-mb`; otherwise the size saved in SRAM, or 4 MB without one.
+    ram_mb: Option<usize>,
     scale: u32,
     resolution: Option<(u32, u32)>,
     fullscreen: bool,
@@ -155,7 +156,7 @@ impl Default for AppArgs {
             sram_path,
             speed_mode: None,
             cpu_model: CpuModel::Mc68000,
-            ram_mb: 4,
+            ram_mb: None,
             scale: 1,
             resolution: None,
             fullscreen: false,
@@ -222,7 +223,7 @@ impl AppArgs {
                 },
                 "--ram-mb" => {
                     if let Some(v) = args.next().and_then(|s| s.parse::<usize>().ok()) {
-                        cfg.ram_mb = v.clamp(1, 12);
+                        cfg.ram_mb = Some(v.clamp(1, 12));
                     }
                 }
                 "--scale" => {
@@ -272,7 +273,7 @@ impl AppArgs {
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
                            --cpu <model>        CPU: 68000 | 68030 (default: 68000)\n  \
-                           --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
+                           --ram-mb <1..12>     Main RAM size in MB (default: saved in SRAM, else 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
                            --fullscreen, -f     Start in host native fullscreen 1:1 mode\n  \
@@ -319,6 +320,17 @@ struct Msx68kApp {
 
 impl Msx68kApp {
     fn new(args: AppArgs) -> Self {
+        let saved_sram = std::fs::read(&args.sram_path)
+            .ok()
+            .filter(|data| data.len() == 16 * 1024);
+        // SRAM $ED0008 holds the end of main RAM, which SWITCH.X sets in whole megabytes.
+        let ram_mb = args.ram_mb.unwrap_or_else(|| match &saved_sram {
+            Some(sram) => {
+                let ram_end = u32::from_be_bytes([sram[8], sram[9], sram[10], sram[11]]);
+                (ram_end as usize).div_ceil(1024 * 1024).clamp(1, 12)
+            }
+            None => 4,
+        });
         let mut vm = X68kVm::new(
             VmConfig::master_sx()
                 .with_speed_mode(args.speed_mode.unwrap_or(match args.cpu_model {
@@ -326,7 +338,7 @@ impl Msx68kApp {
                     CpuModel::Mc68030 => CpuSpeedMode::Mhz25,
                 }))
                 .with_cpu_model(args.cpu_model)
-                .with_ram_mb(args.ram_mb),
+                .with_ram_mb(ram_mb),
         );
 
         let cgrom = std::fs::read(&args.cgrom_path).unwrap_or_else(|e| {
@@ -362,18 +374,19 @@ impl Msx68kApp {
         vm.bus.load_cgrom(&cgrom);
         vm.bus.load_ipl_rom(&ipl);
 
-        if args.sram_path.exists() {
-            if let Ok(sram_data) = std::fs::read(&args.sram_path) {
-                if sram_data.len() == 16 * 1024 {
-                    vm.bus.sram_mut().copy_from_slice(&sram_data);
-                    let ram_end = ((args.ram_mb * 1024 * 1024) as u32).to_be_bytes();
-                    vm.bus.sram_mut()[8..12].copy_from_slice(&ram_end);
-                    println!(
-                        "Loaded battery-backed SRAM from '{}'",
-                        args.sram_path.display()
-                    );
-                }
+        if let Some(sram_data) = &saved_sram {
+            vm.bus.sram_mut().copy_from_slice(sram_data);
+            // Keep the saved size unless --ram-mb overrides it or it exceeds the 12 MB limit.
+            let saved_end =
+                u32::from_be_bytes([sram_data[8], sram_data[9], sram_data[10], sram_data[11]]);
+            let ram_bytes = (ram_mb * 1024 * 1024) as u32;
+            if args.ram_mb.is_some() || saved_end > ram_bytes {
+                vm.bus.sram_mut()[8..12].copy_from_slice(&ram_bytes.to_be_bytes());
             }
+            println!(
+                "Loaded battery-backed SRAM from '{}'",
+                args.sram_path.display()
+            );
         }
 
         if let Some(fd0) = &args.fd0_path {
@@ -457,6 +470,11 @@ impl Msx68kApp {
                 }
                 Err(e) => eprintln!("Failed to read SCSI HDD0 '{}': {e}", hdd0.display()),
             }
+            // Mounting points the ROM boot vector at the SCSI ROM and selects ROM boot; the boot
+            // device chosen with SWITCH.X ($ED0018) must survive that.
+            if let Some(sram_data) = &saved_sram {
+                vm.bus.sram_mut()[0x18..0x1A].copy_from_slice(&sram_data[0x18..0x1A]);
+            }
         }
 
         vm.reset().expect("Failed to reset X68000 VM");
@@ -473,7 +491,7 @@ impl Msx68kApp {
             "Initialized X68000 VM ({:?} {:?}, {} MB RAM, initial PC=${:06X})",
             vm.cpu_model(),
             vm.speed_mode(),
-            args.ram_mb,
+            ram_mb,
             vm.cpu_state.pc
         );
 
