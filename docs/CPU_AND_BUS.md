@@ -196,7 +196,7 @@ Not implemented:
 
 | Region | Waits (25 MHz clocks) | Port | Cached |
 | :--- | :---: | :---: | :---: |
-| Main RAM | `$E8E009` low nibble `n`: `n + 2`, or 0 for static column (`n = 0`) | 32-bit | Yes |
+| Main RAM | `$E8E009` low nibble `n`: `n + 2`, or 0 for static column (`n = 0`), plus 1/8 for DRAM refresh | 32-bit | Yes |
 | ROM | `$E8E009` high nibble `n`: `n + 2` | 32-bit | Yes |
 | SRAM | 2 | 16-bit | No |
 | System port, printer, area set | 4 | 16-bit | No |
@@ -209,7 +209,8 @@ Not implemented:
 | DMAC | 34 | 16-bit | No |
 | SCC | 38 | 16-bit | No |
 
-  A long word on a 16-bit port takes two bus cycles. Until the IPL ROM writes `$E8E009`, ROM and RAM have no waits. `$E8E00B` reads `$DC` (MC68030 at 25 MHz) on MC68030 VMs.
+  A long word on a 16-bit port takes two bus cycles. The refresh delay carries its fraction over, adding a clock every eighth Main RAM cycle. Until the IPL ROM writes `$E8E009`, ROM and RAM have no waits. `$E8E00B` reads `$DC` (MC68030 at 25 MHz) on MC68030 VMs.
+- **Instruction timing.** The MC68030 User's Manual tables assume 2-clock bus cycles without waits. The timing model adds the configured memory and peripheral waits separately.
 - **Peripheral time.** Tracked VMs carry the fraction of a 10 MHz tick over between instructions, since an MC68030 instruction often takes less than one.
 
 The manual's worked examples (Sections 11.3.4, 11.4, and 11.5) are unit tests, and the core reproduces the 40-clock example end to end (`crates/msx68k-cpu/tests/mc68030.rs`).
@@ -220,7 +221,8 @@ Approximations:
 - The full extension word rows use the general `B` (base) forms; the faster `(d16,An)` forms of the tables are not told apart.
 - No table covers `NBCD` on memory, the MMU instructions, or a divide-by-zero trap; they are timed like `NEG` on memory plus two clocks, `MOVEC` to `CACR`, and a `TRAPV` trap.
 - The manual's register example times `SUBA.L` with the `SUBA.W` row; the table values are used.
-- Burst fills (`IBE`, `DBE`) and DRAM refresh are not modelled.
+- Burst fills (`IBE`, `DBE`) are not modelled.
+- DMA transfers complete at once. When they get timing, the X68030's DMAC runs at 12.5 MHz instead of 10 MHz.
 - The X68030 wait states and port widths still need validation against real hardware.
 
 ### 7.5 Remaining Plan

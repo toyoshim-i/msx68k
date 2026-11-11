@@ -92,6 +92,8 @@ pub struct Timing030 {
     pub holding: u32,
     /// Tail of the previous instruction, which the next one may overlap.
     pub tail: u16,
+    /// DRAM refresh delay not yet added, in eighths of a clock.
+    pub refresh: u8,
 }
 
 impl Timing030 {
@@ -101,6 +103,7 @@ impl Timing030 {
             dcache: CacheTags::new(),
             holding: 1,
             tail: 0,
+            refresh: 0,
         }
     }
 }
@@ -1187,14 +1190,19 @@ impl Timing030 {
     }
 }
 
-/// Bus cycles an access of `size` takes on a port, beyond the 2-clock cycle the tables assume.
-pub fn access_wait(wait: u8, port16: bool, size: DataSize) -> u16 {
-    let cycles = if port16 && size == DataSize::Long {
-        2
-    } else {
-        1
-    };
-    cycles * (2 + wait as u16) - 2
+impl Timing030 {
+    /// Returns the clocks an access of `size` takes on `cycle` beyond the 2-clock cycle the
+    /// tables assume, adding DRAM refresh delay once it adds up to whole clocks.
+    pub fn access_wait(&mut self, cycle: crate::bus::BusCycle030, size: DataSize) -> u16 {
+        let cycles = if cycle.port16 && size == DataSize::Long {
+            2
+        } else {
+            1
+        };
+        let refresh = self.refresh as u16 + cycles * cycle.refresh_eighths as u16;
+        self.refresh = (refresh % 8) as u8;
+        cycles * (2 + cycle.wait as u16) - 2 + refresh / 8
+    }
 }
 
 #[cfg(test)]
@@ -1286,6 +1294,24 @@ mod tests {
     #[test]
     fn wait_states_with_data_cache_hits_match_the_manual() {
         assert_eq!(data_cache_example(2), 45);
+    }
+
+    #[test]
+    fn dram_refresh_adds_a_clock_every_eight_cycles() {
+        let mut timing = Timing030::new();
+        let ram = crate::bus::BusCycle030 {
+            refresh_eighths: 1,
+            ..Default::default()
+        };
+        let waits: Vec<u16> = (0..8).map(|_| timing.access_wait(ram, DataSize::Word)).collect();
+        assert_eq!(waits, [0, 0, 0, 0, 0, 0, 0, 1]);
+        let io = crate::bus::BusCycle030 {
+            wait: 7,
+            port16: true,
+            cacheable: false,
+            refresh_eighths: 0,
+        };
+        assert_eq!(timing.access_wait(io, DataSize::Long), 2 * 9 - 2);
     }
 
     #[test]

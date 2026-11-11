@@ -8,7 +8,7 @@ use crate::alu::{
 };
 use crate::bus::{Bus, BusFault, TrapHandler, TrapResult};
 use crate::policy::CpuPolicy;
-use crate::timing030::{Ea, Full, Trace, access_wait, cacr};
+use crate::timing030::{Ea, Full, Trace, cacr};
 use crate::state::{
     CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_M, SR_N, SR_S, SR_T, SR_T0, SR_V,
     SR_X, SR_Z,
@@ -125,7 +125,7 @@ impl<P: CpuPolicy> CpuCore<P> {
         let wait = if cached {
             0
         } else {
-            access_wait(cycle.wait, cycle.port16, size)
+            self.state.timing030.access_wait(cycle, size)
         };
         self.trace.record_access(is_write, wait, cached);
     }
@@ -148,7 +148,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             timing.icache.fill(long, supervisor);
         }
         self.trace.fetch_misses += 1;
-        self.trace.fetch_wait = access_wait(cycle.wait, cycle.port16, DataSize::Long);
+        self.trace.fetch_wait = timing.access_wait(cycle, DataSize::Long);
     }
 
     #[inline(always)]

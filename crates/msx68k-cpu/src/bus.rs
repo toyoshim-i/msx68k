@@ -76,6 +76,8 @@ pub struct BusCycle030 {
     pub port16: bool,
     /// The address may be cached (the system does not assert `CIIN`).
     pub cacheable: bool,
+    /// Average DRAM refresh delay per bus cycle, in eighths of a clock.
+    pub refresh_eighths: u8,
 }
 
 impl Default for BusCycle030 {
@@ -84,6 +86,7 @@ impl Default for BusCycle030 {
             wait: 0,
             port16: false,
             cacheable: true,
+            refresh_eighths: 0,
         }
     }
 }

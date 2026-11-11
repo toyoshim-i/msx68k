@@ -309,6 +309,7 @@ mod tests {
         let ram = bus.bus_cycle_030(0x1000);
         let rom = bus.bus_cycle_030(0x00FF_0000);
         assert_eq!((ram.wait, ram.port16, ram.cacheable), (0, false, true));
+        assert_eq!(ram.refresh_eighths, 1);
         assert_eq!((rom.wait, rom.port16, rom.cacheable), (3, false, true));
         bus.write_u8(0x00E8_E009, 0x02, true).unwrap();
         assert_eq!(bus.bus_cycle_030(0x1000).wait, 4);

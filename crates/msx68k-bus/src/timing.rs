@@ -261,7 +261,8 @@ impl MemoryRegion {
     /// Returns the X68030 bus cycle of this region at the 24-bit address `a`, given the ROM
     /// and RAM waits set through the system port.
     ///
-    /// Wait states are in 25 MHz clocks beyond a 2-clock cycle, after XEiJ's X68030 model.
+    /// Wait states are in 25 MHz clocks beyond a 2-clock cycle, after XEiJ's X68030 model,
+    /// including its DRAM refresh delay of an eighth of a clock per Main RAM cycle.
     /// Only Main RAM and ROM are cacheable; every I/O and VRAM port is 16 bits wide.
     pub const fn x68030_bus_cycle(self, a: u32, rom_wait: u8, ram_wait: u8) -> BusCycle030 {
         let (wait, port16, cacheable) = match self {
@@ -284,6 +285,7 @@ impl MemoryRegion {
             wait,
             port16,
             cacheable,
+            refresh_eighths: if matches!(self, Self::MainRam) { 1 } else { 0 },
         }
     }
 
