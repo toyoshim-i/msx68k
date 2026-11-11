@@ -54,7 +54,6 @@ const SPAN_SOURCE_LEFT: u32 = 28;
 const SPAN_DEST_LEFT: u32 = 30;
 const SPAN_SOURCE_PAGE: u32 = 32;
 const SPAN_DEST_PAGE: u32 = 36;
-const SPAN_REVERSED: u32 = 40;
 
 // `text_base` offsets of the per-plane span routines the context can name.
 const SPAN_CLEAR: u32 = 0x372CA;
@@ -1180,9 +1179,8 @@ impl X68kBus {
     /// text mode and the colors, which this maps to the operation they perform.
     fn text_span(&mut self, state: &mut CpuState) -> Option<()> {
         let context = state.a[0];
-        if self.peek_u8(context + SPAN_REVERSED)? != 0 {
-            return None;
-        }
+        // The reversed flag only makes the guest work from the right for overlapping copies;
+        // every span is read here before any of it is written.
         let text_base = self.native_gm_text_base?;
         let left = self.peek_u16(context + SPAN_DEST_LEFT)? as i16;
         let source_left = self.peek_u16(context + SPAN_SOURCE_LEFT)? as i16;

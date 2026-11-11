@@ -36,7 +36,7 @@ Every text row from every path, and from `IFM.X` (Section 4), reaches planar bit
 
 | Part | Status |
 | :--- | :--- |
-| Text span routine | **Native.** Its first instruction (`MOVEM.L D3-D7/A1-A4,-(SP)`, signature `48 E7 1F 78 4A 28 00 28`) is replaced with hypercall `$FE8B` `GmTextSpan`. The handler maps the context's per-plane routines to their operations, draws the span, and returns. An unknown routine or the reversed flag makes it perform the replaced `MOVEM` and continue in the guest. It needs the host cursor, because the guest shields its own cursor around the whole run rather than each row. |
+| Text span routine | **Native.** Its first instruction (`MOVEM.L D3-D7/A1-A4,-(SP)`, signature `48 E7 1F 78 4A 28 00 28`) is replaced with hypercall `$FE8B` `GmTextSpan`. The handler maps the context's per-plane routines to their operations, draws the span, and returns. An unknown routine makes it perform the replaced `MOVEM` and continue in the guest. The same routine also draws the rows of guest bitmap copies (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 3). It needs the host cursor, because the guest shields its own cursor around the whole run rather than each row. |
 | `GMDrawStr` and the other text APIs | Guest code, which no longer writes the screen. All 76 text calls in the replay session that reached the span routine matched the guest exactly. |
 | Glyph fetch, layout, and styles | Guest code (68000). |
 | `IFM.X` | Guest code. Not yet run with the native span routine (Section 5, step 1). |
