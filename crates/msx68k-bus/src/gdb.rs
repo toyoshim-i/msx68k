@@ -21,7 +21,7 @@ use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
 };
 use gdbstub::target::{Target, TargetError, TargetResult};
-use msx68k_cpu::{BurstPolicy, CpuCore, CpuPolicy, TrackedPolicy};
+use msx68k_cpu::{Burst030Policy, BurstPolicy, CpuCore, CpuModel, CpuPolicy, TrackedPolicy};
 
 use crate::vm::{BusTrapHandler, FrameBudget, X68kVm, BURST_SYNC_INSTRUCTIONS};
 
@@ -165,11 +165,7 @@ impl X68kVm {
     /// Peripherals advance exactly as in the matching regular `run_*` method, so guest timers
     /// behave the same under a debugger.
     fn run_debug_frame(&mut self, budget: FrameBudget) -> Option<DebugStop> {
-        if self.is_running_burst() {
-            self.debug_loop::<BurstPolicy>(budget)
-        } else {
-            self.debug_loop::<TrackedPolicy>(budget)
-        }
+        crate::vm::with_policy!(self, debug_loop(budget))
     }
 
     fn debug_loop<P: CpuPolicy>(&mut self, budget: FrameBudget) -> Option<DebugStop> {

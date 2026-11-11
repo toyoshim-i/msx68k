@@ -16,10 +16,26 @@ pub const SR_CCR_MASK: u16 = 0x001F;
 pub const SR_IPM_MASK: u16 = 0x0700;
 /// Supervisor state flag (bit 13 of SR).
 pub const SR_S: u16 = 0x2000;
-/// Trace mode flag (bit 15 of SR).
+/// Master/interrupt state flag (bit 12 of SR, MC68030 only).
+pub const SR_M: u16 = 0x1000;
+/// Trace on change of flow flag (bit 14 of SR, MC68030 only).
+pub const SR_T0: u16 = 0x4000;
+/// Trace mode flag (bit 15 of SR, `T1` on the MC68030).
 pub const SR_T: u16 = 0x8000;
 /// Mask of all valid MC68000 Status Register bits (`T`, `S`, `I2..I0`, `X`, `N`, `Z`, `V`, `C`).
 pub const SR_VALID_MASK: u16 = 0xA71F;
+/// Mask of all valid MC68030 Status Register bits (adds `T0` and `M`).
+pub const SR_VALID_MASK_030: u16 = 0xF71F;
+
+/// CPU model emulated by a [`CpuState`].
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub enum CpuModel {
+    /// MC68000: 24-bit address bus, address errors on odd word accesses, 3-word exception frames.
+    #[default]
+    Mc68000,
+    /// MC68030: 32-bit address bus, 68020 instructions, `VBR`, and stack frames with a format word.
+    Mc68030,
+}
 
 /// Standard MC68000 exception vector numbers.
 #[repr(u8)]
@@ -37,6 +53,7 @@ pub enum ExceptionVector {
     Trace = 9,
     Line1010Emulator = 10,
     Line1111Emulator = 11,
+    FormatError = 14,
     SpuriousInterrupt = 24,
 }
 
@@ -96,7 +113,15 @@ impl DataSize {
     }
 }
 
-/// Complete architectural state of an MC68000 CPU instance.
+/// The stack pointer that `A7` currently stands for.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum StackPointer {
+    User,
+    Supervisor,
+    Master,
+}
+
+/// Complete architectural state of an MC68000 or MC68030 CPU instance.
 ///
 /// Decoupled from [`crate::policy::CpuPolicy`] so a VM can switch between
 /// cycle-accurate (`10MHz` / `16MHz` / `24MHz`) and `Burst` execution policies
@@ -118,7 +143,22 @@ pub struct CpuState {
     /// Inactive User Stack Pointer (updated when switching out of user mode).
     pub usp: u32,
     /// Inactive Supervisor Stack Pointer (updated when switching out of supervisor mode).
+    /// On the MC68030 this is the Interrupt Stack Pointer (`ISP`).
     pub ssp: u32,
+    /// Inactive Master Stack Pointer (MC68030, active while `S` and `M` are both set).
+    pub msp: u32,
+    /// Emulated CPU model.
+    pub model: CpuModel,
+    /// Vector Base Register (MC68030).
+    pub vbr: u32,
+    /// Cache Control Register (MC68030). The caches are not emulated.
+    pub cacr: u32,
+    /// Cache Address Register (MC68030).
+    pub caar: u32,
+    /// Source Function Code register used by `MOVES` (MC68030).
+    pub sfc: u8,
+    /// Destination Function Code register used by `MOVES` (MC68030).
+    pub dfc: u8,
     /// `true` when the CPU is halted in `STOP` state waiting for an interrupt/reset.
     pub stopped: bool,
     /// Current external interrupt priority level (`0`..=`7`).
@@ -142,6 +182,11 @@ impl Default for CpuState {
 impl CpuState {
     /// Creates a new MC68000 state in Supervisor mode with interrupts masked (`$2700`).
     pub const fn new() -> Self {
+        Self::with_model(CpuModel::Mc68000)
+    }
+
+    /// Creates a new state for `model` in Supervisor mode with interrupts masked (`$2700`).
+    pub const fn with_model(model: CpuModel) -> Self {
         Self {
             d: [0; 8],
             a: [0; 8],
@@ -151,6 +196,13 @@ impl CpuState {
             sr: SR_S | SR_IPM_MASK,
             usp: 0,
             ssp: 0,
+            msp: 0,
+            model,
+            vbr: 0,
+            cacr: 0,
+            caar: 0,
+            sfc: 0,
+            dfc: 0,
             stopped: false,
             pending_ipl: 0,
             nmi_pending: false,
@@ -184,61 +236,101 @@ impl CpuState {
         self.sr = (self.sr & !SR_CCR_MASK) | ((ccr as u16) & SR_CCR_MASK);
     }
 
-    /// Updates the full Status Register (`SR`), swapping active `A7` between `SSP` and `USP`
-    /// if the Supervisor bit (`S`) changes.
+    /// Returns which stack pointer `A7` is for `sr`.
+    #[inline]
+    const fn stack_for(&self, sr: u16) -> StackPointer {
+        if (sr & SR_S) == 0 {
+            StackPointer::User
+        } else if (sr & SR_M) != 0 && matches!(self.model, CpuModel::Mc68030) {
+            StackPointer::Master
+        } else {
+            StackPointer::Supervisor
+        }
+    }
+
+    /// Updates the full Status Register (`SR`), swapping the active `A7` between `USP`, `SSP`
+    /// (`ISP`), and `MSP` if the `S` or `M` bit changes.
     #[inline]
     pub fn set_sr(&mut self, new_sr: u16) {
-        let new_sr = new_sr & SR_VALID_MASK;
-        let was_super = self.is_supervisor();
-        let now_super = (new_sr & SR_S) != 0;
-        if was_super != now_super {
-            if was_super {
-                self.ssp = self.a[7];
-                self.a[7] = self.usp;
-            } else {
-                self.usp = self.a[7];
-                self.a[7] = self.ssp;
-            }
+        let valid = match self.model {
+            CpuModel::Mc68000 => SR_VALID_MASK,
+            CpuModel::Mc68030 => SR_VALID_MASK_030,
+        };
+        let new_sr = new_sr & valid;
+        let old = self.stack_for(self.sr);
+        let new = self.stack_for(new_sr);
+        if old != new {
+            let a7 = self.a[7];
+            *self.inactive_sp(old) = a7;
+            self.a[7] = *self.inactive_sp(new);
         }
         self.sr = new_sr;
     }
 
+    #[inline]
+    fn inactive_sp(&mut self, sp: StackPointer) -> &mut u32 {
+        match sp {
+            StackPointer::User => &mut self.usp,
+            StackPointer::Supervisor => &mut self.ssp,
+            StackPointer::Master => &mut self.msp,
+        }
+    }
+
+    #[inline]
+    fn get_sp(&self, sp: StackPointer) -> u32 {
+        if self.stack_for(self.sr) == sp {
+            self.a[7]
+        } else {
+            match sp {
+                StackPointer::User => self.usp,
+                StackPointer::Supervisor => self.ssp,
+                StackPointer::Master => self.msp,
+            }
+        }
+    }
+
+    #[inline]
+    fn set_sp(&mut self, sp: StackPointer, val: u32) {
+        *self.inactive_sp(sp) = val;
+        if self.stack_for(self.sr) == sp {
+            self.a[7] = val;
+        }
+    }
+
     /// Reads the User Stack Pointer regardless of current privilege mode.
     #[inline]
-    pub const fn get_usp(&self) -> u32 {
-        if self.is_supervisor() {
-            self.usp
-        } else {
-            self.a[7]
-        }
+    pub fn get_usp(&self) -> u32 {
+        self.get_sp(StackPointer::User)
     }
 
     /// Sets the User Stack Pointer regardless of current privilege mode.
     #[inline]
     pub fn set_usp(&mut self, val: u32) {
-        self.usp = val;
-        if !self.is_supervisor() {
-            self.a[7] = val;
-        }
+        self.set_sp(StackPointer::User, val);
     }
 
-    /// Reads the Supervisor Stack Pointer regardless of current privilege mode.
+    /// Reads the Supervisor Stack Pointer (`ISP` on the MC68030) regardless of current mode.
     #[inline]
-    pub const fn get_ssp(&self) -> u32 {
-        if self.is_supervisor() {
-            self.a[7]
-        } else {
-            self.ssp
-        }
+    pub fn get_ssp(&self) -> u32 {
+        self.get_sp(StackPointer::Supervisor)
     }
 
-    /// Sets the Supervisor Stack Pointer regardless of current privilege mode.
+    /// Sets the Supervisor Stack Pointer (`ISP` on the MC68030) regardless of current mode.
     #[inline]
     pub fn set_ssp(&mut self, val: u32) {
-        self.ssp = val;
-        if self.is_supervisor() {
-            self.a[7] = val;
-        }
+        self.set_sp(StackPointer::Supervisor, val);
+    }
+
+    /// Reads the MC68030 Master Stack Pointer regardless of current mode.
+    #[inline]
+    pub fn get_msp(&self) -> u32 {
+        self.get_sp(StackPointer::Master)
+    }
+
+    /// Sets the MC68030 Master Stack Pointer regardless of current mode.
+    #[inline]
+    pub fn set_msp(&mut self, val: u32) {
+        self.set_sp(StackPointer::Master, val);
     }
 
     /// Sets the external interrupt priority level (`0`..=`7`).

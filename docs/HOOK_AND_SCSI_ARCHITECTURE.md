@@ -51,6 +51,7 @@ flowchart LR
   - `D1.W == $0150, D2.L == 0`: Host Native Fullscreen 1:1 mode.
   - `D1.W == $0150, D2.L > 0`: Windowed 1:1 mode (`w = D2.L >> 16, h = D2.L & $FFFF`).
   - Active settings are automatically persisted to `A:\SYS\MSX68K.CFG` and battery-backed SRAM `$ED007E` (`0x80 | 0x30 = 0xB0`).
+- On MC68030 VMs, `BusTrapHandler::on_trap` also answers **`IOCS _SYS_STAT` (`D0.B == $AC`)**, which only the X68030 IPL ROM provides, while its IOCS table entry still points into ROM. See [CPU_AND_BUS.md](CPU_AND_BUS.md) Section 7.2.
 - A native replacement stub in 68k memory or ROM requires only **4 bytes (2 words)**:
   ```text
   +0: $FE80 | hypercall_id   ; Traps into Rust Hypercall Dispatcher

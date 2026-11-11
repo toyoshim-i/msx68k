@@ -1,6 +1,6 @@
 # MC68000 CPU Core & X68000 System Bus Architecture
 
-This document describes the design and implementation of the `msx68k-cpu` and `msx68k-bus` crates, covering the monomorphized MC68000 instruction engine, the CPU/System Bus wait-state model across `10MHz`, `16MHz`, `24MHz`, and `Burst` modes, the Mixed Mode trap interface, and hardware compatibility verification.
+This document describes the design and implementation of the `msx68k-cpu` and `msx68k-bus` crates, covering the monomorphized MC68000 / MC68030 instruction engine, the CPU/System Bus wait-state model across `10MHz`, `16MHz`, `24MHz`, and `Burst` modes, the Mixed Mode trap interface, and hardware compatibility verification.
 
 ---
 
@@ -8,7 +8,7 @@ This document describes the design and implementation of the `msx68k-cpu` and `m
 
 | Crate | Path | Responsibility |
 | :--- | :--- | :--- |
-| **`msx68k-cpu`** | `crates/msx68k-cpu` | Monomorphized MC68000 CPU core (`CpuCore<P>`), architectural register state (`CpuState`), ALU/BCD/bit/shift engine, exception handling, and A-Line/F-Line/`TRAP` hooks (`TrapHandler`). |
+| **`msx68k-cpu`** | `crates/msx68k-cpu` | Monomorphized MC68000 / MC68030 CPU core (`CpuCore<P>`), architectural register state (`CpuState`), ALU/BCD/bit/shift engine, exception handling, and A-Line/F-Line/`TRAP` hooks (`TrapHandler`). |
 | **`msx68k-bus`** | `crates/msx68k-bus` | X68000 24-bit physical address map (`MemoryRegion`), CPU & System Bus timing engine (`BusTimingConfig`, `WaitStateTable`), lazy on-demand VRAM/I/O allocation (`X68kBus`), and unified VM runner (`X68kVm`). |
 
 ---
@@ -23,6 +23,7 @@ A central requirement of **msx68k** is that cycle-accurate bus contention and wa
 ```rust
 pub trait CpuPolicy: Copy + Clone + Default + Send + Sync + 'static {
     const TRACK_CYCLES: bool;
+    const MC68030: bool = false;
 }
 ```
 
@@ -33,9 +34,11 @@ pub trait CpuPolicy: Copy + Clone + Default + Send + Sync + 'static {
 - **`BurstPolicy` (`TRACK_CYCLES = false`)**:
   - Used for the Master SX-Window VM and temporary fast-load boosts (`burst_on_disk_io`).
   - Because `P::TRACK_CYCLES` is a compile-time constant, Rust's dead-code elimination removes all cycle additions and `wait_cycles_16` lookups from the generated machine code.
+- **`Burst030Policy` (`TRACK_CYCLES = false`, `MC68030 = true`)**:
+  - Runs an MC68030 without cycle tracking (Section 7). There is deliberately no tracked MC68030 policy: MC68030 timing (caches, pipelining, 32-bit bus) is unrelated to the MC68000 tables, so it must not reuse them.
 
 ### 2.2 State Decoupling for Zero-Copy Mode Switching
-Architectural state (`CpuState`: `D0–D7`, `A0–A7`, `PC`, `IR`, `SR`, `USP`, `SSP`, interrupt lines, and `total_cycles`) is stored independently of the `CpuPolicy` type parameter. `X68kVm` can switch between `CpuCore<TrackedPolicy>` and `CpuCore<BurstPolicy>` on any instruction boundary (e.g., when entering or leaving disk I/O or changing application speed profiles) without copying registers or memory.
+Architectural state (`CpuState`: `D0–D7`, `A0–A7`, `PC`, `IR`, `SR`, `USP`, `SSP`, interrupt lines, `total_cycles`, and the MC68030 registers `MSP`, `VBR`, `CACR`, `CAAR`, `SFC`, `DFC`) is stored independently of the `CpuPolicy` type parameter. `CpuState::model` names the CPU, and `X68kVm` picks the policy from it and the speed mode (`with_policy!` in `vm.rs`). `X68kVm` can switch between `CpuCore<TrackedPolicy>` and `CpuCore<BurstPolicy>` on any instruction boundary (e.g., when entering or leaving disk I/O or changing application speed profiles) without copying registers or memory.
 
 ---
 
@@ -139,10 +142,35 @@ The MC68000 core is validated against the [SingleStepTests/m68000](https://githu
 
 ---
 
-## 7. Plan: MC68030 Emulation
+## 7. MC68030 Emulation
 
-Planned after the extended screen has left guest memory ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 5), to cover the X68030:
+Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68030` in the desktop app. Human68k 3.02 and SX-Window 3.1 boot to the desktop on it with the original X68000 IPL ROM 1.0 (`crates/msx68k-bus/tests/boot_030.rs`, which also checks that the desktop matches the MC68000 one byte for byte).
 
-- **CPU core**: an MC68030 core alongside the MC68000 one, as another monomorphized `CpuPolicy`. With it the guest gets the 32-bit address bus, so the X68030 high memory at `$0100_0000` and the reserved extension range at `$F000_0000`..`$FEFF_FFFF` (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5) become reachable without the 68000's 24-bit mirroring.
-- **Speed modes**: a 25 MHz cycle-accurate mode and Burst mode, like the existing presets in Section 3.1.
-- **Bus speed**: the system bus clock and the I/O and memory wait states of the X68030 have to be modelled and tuned, extending the wait-state model of Sections 3.2 to 3.4.
+### 7.1 What the Core Implements
+
+| Area | MC68030 behavior |
+| :--- | :--- |
+| Instructions | 68020 additions: `Bcc.L`, `BFxxx`, `CAS`, `CAS2`, `CHK.L`, `CHK2`, `CMP2`, `DIVx.L`, `EXTB.L`, `LINK.L`, `MULx.L`, `PACK`, `UNPK`, `RTD`, `TRAPcc`, `MOVE from CCR`, `MOVEC`, `MOVES`. `BKPT` raises an illegal instruction exception. |
+| Addressing | Scaled index, and the full extension word format (base and index suppression, 16/32-bit displacements, pre- and post-indexed memory indirection). |
+| Memory access | 32-bit addresses reach the bus. Misaligned word and long data accesses are split into byte cycles. Only instruction fetches from odd addresses raise an address error. |
+| Privilege | `MOVE from SR` is privileged. `S` and `M` select `USP`, `ISP`, or `MSP`. |
+| Exceptions | Vectors are read relative to `VBR`. Frames carry the format/vector word: format `$0` normally, `$2` (with the instruction address) for `CHK`, `CHK2`, `TRAPcc`, `TRAPV`, divide by zero, and trace, `$1` throwaway frames for interrupts taken with `M` set, and format `$B` for bus and address errors. `RTE` understands formats `$0`, `$1`, `$2`, `$9`, `$A`, and `$B`, and raises a format error for the rest. |
+| Control registers | `CACR` is stored but the caches are not emulated, so self-modifying code always sees memory. |
+
+Not implemented:
+- **MMU.** `PMOVE`, `PTEST`, `PFLUSH`, and `PLOAD` (`$F0xx`) raise the F-line exception, and addresses are not translated.
+- **FPU.** Coprocessor instructions raise the F-line exception, as on an X68030 without an MC68882. `FLOAT*.X` keeps working through the `$FExx` calls.
+- **Format `$A`/`$B` restart.** `RTE` from a bus fault frame reruns the faulted instruction from the start rather than resuming the faulted bus cycle. Side effects of the first attempt, such as a postincrement, are not undone.
+- `T0` (trace on change of flow) is stored but never traces.
+
+### 7.2 Firmware Gaps Covered Natively
+
+Only the X68000 IPL ROM 1.0 is available, so the X68030-only IOCS calls are missing.
+
+- **IOCS `$AC` `_SYS_STAT`.** Once Human68k 3.02 detects an MC68030 (it writes `3` to `$0CBC` itself), it calls `_SYS_STAT` for cache control. IPL ROM 1.0 reports it as an unknown IOCS call and Human68k stops at an Abort/Retry/Ignore prompt. `BusTrapHandler::on_trap` answers it natively on MC68030 VMs while the IOCS table entry still points into ROM, so a driver that installs its own takes over. It reports a 25 MHz MC68030 without FPU or MMU, and maps the cache state to `CACR`.
+
+### 7.3 Remaining Plan
+
+- **Cycle-accurate 25 MHz mode.** A tracked MC68030 policy with its own timing: instruction cache hits, the 32-bit bus with burst fills, and the X68030 system bus and I/O wait states, extending Sections 3.2 to 3.4. MC68000 cycle counts do not carry over.
+- **Address map.** The guest now sees 32-bit addresses. X68030 high memory at `$0100_0000` and the reserved extension range at `$F000_0000`..`$FEFF_FFFF` ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5) are reachable as such, but everything else still mirrors the 24-bit space as on the 68000.
+- **X68030 IPL ROM.** With IPL ROM 1.3 the native `_SYS_STAT` would no longer be needed, and its MMU and FPU setup would need the missing units above.

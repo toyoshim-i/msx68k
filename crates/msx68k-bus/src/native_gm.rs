@@ -2082,7 +2082,7 @@ impl X68kBus {
         Some((hi << 8) | lo)
     }
 
-    fn peek_u32(&self, addr: u32) -> Option<u32> {
+    pub(crate) fn peek_u32(&self, addr: u32) -> Option<u32> {
         let hi = self.peek_u16(addr)? as u32;
         let lo = self.peek_u16(addr.wrapping_add(2))? as u32;
         Some((hi << 16) | lo)

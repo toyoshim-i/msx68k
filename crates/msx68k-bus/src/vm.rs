@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use msx68k_cpu::{
-    BurstPolicy, BusFault, CpuCore, CpuState, StepOutcome, TrackedPolicy,
-    TrapHandler,
+    Burst030Policy, BurstPolicy, BusFault, CpuCore, CpuModel, CpuPolicy, CpuState, StepOutcome,
+    TrackedPolicy, TrapHandler,
 };
 
 use crate::bus::{X68kBus, MAX_MAIN_RAM_BYTES};
@@ -56,9 +56,78 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
         if trap_no == 15 && (state.d[0] & 0xFF) == 0x10 {
             return bus.handle_iocs_crtmod(state);
         }
+        if trap_no == 15 && (state.d[0] & 0xFF) == IOCS_SYS_STAT && state.model == CpuModel::Mc68030
+        {
+            return iocs_sys_stat(state, bus);
+        }
         msx68k_cpu::TrapResult::PassToVector
     }
 }
+
+/// IOCS call number of `_SYS_STAT`.
+const IOCS_SYS_STAT: u32 = 0xAC;
+/// Address of the IOCS call table entry for `_SYS_STAT`.
+const IOCS_SYS_STAT_VECTOR: u32 = 0x0400 + IOCS_SYS_STAT * 4;
+
+/// Answers IOCS `_SYS_STAT` for an MC68030.
+///
+/// Human68k 3.02 uses it for cache control once it finds an MC68030, but only the X68030
+/// IPL ROM has it, so it is answered natively while the call table still points into ROM.
+/// - `D1 = 0`: MPU status. 25 MHz MC68030, no FPU, and no MMU since none is emulated.
+/// - `D1 = 1`: cache state (bit 0 instruction cache, bit 1 data cache).
+/// - `D1 = 2`: restores the default state, both caches on, returning the previous state.
+/// - `D1 = 3`: flushes the caches.
+/// - `D1 = 4`: sets the cache state to `D2`, returning the previous state.
+fn iocs_sys_stat(state: &mut CpuState, bus: &mut X68kBus) -> msx68k_cpu::TrapResult {
+    const CACR_EI: u32 = 0x0001;
+    const CACR_ED: u32 = 0x0100;
+    const MPU_68030_25MHZ: u32 = (250 << 16) | 3;
+    if !matches!(bus.peek_u32(IOCS_SYS_STAT_VECTOR), Some(0x00FE_0000..=0x00FF_FFFF)) {
+        return msx68k_cpu::TrapResult::PassToVector;
+    }
+    let caches = |cacr: u32| (cacr & CACR_EI) | ((cacr & CACR_ED) >> 7);
+    let set_caches = |state: &mut CpuState, bits: u32| {
+        state.cacr = (state.cacr & !(CACR_EI | CACR_ED)) | (bits & 1) | ((bits & 2) << 7);
+    };
+    let previous = caches(state.cacr);
+    state.d[0] = match state.d[1] {
+        0 => MPU_68030_25MHZ,
+        1 => previous,
+        2 => {
+            set_caches(state, 3);
+            previous
+        }
+        3 => 0,
+        4 => {
+            set_caches(state, state.d[2]);
+            previous
+        }
+        _ => u32::MAX,
+    };
+    msx68k_cpu::TrapResult::Handled { extra_cycles: 0 }
+}
+
+/// Calls `$self.$method::<P, ...>(args)` with the policy `P` for the VM's CPU model and speed.
+macro_rules! with_policy {
+    ($self:ident, $method:ident $(::<$($rest:ty),*>)? ($($arg:expr),*)) => {
+        match ($self.cpu_state.model, $self.is_running_burst()) {
+            (CpuModel::Mc68030, _) => $self.$method::<Burst030Policy $($(, $rest)*)?>($($arg),*),
+            (CpuModel::Mc68000, true) => $self.$method::<BurstPolicy $($(, $rest)*)?>($($arg),*),
+            (CpuModel::Mc68000, false) => $self.$method::<TrackedPolicy $($(, $rest)*)?>($($arg),*),
+        }
+    };
+}
+
+/// Like [`with_policy`] for loops that always run without cycle tracking.
+macro_rules! with_burst_policy {
+    ($self:ident, $method:ident $(::<$($rest:ty),*>)? ($($arg:expr),*)) => {
+        match $self.cpu_state.model {
+            CpuModel::Mc68030 => $self.$method::<Burst030Policy $($(, $rest)*)?>($($arg),*),
+            CpuModel::Mc68000 => $self.$method::<BurstPolicy $($(, $rest)*)?>($($arg),*),
+        }
+    };
+}
+pub(crate) use with_policy;
 
 /// Configuration for spawning a Master SX-Window VM or an Isolated Application VM.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -71,6 +140,9 @@ pub struct VmConfig {
     pub ram_size_bytes: usize,
     /// Whether to temporarily switch to `Burst` mode during disk I/O operations.
     pub burst_on_disk_io: bool,
+    /// Emulated CPU. An MC68030 always runs in Burst mode, since its cycle timing is not
+    /// modelled yet.
+    pub cpu_model: CpuModel,
 }
 
 impl VmConfig {
@@ -84,6 +156,7 @@ impl VmConfig {
             speed_mode: VmRole::MasterSx.default_speed_mode(),
             ram_size_bytes: MAX_MAIN_RAM_BYTES,
             burst_on_disk_io: true,
+            cpu_model: CpuModel::Mc68000,
         }
     }
 
@@ -97,6 +170,7 @@ impl VmConfig {
             speed_mode: VmRole::AppVm.default_speed_mode(),
             ram_size_bytes: 2 * 1024 * 1024,
             burst_on_disk_io: false,
+            cpu_model: CpuModel::Mc68000,
         }
     }
 
@@ -107,6 +181,7 @@ impl VmConfig {
             speed_mode,
             ram_size_bytes: 2 * 1024 * 1024,
             burst_on_disk_io: false,
+            cpu_model: CpuModel::Mc68000,
         }
     }
 
@@ -120,6 +195,12 @@ impl VmConfig {
     pub const fn with_ram_mb(mut self, mb: usize) -> Self {
         let clamped = if mb > 12 { 12 } else if mb == 0 { 1 } else { mb };
         self.ram_size_bytes = clamped * 1024 * 1024;
+        self
+    }
+
+    /// Builder method to select the emulated CPU.
+    pub const fn with_cpu_model(mut self, cpu_model: CpuModel) -> Self {
+        self.cpu_model = cpu_model;
         self
     }
 
@@ -201,7 +282,7 @@ impl X68kVm {
         bus.extensions_reserved = config.role == VmRole::MasterSx;
         Self {
             config,
-            cpu_state: CpuState::new(),
+            cpu_state: CpuState::with_model(config.cpu_model),
             bus,
             disk_io_burst_active: false,
             debug: DebugState::default(),
@@ -260,26 +341,53 @@ impl X68kVm {
         self.disk_io_burst_active = active && self.config.burst_on_disk_io;
     }
 
-    /// Returns `true` if the VM is currently executing under the zero-wait [`BurstPolicy`].
+    /// Returns `true` if the VM is currently executing without cycle tracking ([`BurstPolicy`]
+    /// or, for an MC68030, [`Burst030Policy`]).
     #[inline]
     pub const fn is_running_burst(&self) -> bool {
-        self.disk_io_burst_active || self.config.speed_mode.is_burst()
+        self.disk_io_burst_active
+            || self.config.speed_mode.is_burst()
+            || matches!(self.cpu_state.model, CpuModel::Mc68030)
+    }
+
+    /// Returns the emulated CPU.
+    #[inline]
+    pub const fn cpu_model(&self) -> CpuModel {
+        self.cpu_state.model
+    }
+
+    /// Wraps the CPU state in a core of policy `P`, runs `f`, and stores the state back.
+    #[inline(always)]
+    pub(crate) fn with_core<P: CpuPolicy, R>(
+        &mut self,
+        f: impl FnOnce(&mut CpuCore<P>, &mut X68kBus) -> R,
+    ) -> R {
+        let mut core = CpuCore::<P>::from_state(std::mem::take(&mut self.cpu_state));
+        let result = f(&mut core, &mut self.bus);
+        self.cpu_state = core.into_state();
+        result
     }
 
     /// Resets the CPU by loading initial `SSP` and `PC` from `$000000` and `$000004`.
     pub fn reset(&mut self) -> Result<u32, BusFault> {
         self.bus.soft_reset();
-        let state = std::mem::take(&mut self.cpu_state);
-        if self.is_running_burst() {
-            let mut core = CpuCore::<BurstPolicy>::from_state(state);
-            let res = core.reset(&mut self.bus);
-            self.cpu_state = core.into_state();
-            res
+        with_policy!(self, reset_with())
+    }
+
+    fn reset_with<P: CpuPolicy>(&mut self) -> Result<u32, BusFault> {
+        self.with_core::<P, _>(|core, bus| core.reset(bus))
+    }
+
+    /// Peripheral time, in 10 MHz ticks, that one instruction of `outcome` stands for.
+    #[inline(always)]
+    fn peripheral_ticks<P: CpuPolicy>(&self, outcome: StepOutcome) -> u32 {
+        if P::TRACK_CYCLES {
+            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
+            (outcome.cycles.saturating_mul(10) / cpu_mhz).max(1)
+        } else if outcome.stopped {
+            64
         } else {
-            let mut core = CpuCore::<TrackedPolicy>::from_state(state);
-            let res = core.reset(&mut self.bus);
-            self.cpu_state = core.into_state();
-            res
+            8
         }
     }
 
@@ -287,28 +395,19 @@ impl X68kVm {
     /// advancing motherboard peripherals (CRTC, MFP, OPM) and routing pending interrupts.
     #[inline]
     pub fn step_with_trap<T: TrapHandler<X68kBus>>(&mut self, trap_handler: &mut T) -> StepOutcome {
-        let bus_ipl = self.bus.highest_pending_ipl();
-        self.cpu_state.set_ipl(bus_ipl);
+        with_policy!(self, step_with::<_>(trap_handler))
+    }
 
-        let state = std::mem::take(&mut self.cpu_state);
-        if self.is_running_burst() {
-            let mut core = CpuCore::<BurstPolicy>::from_state(state);
-            let outcome = core.step(&mut self.bus, trap_handler);
-            self.cpu_state = core.into_state();
-            let virtual_ticks = if outcome.stopped { 64 } else { 8 };
-            self.bus.advance_peripherals(virtual_ticks);
-            self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
-            outcome
-        } else {
-            let mut core = CpuCore::<TrackedPolicy>::from_state(state);
-            let outcome = core.step(&mut self.bus, trap_handler);
-            self.cpu_state = core.into_state();
-            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
-            let ticks_10mhz = (outcome.cycles.saturating_mul(10) / cpu_mhz).max(1);
-            self.bus.advance_peripherals(ticks_10mhz);
-            self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
-            outcome
-        }
+    fn step_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
+        &mut self,
+        trap_handler: &mut T,
+    ) -> StepOutcome {
+        self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
+        let outcome = self.with_core::<P, _>(|core, bus| core.step(bus, trap_handler));
+        let ticks = self.peripheral_ticks::<P>(outcome);
+        self.bus.advance_peripherals(ticks);
+        self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
+        outcome
     }
 
     /// Executes a single instruction with the default [`BusTrapHandler`].
@@ -324,33 +423,26 @@ impl X68kVm {
         max_instructions: usize,
         trap_handler: &mut T,
     ) -> u64 {
-        let state = std::mem::take(&mut self.cpu_state);
-        if self.is_running_burst() {
-            let mut core = CpuCore::<BurstPolicy>::from_state(state);
-            for _ in 0..max_instructions {
-                core.state.set_ipl(self.bus.highest_pending_ipl());
-                let out = core.step(&mut self.bus, trap_handler);
-                let virtual_ticks = if out.stopped { 64 } else { 8 };
-                self.bus.advance_peripherals(virtual_ticks);
-            }
+        with_policy!(self, run_steps_with::<_>(max_instructions, trap_handler))
+    }
+
+    fn run_steps_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
+        &mut self,
+        max_instructions: usize,
+        trap_handler: &mut T,
+    ) -> u64 {
+        let mut core = CpuCore::<P>::from_state(std::mem::take(&mut self.cpu_state));
+        let mut elapsed = 0u64;
+        for _ in 0..max_instructions {
             core.state.set_ipl(self.bus.highest_pending_ipl());
-            self.cpu_state = core.into_state();
-            0
-        } else {
-            let mut core = CpuCore::<TrackedPolicy>::from_state(state);
-            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
-            let mut elapsed = 0u64;
-            for _ in 0..max_instructions {
-                core.state.set_ipl(self.bus.highest_pending_ipl());
-                let out = core.step(&mut self.bus, trap_handler);
-                elapsed += out.cycles as u64;
-                let ticks_10mhz = (out.cycles.saturating_mul(10) / cpu_mhz).max(1);
-                self.bus.advance_peripherals(ticks_10mhz);
-            }
-            core.state.set_ipl(self.bus.highest_pending_ipl());
-            self.cpu_state = core.into_state();
-            elapsed
+            let out = core.step(&mut self.bus, trap_handler);
+            elapsed += out.cycles as u64;
+            let ticks = self.peripheral_ticks::<P>(out);
+            self.bus.advance_peripherals(ticks);
         }
+        core.state.set_ipl(self.bus.highest_pending_ipl());
+        self.cpu_state = core.into_state();
+        elapsed
     }
 
     /// Executes up to `max_instructions` instructions with the default [`BusTrapHandler`].
@@ -366,33 +458,22 @@ impl X68kVm {
         target_cycles: u32,
         trap_handler: &mut T,
     ) -> u32 {
-        let state = std::mem::take(&mut self.cpu_state);
         if self.is_running_burst() {
-            let mut core = CpuCore::<BurstPolicy>::from_state(state);
-            for _ in 0..target_cycles {
-                core.state.set_ipl(self.bus.highest_pending_ipl());
-                let out = core.step(&mut self.bus, trap_handler);
-                let virtual_ticks = if out.stopped { 64 } else { 8 };
-                self.bus.advance_peripherals(virtual_ticks);
-            }
-            core.state.set_ipl(self.bus.highest_pending_ipl());
-            self.cpu_state = core.into_state();
-            0
-        } else {
-            let mut core = CpuCore::<TrackedPolicy>::from_state(state);
-            let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
-            let mut elapsed = 0u32;
-            while elapsed < target_cycles {
-                core.state.set_ipl(self.bus.highest_pending_ipl());
-                let out = core.step(&mut self.bus, trap_handler);
-                elapsed = elapsed.saturating_add(out.cycles);
-                let ticks_10mhz = (out.cycles.saturating_mul(10) / cpu_mhz).max(1);
-                self.bus.advance_peripherals(ticks_10mhz);
-            }
-            core.state.set_ipl(self.bus.highest_pending_ipl());
-            self.cpu_state = core.into_state();
-            elapsed
+            with_policy!(self, run_steps_with::<_>(target_cycles as usize, trap_handler));
+            return 0;
         }
+        let mut core = CpuCore::<TrackedPolicy>::from_state(std::mem::take(&mut self.cpu_state));
+        let mut elapsed = 0u32;
+        while elapsed < target_cycles {
+            core.state.set_ipl(self.bus.highest_pending_ipl());
+            let out = core.step(&mut self.bus, trap_handler);
+            elapsed = elapsed.saturating_add(out.cycles);
+            let ticks = self.peripheral_ticks::<TrackedPolicy>(out);
+            self.bus.advance_peripherals(ticks);
+        }
+        core.state.set_ipl(self.bus.highest_pending_ipl());
+        self.cpu_state = core.into_state();
+        elapsed
     }
 
     /// Executes until at least `target_cycles` CPU clock cycles have elapsed with the default [`BusTrapHandler`].
@@ -412,8 +493,20 @@ impl X68kVm {
         target_ticks_10mhz: u32,
         trap_handler: &mut T,
     ) -> usize {
+        with_burst_policy!(
+            self,
+            run_burst_frame_with::<_>(max_instructions, target_ticks_10mhz, trap_handler)
+        )
+    }
+
+    fn run_burst_frame_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
+        &mut self,
+        max_instructions: usize,
+        target_ticks_10mhz: u32,
+        trap_handler: &mut T,
+    ) -> usize {
         let state = std::mem::take(&mut self.cpu_state);
-        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut core = CpuCore::<P>::from_state(state);
         let mut elapsed_ticks = 0u32;
         let mut tick_accum = 0usize;
         let mut instructions_executed = 0usize;
@@ -466,8 +559,12 @@ impl X68kVm {
     /// Executes Burst code as fast as the host allows until `deadline`, advancing peripherals
     /// to match host time so guest timers run at their real rate.
     pub fn run_burst_real_time(&mut self, deadline: Instant) {
+        with_burst_policy!(self, run_burst_real_time_with(deadline))
+    }
+
+    fn run_burst_real_time_with<P: CpuPolicy>(&mut self, deadline: Instant) {
         let state = std::mem::take(&mut self.cpu_state);
-        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut core = CpuCore::<P>::from_state(state);
         let mut handler = BusTrapHandler;
         loop {
             for _ in 0..BURST_SYNC_INSTRUCTIONS {
@@ -488,8 +585,12 @@ impl X68kVm {
     /// Executes Burst code as fast as the host allows until `deadline`, with peripherals on
     /// virtual time so boot-time timer waits finish quickly.
     pub fn run_burst_fast_forward(&mut self, deadline: Instant) {
+        with_burst_policy!(self, run_burst_fast_forward_with(deadline))
+    }
+
+    fn run_burst_fast_forward_with<P: CpuPolicy>(&mut self, deadline: Instant) {
         let state = std::mem::take(&mut self.cpu_state);
-        let mut core = CpuCore::<BurstPolicy>::from_state(state);
+        let mut core = CpuCore::<P>::from_state(state);
         let mut handler = BusTrapHandler;
         while Instant::now() < deadline {
             for _ in 0..BURST_SYNC_INSTRUCTIONS {

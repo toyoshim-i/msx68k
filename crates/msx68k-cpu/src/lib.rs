@@ -1,8 +1,9 @@
-//! Monomorphized Motorola 68000 CPU core (`msx68k-cpu`).
+//! Monomorphized Motorola 68000 / 68030 CPU core (`msx68k-cpu`).
 //!
 //! Provides [`CpuCore<P>`] parameterized over [`CpuPolicy`] ([`TrackedPolicy`] for
 //! cycle-accurate 10/16/24 MHz execution with memory/bus wait-state accounting,
-//! and [`BurstPolicy`] for zero-overhead uncapped execution).
+//! [`BurstPolicy`] for zero-overhead uncapped execution, and [`Burst030Policy`] for
+//! uncapped MC68030 execution).
 
 pub mod alu;
 pub mod bus;
@@ -12,10 +13,10 @@ pub mod state;
 
 pub use bus::{Bus, BusFault, NoopTrapHandler, TrapHandler, TrapResult};
 pub use core::{CpuCore, StepOutcome};
-pub use policy::{BurstPolicy, CpuPolicy, TrackedPolicy};
+pub use policy::{Burst030Policy, BurstPolicy, CpuPolicy, TrackedPolicy};
 pub use state::{
-    CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_IPM_MASK, SR_N, SR_S, SR_T,
-    SR_VALID_MASK, SR_V, SR_X, SR_Z,
+    CpuModel, CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_IPM_MASK, SR_M, SR_N,
+    SR_S, SR_T, SR_T0, SR_VALID_MASK, SR_VALID_MASK_030, SR_V, SR_X, SR_Z,
 };
 
 #[cfg(test)]

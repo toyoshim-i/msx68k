@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use msx68k_bus::{CpuSpeedMode, FrameBudget, GdbServer, VmConfig, X68kVm};
+use msx68k_bus::{CpuModel, CpuSpeedMode, FrameBudget, GdbServer, VmConfig, X68kVm};
 use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -104,6 +104,14 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(sc)
 }
 
+/// Speed mode `vm` actually runs at. An MC68030 has no cycle-accurate mode yet.
+fn effective_speed_mode(vm: &X68kVm) -> CpuSpeedMode {
+    match vm.cpu_model() {
+        CpuModel::Mc68030 => CpuSpeedMode::Burst,
+        CpuModel::Mc68000 => vm.speed_mode(),
+    }
+}
+
 /// Host time left free each frame for rendering while Burst runs flat out.
 const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
 
@@ -116,6 +124,7 @@ struct AppArgs {
     hdd0_path: Option<PathBuf>,
     sram_path: PathBuf,
     speed_mode: CpuSpeedMode,
+    cpu_model: CpuModel,
     ram_mb: usize,
     scale: u32,
     resolution: Option<(u32, u32)>,
@@ -151,6 +160,7 @@ impl Default for AppArgs {
             hdd0_path,
             sram_path,
             speed_mode: CpuSpeedMode::Mhz10,
+            cpu_model: CpuModel::Mc68000,
             ram_mb: 4,
             scale: 1,
             resolution: None,
@@ -210,6 +220,11 @@ impl AppArgs {
                         };
                     }
                 }
+                "--cpu" => match args.next().as_deref() {
+                    Some("68000") => cfg.cpu_model = CpuModel::Mc68000,
+                    Some("68030") => cfg.cpu_model = CpuModel::Mc68030,
+                    other => eprintln!("Unknown --cpu {other:?}, keeping the MC68000"),
+                },
                 "--ram-mb" => {
                     if let Some(v) = args.next().and_then(|s| s.parse::<usize>().ok()) {
                         cfg.ram_mb = v.clamp(1, 12);
@@ -261,6 +276,7 @@ impl AppArgs {
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | burst (default: 10)\n  \
+                           --cpu <model>        CPU: 68000 | 68030 (default: 68000; 68030 always runs as burst)\n  \
                            --ram-mb <1..12>     Main RAM size in MB (default: 4)\n  \
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
@@ -306,6 +322,7 @@ impl Msx68kApp {
         let mut vm = X68kVm::new(
             VmConfig::master_sx()
                 .with_speed_mode(args.speed_mode)
+                .with_cpu_model(args.cpu_model)
                 .with_ram_mb(args.ram_mb),
         );
 
@@ -561,7 +578,7 @@ impl Msx68kApp {
             if self.last_title_update.elapsed() >= Duration::from_millis(250) {
                 self.last_title_update = Instant::now();
                 let (res_w, res_h) = self.vm.bus.crtc.active_resolution();
-                let speed_label = match self.vm.speed_mode() {
+                let speed_label = match effective_speed_mode(&self.vm) {
                     CpuSpeedMode::Mhz10 => "10MHz",
                     CpuSpeedMode::Mhz16 => "16MHz (XVI)",
                     CpuSpeedMode::Mhz24 => "24MHz (RedZone)",
@@ -580,8 +597,12 @@ impl Msx68kApp {
                 } else {
                     ""
                 };
+                let cpu_label = match self.vm.cpu_model() {
+                    CpuModel::Mc68000 => "68000",
+                    CpuModel::Mc68030 => "68030",
+                };
                 gpu.window.set_title(&format!(
-                    "msx68k — X68000 [{speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
+                    "msx68k — X68000 [{cpu_label} {speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
                     self.vm.cpu_state.pc
                 ));
                 self.flush_persistent_storage(false);
@@ -590,7 +611,7 @@ impl Msx68kApp {
     }
 
     fn frame_budget(&self) -> FrameBudget {
-        match self.vm.speed_mode() {
+        match effective_speed_mode(&self.vm) {
             CpuSpeedMode::Burst => {
                 let deadline = self.next_frame_deadline - BURST_RENDER_RESERVE;
                 if self.vm.bus.is_mouse_polling_active() {

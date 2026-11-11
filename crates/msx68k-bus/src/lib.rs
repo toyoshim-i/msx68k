@@ -15,7 +15,7 @@ pub mod timing;
 pub mod vicon;
 pub mod vm;
 
-pub use msx68k_cpu::{Bus, BusFault, NoopTrapHandler, TrapHandler};
+pub use msx68k_cpu::{Bus, BusFault, CpuModel, NoopTrapHandler, TrapHandler};
 pub use bus::{
     is_ext_screen_addr, HardwareAccessFlags, X68kBus, EXT_TVRAM_BASE, EXT_TVRAM_WINDOW, MSX68K_RESERVED_BASE, MSX68K_RESERVED_END, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
     ROM_WINDOW_BYTES, SPRITE_WINDOW_BYTES, TVRAM_BYTES,

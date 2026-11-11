@@ -1,4 +1,4 @@
-//! Monomorphized MC68000 instruction decoder and execution engine.
+//! Monomorphized MC68000 / MC68030 instruction decoder and execution engine.
 
 use std::marker::PhantomData;
 
@@ -9,7 +9,8 @@ use crate::alu::{
 use crate::bus::{Bus, BusFault, TrapHandler, TrapResult};
 use crate::policy::CpuPolicy;
 use crate::state::{
-    CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_N, SR_S, SR_T, SR_V, SR_X, SR_Z,
+    CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_M, SR_N, SR_S, SR_T, SR_T0, SR_V,
+    SR_X, SR_Z,
 };
 
 /// Resolved Effective Address (EA) operand location.
@@ -81,6 +82,8 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state.stopped = false;
         self.state.nmi_pending = false;
         self.state.sr = SR_S | 0x0700;
+        self.state.vbr = 0;
+        self.state.cacr = 0;
         let ssp = self.bus_read_u32(bus, 0)?;
         let pc = self.bus_read_u32(bus, 4)?;
         self.state.a[7] = ssp;
@@ -105,7 +108,13 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_read_u16<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u16, BusFault> {
-        if self.state.check_address_error && (addr & 1) != 0 {
+        if P::MC68030 && (addr & 1) != 0 {
+            // The MC68030 splits misaligned operands into several bus cycles.
+            let hi = bus.read_u8(addr, self.state.is_supervisor())? as u16;
+            let lo = bus.read_u8(addr.wrapping_add(1), self.state.is_supervisor())? as u16;
+            return Ok((hi << 8) | lo);
+        }
+        if !P::MC68030 && self.state.check_address_error && (addr & 1) != 0 {
             return Err(BusFault::AddressError {
                 addr,
                 is_write: false,
@@ -120,7 +129,12 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_read_u32<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u32, BusFault> {
-        if self.state.check_address_error && (addr & 1) != 0 {
+        if P::MC68030 && (addr & 1) != 0 {
+            let hi = self.bus_read_u16(bus, addr)? as u32;
+            let lo = self.bus_read_u16(bus, addr.wrapping_add(2))? as u32;
+            return Ok((hi << 16) | lo);
+        }
+        if !P::MC68030 && self.state.check_address_error && (addr & 1) != 0 {
             return Err(BusFault::AddressError {
                 addr,
                 is_write: false,
@@ -145,7 +159,12 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_write_u16<B: Bus>(&mut self, bus: &mut B, addr: u32, val: u16) -> Result<(), BusFault> {
-        if self.state.check_address_error && (addr & 1) != 0 {
+        if P::MC68030 && (addr & 1) != 0 {
+            let supervisor = self.state.is_supervisor();
+            bus.write_u8(addr, (val >> 8) as u8, supervisor)?;
+            return bus.write_u8(addr.wrapping_add(1), val as u8, supervisor);
+        }
+        if !P::MC68030 && self.state.check_address_error && (addr & 1) != 0 {
             return Err(BusFault::AddressError {
                 addr,
                 is_write: true,
@@ -160,7 +179,11 @@ impl<P: CpuPolicy> CpuCore<P> {
 
     #[inline(always)]
     fn bus_write_u32<B: Bus>(&mut self, bus: &mut B, addr: u32, val: u32) -> Result<(), BusFault> {
-        if self.state.check_address_error && (addr & 1) != 0 {
+        if P::MC68030 && (addr & 1) != 0 {
+            self.bus_write_u16(bus, addr, (val >> 16) as u16)?;
+            return self.bus_write_u16(bus, addr.wrapping_add(2), val as u16);
+        }
+        if !P::MC68030 && self.state.check_address_error && (addr & 1) != 0 {
             return Err(BusFault::AddressError {
                 addr,
                 is_write: true,
@@ -177,6 +200,13 @@ impl<P: CpuPolicy> CpuCore<P> {
     #[inline(always)]
     fn fetch_u16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, BusFault> {
         let pc = self.state.pc;
+        if P::MC68030 && (pc & 1) != 0 {
+            // Unlike data, instructions must stay word aligned.
+            return Err(BusFault::AddressError {
+                addr: pc,
+                is_write: false,
+            });
+        }
         let word = self.bus_read_u16(bus, pc)?;
         self.state.pc = pc.wrapping_add(2);
         Ok(word)
@@ -219,6 +249,33 @@ impl<P: CpuPolicy> CpuCore<P> {
         Ok(val)
     }
 
+    /// Returns the address of exception vector `vector_no` (relative to `VBR` on the MC68030).
+    #[inline(always)]
+    fn vector_addr(&self, vector_no: u8) -> u32 {
+        let offset = (vector_no as u32) * 4;
+        if P::MC68030 {
+            self.state.vbr.wrapping_add(offset)
+        } else {
+            offset
+        }
+    }
+
+    /// Pushes a short exception frame: `SR` and `PC`, plus the format/vector word on the MC68030.
+    fn push_frame<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        format: u16,
+        vector_no: u8,
+        pc: u32,
+        sr: u16,
+    ) -> Result<(), BusFault> {
+        if P::MC68030 {
+            self.push_u16(bus, (format << 12) | ((vector_no as u16) * 4))?;
+        }
+        self.push_u32(bus, pc)?;
+        self.push_u16(bus, sr)
+    }
+
     /// Checks and services pending hardware interrupts.
     fn check_interrupts<B: Bus>(&mut self, bus: &mut B) -> Result<bool, BusFault> {
         let ipl = self.state.pending_ipl;
@@ -241,19 +298,25 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state.stopped = false;
 
         let saved_sr = self.state.sr;
-        let new_sr = (saved_sr & !(SR_T | 0x0700)) | SR_S | ((ipl as u16) << 8);
+        let new_sr = (saved_sr & !(SR_T | SR_T0 | 0x0700)) | SR_S | ((ipl as u16) << 8);
         self.state.set_sr(new_sr);
 
         let vec_no = bus.acknowledge_interrupt(ipl).unwrap_or(24 + ipl);
-        self.push_u32(bus, self.state.pc)?;
-        self.push_u16(bus, saved_sr)?;
-        let handler = self.bus_read_u32(bus, (vec_no as u32) * 4)?;
+        self.push_frame(bus, 0, vec_no, self.state.pc, saved_sr)?;
+        if P::MC68030 && (new_sr & SR_M) != 0 {
+            // Interrupts run on the interrupt stack, leaving a throwaway frame there that
+            // returns to the master stack.
+            self.state.set_sr(new_sr & !SR_M);
+            self.push_frame(bus, 1, vec_no, self.state.pc, new_sr)?;
+        }
+        let handler = self.bus_read_u32(bus, self.vector_addr(vec_no))?;
         self.state.pc = handler;
         self.add_cycles(44);
         Ok(true)
     }
 
-    /// Raises a standard Group 1/2 exception (4-word stack frame: `SR`, `PC`).
+    /// Raises a standard Group 1/2 exception (frame: `SR`, `PC`, and on the MC68030 the
+    /// format/vector word, plus the instruction address for format `$2` exceptions).
     pub fn raise_exception<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -263,10 +326,22 @@ impl<P: CpuPolicy> CpuCore<P> {
     ) -> Result<(), BusFault> {
         self.state.stopped = false;
         let saved_sr = self.state.sr;
-        self.state.set_sr((saved_sr & !SR_T) | SR_S);
-        self.push_u32(bus, return_pc)?;
-        self.push_u16(bus, saved_sr)?;
-        let target = self.bus_read_u32(bus, (vector_no as u32) * 4)?;
+        self.state.set_sr((saved_sr & !(SR_T | SR_T0)) | SR_S);
+        let format = if P::MC68030
+            && matches!(
+                vector_no,
+                v if v == ExceptionVector::ZeroDivide as u8
+                    || v == ExceptionVector::ChkInstruction as u8
+                    || v == ExceptionVector::TrapvInstruction as u8
+                    || v == ExceptionVector::Trace as u8
+            ) {
+            self.push_u32(bus, self.state.ir_pc)?;
+            2
+        } else {
+            0
+        };
+        self.push_frame(bus, format, vector_no, return_pc, saved_sr)?;
+        let target = self.bus_read_u32(bus, self.vector_addr(vector_no))?;
         self.state.pc = target;
         self.add_cycles(base_cycles);
         Ok(())
@@ -285,8 +360,16 @@ impl<P: CpuPolicy> CpuCore<P> {
             }
         };
 
-        let rw_bit = if is_write { 0 } else { 1 << 4 };
         let fc = if (saved_sr & SR_S) != 0 { 5u16 } else { 1u16 };
+        if P::MC68030 {
+            self.push_long_bus_fault_frame(bus, vec_no, saved_sr, fault_addr, is_write, fc);
+            if let Ok(target) = self.bus_read_u32(bus, self.vector_addr(vec_no)) {
+                self.state.pc = target;
+            }
+            return;
+        }
+
+        let rw_bit = if is_write { 0 } else { 1 << 4 };
         let status_word = (self.state.ir & 0xFFE0) | rw_bit | fc;
 
         // Ensure SP is even before pushing the Group 0 frame so we do not double-fault.
@@ -302,7 +385,93 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.add_cycles(50);
     }
 
-    /// Executes a single MC68000 instruction (or interrupt/stop cycle).
+    /// Pushes an MC68030 long bus fault frame (format `$B`, 46 words).
+    ///
+    /// Only the fields software reads are filled in: `SR`, `PC` (the faulting instruction, so
+    /// `RTE` restarts it), the format/vector word, the special status word, and the fault address.
+    fn push_long_bus_fault_frame<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        vector_no: u8,
+        sr: u16,
+        fault_addr: u32,
+        is_write: bool,
+        fc: u16,
+    ) {
+        const FRAME_BYTES: u32 = 92;
+        const SSW_DF: u16 = 0x0100;
+        const SSW_RW: u16 = 0x0040;
+        let sp = (self.state.a[7] & !1).wrapping_sub(FRAME_BYTES);
+        self.state.a[7] = sp;
+        for offset in (0..FRAME_BYTES).step_by(4) {
+            let _ = self.bus_write_u32(bus, sp + offset, 0);
+        }
+        let ssw = SSW_DF | if is_write { 0 } else { SSW_RW } | fc;
+        let _ = self.bus_write_u16(bus, sp, sr);
+        let _ = self.bus_write_u32(bus, sp + 2, self.state.ir_pc);
+        let _ = self.bus_write_u16(bus, sp + 6, 0xB000 | ((vector_no as u16) * 4));
+        let _ = self.bus_write_u16(bus, sp + 10, ssw);
+        let _ = self.bus_write_u32(bus, sp + 16, fault_addr);
+        let _ = self.bus_write_u32(bus, sp + 36, self.state.ir_pc.wrapping_add(4));
+    }
+
+    /// Returns from an exception, discarding the extra words of MC68030 frames.
+    fn exec_rte<B: Bus>(&mut self, bus: &mut B) -> Result<(), BusFault> {
+        loop {
+            let new_sr = self.pop_u16(bus)?;
+            let new_pc = self.pop_u32(bus)?;
+            if P::MC68030 {
+                let format = self.pop_u16(bus)? >> 12;
+                let extra = match format {
+                    0 | 1 => 0,
+                    2 => 4,
+                    9 => 12,
+                    0xA => 24,
+                    0xB => 84,
+                    _ => {
+                        self.state.a[7] = self.state.a[7].wrapping_sub(8);
+                        return self.raise_exception(
+                            bus,
+                            ExceptionVector::FormatError as u8,
+                            self.state.ir_pc,
+                            34,
+                        );
+                    }
+                };
+                self.state.a[7] = self.state.a[7].wrapping_add(extra);
+                self.state.set_sr(new_sr);
+                if format == 1 {
+                    // A throwaway frame: continue with the frame on the newly selected stack.
+                    continue;
+                }
+            } else {
+                self.state.set_sr(new_sr);
+            }
+            self.state.pc = new_pc;
+            self.add_cycles(20);
+            return Ok(());
+        }
+    }
+
+    fn illegal<B: Bus>(&mut self, bus: &mut B) -> Result<(), BusFault> {
+        self.raise_exception(
+            bus,
+            ExceptionVector::IllegalInstruction as u8,
+            self.state.ir_pc,
+            34,
+        )
+    }
+
+    fn privilege_violation<B: Bus>(&mut self, bus: &mut B) -> Result<(), BusFault> {
+        self.raise_exception(
+            bus,
+            ExceptionVector::PrivilegeViolation as u8,
+            self.state.ir_pc,
+            34,
+        )
+    }
+
+    /// Executes a single instruction (or interrupt/stop cycle).
     pub fn step<B: Bus, T: TrapHandler<B>>(
         &mut self,
         bus: &mut B,
@@ -416,7 +585,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             }
             6 => {
                 let ext = self.fetch_u16(bus)?;
-                let addr = self.calc_brief_ext(self.state.a[r], ext);
+                let addr = self.calc_index_ext(bus, self.state.a[r], ext)?;
                 self.add_cycles(if size == DataSize::Long { 14 } else { 10 });
                 Ok(EaLocation::Memory(addr))
             }
@@ -440,7 +609,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                 3 => {
                     let base_pc = self.state.pc;
                     let ext = self.fetch_u16(bus)?;
-                    let addr = self.calc_brief_ext(base_pc, ext);
+                    let addr = self.calc_index_ext(bus, base_pc, ext)?;
                     self.add_cycles(if size == DataSize::Long { 14 } else { 10 });
                     Ok(EaLocation::Memory(addr))
                 }
@@ -467,8 +636,12 @@ impl<P: CpuPolicy> CpuCore<P> {
         }
     }
 
-    #[inline]
-    fn calc_brief_ext(&self, base: u32, ext: u16) -> u32 {
+    /// Computes an indexed address from extension word `ext`, which follows the opcode.
+    ///
+    /// The MC68000 only knows the brief format. The MC68030 also scales the index and has the
+    /// full format (bit 8), with base and index suppression, 16/32-bit base displacements, and
+    /// memory indirection with an outer displacement.
+    fn calc_index_ext<B: Bus>(&mut self, bus: &mut B, base: u32, ext: u16) -> Result<u32, BusFault> {
         let idx_reg = ((ext >> 12) & 7) as usize;
         let is_addr = (ext & 0x8000) != 0;
         let is_long = (ext & 0x0800) != 0;
@@ -477,13 +650,49 @@ impl<P: CpuPolicy> CpuCore<P> {
         } else {
             self.state.d[idx_reg]
         };
-        let idx_val = if is_long {
-            raw_idx as i32
+        let mut index = if is_long {
+            raw_idx
         } else {
-            (raw_idx as u16 as i16) as i32
+            (raw_idx as u16 as i16) as i32 as u32
         };
-        let disp = (ext as u8 as i8) as i32;
-        base.wrapping_add(disp as u32).wrapping_add(idx_val as u32)
+        if !P::MC68030 {
+            let disp = (ext as u8 as i8) as i32;
+            return Ok(base.wrapping_add(disp as u32).wrapping_add(index));
+        }
+        index <<= (ext >> 9) & 3;
+        if (ext & 0x0100) == 0 {
+            let disp = (ext as u8 as i8) as i32;
+            return Ok(base.wrapping_add(disp as u32).wrapping_add(index));
+        }
+
+        let base = if (ext & 0x0080) != 0 { 0 } else { base };
+        let index_suppressed = (ext & 0x0040) != 0;
+        if index_suppressed {
+            index = 0;
+        }
+        let base_disp = match (ext >> 4) & 3 {
+            2 => self.fetch_u16(bus)? as i16 as i32 as u32,
+            3 => self.fetch_u32(bus)?,
+            _ => 0,
+        };
+        let indirection = ext & 7;
+        if indirection == 0 {
+            return Ok(base.wrapping_add(base_disp).wrapping_add(index));
+        }
+        let outer_disp = match indirection & 3 {
+            2 => self.fetch_u16(bus)? as i16 as i32 as u32,
+            3 => self.fetch_u32(bus)?,
+            _ => 0,
+        };
+        if index_suppressed || (indirection & 4) == 0 {
+            // Pre-indexed (or no index): ([bd,An,Xn],od)
+            let ptr = self.bus_read_u32(bus, base.wrapping_add(base_disp).wrapping_add(index))?;
+            Ok(ptr.wrapping_add(outer_disp))
+        } else {
+            // Post-indexed: ([bd,An],Xn,od)
+            let ptr = self.bus_read_u32(bus, base.wrapping_add(base_disp))?;
+            Ok(ptr.wrapping_add(index).wrapping_add(outer_disp))
+        }
     }
 
     fn read_ea<B: Bus>(
@@ -775,6 +984,22 @@ impl<P: CpuPolicy> CpuCore<P> {
             return Ok(());
         }
 
+        if P::MC68030 {
+            let size_bits = (op >> 9) & 3;
+            if (op & 0xF9C0) == 0x00C0 && size_bits != 3 {
+                return self.exec_cmp2(bus, op, size_bits);
+            }
+            if (op & 0xF9FF) == 0x08FC && size_bits >= 2 {
+                return self.exec_cas2(bus, size_bits);
+            }
+            if (op & 0xF9C0) == 0x08C0 && size_bits != 0 {
+                return self.exec_cas(bus, op, size_bits);
+            }
+            if (op & 0xFF00) == 0x0E00 {
+                return self.exec_moves(bus, op);
+            }
+        }
+
         // Immediate operations: ORI (0), ANDI (1), SUBI (2), ADDI (3), EORI (5), CMPI (6)
         let size = match (op >> 6) & 3 {
             0 => DataSize::Byte,
@@ -850,6 +1075,164 @@ impl<P: CpuPolicy> CpuCore<P> {
         Ok(())
     }
 
+    /// `CMP2` / `CHK2 <ea>, Rn` (MC68030).
+    fn exec_cmp2<B: Bus>(&mut self, bus: &mut B, op: u16, size_bits: u16) -> Result<(), BusFault> {
+        let size = match size_bits {
+            0 => DataSize::Byte,
+            1 => DataSize::Word,
+            _ => DataSize::Long,
+        };
+        let ext = self.fetch_u16(bus)?;
+        let mode = ((op >> 3) & 7) as u8;
+        let EaLocation::Memory(addr) = self.resolve_ea(bus, mode, (op & 7) as u8, size)? else {
+            return self.illegal(bus);
+        };
+        let lower = self.read_ea(bus, EaLocation::Memory(addr), size)?;
+        let upper = self.read_ea(bus, EaLocation::Memory(addr.wrapping_add(size.bytes())), size)?;
+        let reg = ((ext >> 12) & 7) as usize;
+        // An address register is compared in full against sign-extended bounds.
+        let (value, lower, upper) = if (ext & 0x8000) != 0 {
+            (
+                self.state.a[reg],
+                size.sign_extend(lower) as u32,
+                size.sign_extend(upper) as u32,
+            )
+        } else {
+            (self.state.read_d(reg, size), lower, upper)
+        };
+        // Bounds in signed order (lower above upper as unsigned numbers) compare signed.
+        let out_of_bounds = if lower <= upper {
+            value < lower || value > upper
+        } else {
+            let wide = |v: u32| if (ext & 0x8000) != 0 { v as i32 } else { size.sign_extend(v) };
+            wide(value) < wide(lower) || wide(value) > wide(upper)
+        };
+        self.state.set_flag(SR_Z, value == lower || value == upper);
+        self.state.set_flag(SR_C, out_of_bounds);
+        if out_of_bounds && (ext & 0x0800) != 0 {
+            return self.raise_exception(
+                bus,
+                ExceptionVector::ChkInstruction as u8,
+                self.state.pc,
+                40,
+            );
+        }
+        Ok(())
+    }
+
+    /// `CAS Dc, Du, <ea>` (MC68030).
+    fn exec_cas<B: Bus>(&mut self, bus: &mut B, op: u16, size_bits: u16) -> Result<(), BusFault> {
+        let size = match size_bits {
+            1 => DataSize::Byte,
+            2 => DataSize::Word,
+            _ => DataSize::Long,
+        };
+        let ext = self.fetch_u16(bus)?;
+        let dc = (ext & 7) as usize;
+        let du = ((ext >> 6) & 7) as usize;
+        let loc = self.resolve_ea(bus, ((op >> 3) & 7) as u8, (op & 7) as u8, size)?;
+        if !matches!(loc, EaLocation::Memory(_)) {
+            return self.illegal(bus);
+        }
+        let dest = self.read_ea(bus, loc, size)?;
+        let compare = self.state.read_d(dc, size);
+        alu_sub(&mut self.state, size, compare, dest, false);
+        if self.state.flag(SR_Z) {
+            let update = self.state.read_d(du, size);
+            self.write_ea(bus, loc, size, update)?;
+        } else {
+            self.state.write_d(dc, size, dest);
+        }
+        Ok(())
+    }
+
+    /// `CAS2 Dc1:Dc2, Du1:Du2, (Rn1):(Rn2)` (MC68030).
+    fn exec_cas2<B: Bus>(&mut self, bus: &mut B, size_bits: u16) -> Result<(), BusFault> {
+        let size = if size_bits == 2 {
+            DataSize::Word
+        } else {
+            DataSize::Long
+        };
+        let ext1 = self.fetch_u16(bus)?;
+        let ext2 = self.fetch_u16(bus)?;
+        let addr_of = |state: &CpuState, ext: u16| {
+            let reg = ((ext >> 12) & 7) as usize;
+            if (ext & 0x8000) != 0 {
+                state.a[reg]
+            } else {
+                state.d[reg]
+            }
+        };
+        let addr1 = addr_of(&self.state, ext1);
+        let addr2 = addr_of(&self.state, ext2);
+        let val1 = self.read_ea(bus, EaLocation::Memory(addr1), size)?;
+        let val2 = self.read_ea(bus, EaLocation::Memory(addr2), size)?;
+        let (dc1, du1) = ((ext1 & 7) as usize, ((ext1 >> 6) & 7) as usize);
+        let (dc2, du2) = ((ext2 & 7) as usize, ((ext2 >> 6) & 7) as usize);
+        let (c1, c2) = (self.state.read_d(dc1, size), self.state.read_d(dc2, size));
+        alu_sub(&mut self.state, size, c1, val1, false);
+        if self.state.flag(SR_Z) {
+            alu_sub(&mut self.state, size, c2, val2, false);
+        }
+        if self.state.flag(SR_Z) {
+            let (u1, u2) = (self.state.read_d(du1, size), self.state.read_d(du2, size));
+            self.write_ea(bus, EaLocation::Memory(addr1), size, u1)?;
+            self.write_ea(bus, EaLocation::Memory(addr2), size, u2)?;
+        } else {
+            self.state.write_d(dc1, size, val1);
+            self.state.write_d(dc2, size, val2);
+        }
+        Ok(())
+    }
+
+    /// `MOVES Rn, <ea>` / `MOVES <ea>, Rn` (MC68030), accessing the space of `SFC` / `DFC`.
+    fn exec_moves<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        if !self.state.is_supervisor() {
+            return self.privilege_violation(bus);
+        }
+        let size = match (op >> 6) & 3 {
+            0 => DataSize::Byte,
+            1 => DataSize::Word,
+            2 => DataSize::Long,
+            _ => return self.illegal(bus),
+        };
+        let ext = self.fetch_u16(bus)?;
+        let EaLocation::Memory(addr) =
+            self.resolve_ea(bus, ((op >> 3) & 7) as u8, (op & 7) as u8, size)?
+        else {
+            return self.illegal(bus);
+        };
+        let reg = ((ext >> 12) & 7) as usize;
+        let is_addr = (ext & 0x8000) != 0;
+        // Function codes 5 and 6 are the supervisor spaces; the bus has no CPU space.
+        if (ext & 0x0800) != 0 {
+            let supervisor = (self.state.dfc & 4) != 0;
+            let val = if is_addr {
+                self.state.a[reg]
+            } else {
+                self.state.d[reg]
+            };
+            match size {
+                DataSize::Byte => bus.write_u8(addr, val as u8, supervisor),
+                DataSize::Word => bus.write_u16(addr, val as u16, supervisor),
+                DataSize::Long => bus.write_u32(addr, val, supervisor),
+            }
+        } else {
+            let supervisor = (self.state.sfc & 4) != 0;
+            let val = match size {
+                DataSize::Byte => bus.read_u8(addr, supervisor)? as u32,
+                DataSize::Word => bus.read_u16(addr, supervisor)? as u32,
+                DataSize::Long => bus.read_u32(addr, supervisor)?,
+            };
+            if is_addr {
+                self.state.a[reg] = size.sign_extend(val) as u32;
+            } else {
+                self.state.write_d(reg, size, val);
+            }
+            Ok(())
+        }
+    }
+
     fn exec_group_4<B: Bus, T: TrapHandler<B>>(
         &mut self,
         bus: &mut B,
@@ -858,6 +1241,12 @@ impl<P: CpuPolicy> CpuCore<P> {
     ) -> Result<(), BusFault> {
         let mode = ((op >> 3) & 7) as u8;
         let reg = (op & 7) as u8;
+
+        if P::MC68030 {
+            if let Some(result) = self.exec_group_4_030(bus, op, mode, reg) {
+                return result;
+            }
+        }
 
         match op {
             0x4AFC => {
@@ -914,12 +1303,7 @@ impl<P: CpuPolicy> CpuCore<P> {
                         34,
                     );
                 }
-                let new_sr = self.pop_u16(bus)?;
-                let new_pc = self.pop_u32(bus)?;
-                self.state.pc = new_pc;
-                self.state.set_sr(new_sr);
-                self.add_cycles(20);
-                return Ok(());
+                return self.exec_rte(bus);
             }
             0x4E75 => {
                 // RTS
@@ -1200,6 +1584,9 @@ impl<P: CpuPolicy> CpuCore<P> {
 
         // MOVE from SR / MOVE to CCR / MOVE to SR
         if (op & 0xFFC0) == 0x40C0 {
+            if P::MC68030 && !self.state.is_supervisor() {
+                return self.privilege_violation(bus);
+            }
             let loc = self.resolve_ea(bus, mode, reg, DataSize::Word)?;
             let sr = self.state.sr as u32;
             self.write_ea(bus, loc, DataSize::Word, sr)?;
@@ -1316,12 +1703,233 @@ impl<P: CpuPolicy> CpuCore<P> {
         Ok(())
     }
 
+    /// Decodes the group 4 instructions the MC68030 adds, returning `None` for the others.
+    fn exec_group_4_030<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        op: u16,
+        mode: u8,
+        reg: u8,
+    ) -> Option<Result<(), BusFault>> {
+        let r = reg as usize;
+        let result = match op {
+            // RTD #<disp>
+            0x4E74 => (|| {
+                let disp = self.fetch_u16(bus)? as i16 as i32 as u32;
+                self.state.pc = self.pop_u32(bus)?;
+                self.state.a[7] = self.state.a[7].wrapping_add(disp);
+                Ok(())
+            })(),
+            // MOVEC Rc, Rn / MOVEC Rn, Rc
+            0x4E7A | 0x4E7B => self.exec_movec(bus, op),
+            // BKPT #<n>: no debugger hardware answers the breakpoint cycle.
+            0x4848..=0x484F => self.illegal(bus),
+            // LINK.L An, #<disp>
+            0x4808..=0x480F => (|| {
+                let disp = self.fetch_u32(bus)?;
+                let old_an = self.state.a[r];
+                self.push_u32(bus, old_an)?;
+                let sp = self.state.a[7];
+                self.state.a[r] = sp;
+                self.state.a[7] = sp.wrapping_add(disp);
+                Ok(())
+            })(),
+            // EXTB.L Dn
+            0x49C0..=0x49C7 => {
+                let v = self.state.d[r] as u8 as i8 as i32 as u32;
+                self.state.d[r] = v;
+                set_nz_clear_vc(&mut self.state, DataSize::Long, v);
+                Ok(())
+            }
+            // MULU.L / MULS.L <ea>, Dl or Dh:Dl
+            _ if (op & 0xFFC0) == 0x4C00 => self.exec_mul_long(bus, mode, reg),
+            // DIVU.L / DIVS.L <ea>, Dq or Dr:Dq
+            _ if (op & 0xFFC0) == 0x4C40 => self.exec_div_long(bus, mode, reg),
+            // MOVE from CCR
+            _ if (op & 0xFFC0) == 0x42C0 => (|| {
+                let loc = self.resolve_ea(bus, mode, reg, DataSize::Word)?;
+                let ccr = self.state.ccr() as u32;
+                self.write_ea(bus, loc, DataSize::Word, ccr)
+            })(),
+            // CHK.L <ea>, Dn
+            _ if (op & 0xF1C0) == 0x4100 => (|| {
+                let d_reg = ((op >> 9) & 7) as usize;
+                let loc = self.resolve_ea(bus, mode, reg, DataSize::Long)?;
+                let bound = self.read_ea(bus, loc, DataSize::Long)? as i32;
+                let val = self.state.d[d_reg] as i32;
+                if val < 0 || val > bound {
+                    self.state.set_flag(SR_N, val < 0);
+                    return self.raise_exception(
+                        bus,
+                        ExceptionVector::ChkInstruction as u8,
+                        self.state.pc,
+                        40,
+                    );
+                }
+                Ok(())
+            })(),
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    /// `MOVEC` between a general register and an MC68030 control register.
+    fn exec_movec<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        if !self.state.is_supervisor() {
+            return self.privilege_violation(bus);
+        }
+        let ext = self.fetch_u16(bus)?;
+        let reg = ((ext >> 12) & 7) as usize;
+        let is_addr = (ext & 0x8000) != 0;
+        // CACR bits the MC68030 implements; the clear bits (CEI, CI, CED, CD) always read 0.
+        const CACR_STORED: u32 = 0x3313;
+        if (op & 1) == 0 {
+            let val = match ext & 0x0FFF {
+                0x000 => self.state.sfc as u32,
+                0x001 => self.state.dfc as u32,
+                0x002 => self.state.cacr,
+                0x800 => self.state.get_usp(),
+                0x801 => self.state.vbr,
+                0x802 => self.state.caar,
+                0x803 => self.state.get_msp(),
+                0x804 => self.state.get_ssp(),
+                _ => return self.illegal(bus),
+            };
+            if is_addr {
+                self.state.a[reg] = val;
+            } else {
+                self.state.d[reg] = val;
+            }
+        } else {
+            let val = if is_addr {
+                self.state.a[reg]
+            } else {
+                self.state.d[reg]
+            };
+            match ext & 0x0FFF {
+                0x000 => self.state.sfc = (val & 7) as u8,
+                0x001 => self.state.dfc = (val & 7) as u8,
+                0x002 => self.state.cacr = val & CACR_STORED,
+                0x800 => self.state.set_usp(val),
+                0x801 => self.state.vbr = val,
+                0x802 => self.state.caar = val,
+                0x803 => self.state.set_msp(val),
+                0x804 => self.state.set_ssp(val),
+                _ => return self.illegal(bus),
+            }
+        }
+        Ok(())
+    }
+
+    /// `MULU.L` / `MULS.L` (MC68030).
+    fn exec_mul_long<B: Bus>(&mut self, bus: &mut B, mode: u8, reg: u8) -> Result<(), BusFault> {
+        let ext = self.fetch_u16(bus)?;
+        let loc = self.resolve_ea(bus, mode, reg, DataSize::Long)?;
+        let src = self.read_ea(bus, loc, DataSize::Long)?;
+        let dl = ((ext >> 12) & 7) as usize;
+        let dh = (ext & 7) as usize;
+        let signed = (ext & 0x0800) != 0;
+        let quad = (ext & 0x0400) != 0;
+        let product = if signed {
+            (src as i32 as i64).wrapping_mul(self.state.d[dl] as i32 as i64) as u64
+        } else {
+            (src as u64) * (self.state.d[dl] as u64)
+        };
+        let low = product as u32;
+        let (negative, zero, overflow) = if quad {
+            self.state.d[dh] = (product >> 32) as u32;
+            ((product as i64) < 0, product == 0, false)
+        } else {
+            let overflow = if signed {
+                product as i64 != low as i32 as i64
+            } else {
+                (product >> 32) != 0
+            };
+            ((low as i32) < 0, low == 0, overflow)
+        };
+        self.state.d[dl] = low;
+        self.state.set_flag(SR_N, negative);
+        self.state.set_flag(SR_Z, zero);
+        self.state.set_flag(SR_V, overflow);
+        self.state.set_flag(SR_C, false);
+        Ok(())
+    }
+
+    /// `DIVU.L` / `DIVS.L` / `DIVUL.L` / `DIVSL.L` (MC68030).
+    fn exec_div_long<B: Bus>(&mut self, bus: &mut B, mode: u8, reg: u8) -> Result<(), BusFault> {
+        let ext = self.fetch_u16(bus)?;
+        let loc = self.resolve_ea(bus, mode, reg, DataSize::Long)?;
+        let divisor = self.read_ea(bus, loc, DataSize::Long)?;
+        let dq = ((ext >> 12) & 7) as usize;
+        let dr = (ext & 7) as usize;
+        let signed = (ext & 0x0800) != 0;
+        let quad = (ext & 0x0400) != 0;
+        if divisor == 0 {
+            return self.raise_exception(
+                bus,
+                ExceptionVector::ZeroDivide as u8,
+                self.state.pc,
+                38,
+            );
+        }
+        let result = if signed {
+            let dividend = if quad {
+                (((self.state.d[dr] as u64) << 32) | self.state.d[dq] as u64) as i64
+            } else {
+                self.state.d[dq] as i32 as i64
+            };
+            let divisor = divisor as i32 as i64;
+            dividend.checked_div(divisor).and_then(|quot| {
+                let quot = i32::try_from(quot).ok()?;
+                Some((quot as u32, (dividend % divisor) as u32))
+            })
+        } else {
+            let dividend = if quad {
+                ((self.state.d[dr] as u64) << 32) | self.state.d[dq] as u64
+            } else {
+                self.state.d[dq] as u64
+            };
+            let quot = dividend / divisor as u64;
+            u32::try_from(quot)
+                .ok()
+                .map(|quot| (quot, (dividend % divisor as u64) as u32))
+        };
+        self.state.set_flag(SR_C, false);
+        let Some((quot, rem)) = result else {
+            self.state.set_flag(SR_V, true);
+            return Ok(());
+        };
+        if dr != dq {
+            self.state.d[dr] = rem;
+        }
+        self.state.d[dq] = quot;
+        set_nz_clear_vc(&mut self.state, DataSize::Long, quot);
+        Ok(())
+    }
+
     fn exec_group_5<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
         let mode = ((op >> 3) & 7) as u8;
         let reg = (op & 7) as u8;
         let cond = ((op >> 8) & 0xF) as u8;
 
         if (op & 0x00C0) == 0x00C0 {
+            if P::MC68030 && mode == 7 && (2..=4).contains(&reg) {
+                // TRAPcc, TRAPcc.W #<data>, TRAPcc.L #<data>
+                match reg {
+                    2 => self.state.pc = self.state.pc.wrapping_add(2),
+                    3 => self.state.pc = self.state.pc.wrapping_add(4),
+                    _ => {}
+                }
+                if eval_cc(self.state.sr, cond) {
+                    return self.raise_exception(
+                        bus,
+                        ExceptionVector::TrapvInstruction as u8,
+                        self.state.pc,
+                        34,
+                    );
+                }
+                return Ok(());
+            }
             if mode == 1 {
                 // DBcc Dn, <disp>
                 let disp = self.fetch_u16(bus)? as i16 as i32;
@@ -1402,6 +2010,8 @@ impl<P: CpuPolicy> CpuCore<P> {
         let base_pc = self.state.pc;
         let disp: i32 = if disp8 == 0 {
             self.fetch_u16(bus)? as i16 as i32
+        } else if P::MC68030 && disp8 == 0xFF {
+            self.fetch_u32(bus)? as i32
         } else {
             (disp8 as i8) as i32
         };
@@ -1488,6 +2098,11 @@ impl<P: CpuPolicy> CpuCore<P> {
             return Ok(());
         }
 
+        // PACK / UNPK (MC68030)
+        if P::MC68030 && matches!(op & 0x01F0, 0x0140 | 0x0180) {
+            return self.exec_pack_unpk(bus, op);
+        }
+
         // SBCD Dy, Dx or SBCD -(Ay), -(Ax)
         if (op & 0x01F0) == 0x0100 {
             let mem_mode = (op & 8) != 0;
@@ -1531,6 +2146,56 @@ impl<P: CpuPolicy> CpuCore<P> {
         }
         set_nz_clear_vc(&mut self.state, size, res);
         self.add_cycles(if size == DataSize::Long { 8 } else { 4 });
+        Ok(())
+    }
+
+    /// `PACK` / `UNPK` with their adjustment word (MC68030).
+    fn exec_pack_unpk<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        let adjust = self.fetch_u16(bus)?;
+        let src = (op & 7) as usize;
+        let dst = ((op >> 9) & 7) as usize;
+        let memory = (op & 8) != 0;
+        let predecrement = |state: &mut CpuState, reg: usize| {
+            let step = if reg == 7 { 2 } else { 1 };
+            state.a[reg] = state.a[reg].wrapping_sub(step);
+            state.a[reg]
+        };
+        if (op & 0x01F0) == 0x0140 {
+            let unpacked = if memory {
+                let addr = predecrement(&mut self.state, src);
+                let lo = self.bus_read_u8(bus, addr)? as u16;
+                let addr = predecrement(&mut self.state, src);
+                let hi = self.bus_read_u8(bus, addr)? as u16;
+                (hi << 8) | lo
+            } else {
+                self.state.d[src] as u16
+            };
+            let sum = unpacked.wrapping_add(adjust);
+            let packed = (((sum >> 4) & 0xF0) | (sum & 0x0F)) as u8;
+            if memory {
+                let addr = predecrement(&mut self.state, dst);
+                self.bus_write_u8(bus, addr, packed)?;
+            } else {
+                self.state.write_d(dst, DataSize::Byte, packed as u32);
+            }
+        } else {
+            let packed = if memory {
+                let addr = predecrement(&mut self.state, src);
+                self.bus_read_u8(bus, addr)?
+            } else {
+                self.state.d[src] as u8
+            };
+            let unpacked =
+                ((((packed & 0xF0) as u16) << 4) | (packed & 0x0F) as u16).wrapping_add(adjust);
+            if memory {
+                let addr = predecrement(&mut self.state, dst);
+                self.bus_write_u8(bus, addr, unpacked as u8)?;
+                let addr = predecrement(&mut self.state, dst);
+                self.bus_write_u8(bus, addr, (unpacked >> 8) as u8)?;
+            } else {
+                self.state.write_d(dst, DataSize::Word, unpacked as u32);
+            }
+        }
         Ok(())
     }
 
@@ -1783,6 +2448,9 @@ impl<P: CpuPolicy> CpuCore<P> {
     }
 
     fn exec_group_e<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        if P::MC68030 && (op & 0x08C0) == 0x08C0 {
+            return self.exec_bitfield(bus, op);
+        }
         let left = (op & 0x0100) != 0;
 
         if (op & 0x00C0) == 0x00C0 {
@@ -1819,6 +2487,122 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state.write_d(reg, size, res);
         let base = if size == DataSize::Long { 8 } else { 6 };
         self.add_cycles(base + 2 * count);
+        Ok(())
+    }
+
+    /// `BFTST`, `BFEXTU`, `BFCHG`, `BFEXTS`, `BFCLR`, `BFFFO`, `BFSET`, `BFINS` (MC68030).
+    fn exec_bitfield<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        const TST: u16 = 0;
+        const EXTU: u16 = 1;
+        const CHG: u16 = 2;
+        const EXTS: u16 = 3;
+        const CLR: u16 = 4;
+        const FFO: u16 = 5;
+        const SET: u16 = 6;
+        const INS: u16 = 7;
+        let kind = (op >> 8) & 7;
+        let mode = ((op >> 3) & 7) as u8;
+        let reg = (op & 7) as u8;
+        let ext = self.fetch_u16(bus)?;
+        let offset = if (ext & 0x0800) != 0 {
+            self.state.d[((ext >> 6) & 7) as usize] as i32
+        } else {
+            ((ext >> 6) & 31) as i32
+        };
+        let width = match (if (ext & 0x0020) != 0 {
+            self.state.d[(ext & 7) as usize]
+        } else {
+            ext as u32
+        }) & 31
+        {
+            0 => 32,
+            w => w,
+        };
+        let dn = ((ext >> 12) & 7) as usize;
+        let low_mask = u32::MAX >> (32 - width);
+        let writes = matches!(kind, CHG | CLR | SET | INS);
+        let pc_relative_ok = !writes;
+        let allowed = match mode {
+            0 | 2 | 5 | 6 => true,
+            7 => reg <= 1 || (pc_relative_ok && reg <= 3),
+            _ => false,
+        };
+        if !allowed {
+            return self.illegal(bus);
+        }
+
+        // Reads the field, returning it with a function that stores a replacement.
+        let (field, location) = if mode == 0 {
+            let bit = (offset as u32) & 31;
+            let field = self.state.d[reg as usize].rotate_left(bit) >> (32 - width);
+            (field, None)
+        } else {
+            let EaLocation::Memory(base) = self.resolve_ea(bus, mode, reg, DataSize::Byte)? else {
+                return self.illegal(bus);
+            };
+            let addr = base.wrapping_add((offset >> 3) as u32);
+            let bit = (offset & 7) as u32;
+            let bytes = (bit + width).div_ceil(8);
+            let mut window = 0u64;
+            for i in 0..bytes {
+                window |= (self.bus_read_u8(bus, addr.wrapping_add(i))? as u64) << (56 - 8 * i);
+            }
+            let field = ((window << bit) >> (64 - width)) as u32;
+            (field, Some((addr, bit, bytes, window)))
+        };
+
+        let inserted = self.state.d[dn] & low_mask;
+        let flag_source = if kind == INS { inserted } else { field };
+        self.state.set_flag(SR_N, (flag_source >> (width - 1)) & 1 != 0);
+        self.state.set_flag(SR_Z, flag_source == 0);
+        self.state.set_flag(SR_V, false);
+        self.state.set_flag(SR_C, false);
+
+        let replacement = match kind {
+            TST => None,
+            EXTU => {
+                self.state.d[dn] = field;
+                None
+            }
+            EXTS => {
+                self.state.d[dn] = ((field << (32 - width)) as i32 >> (32 - width)) as u32;
+                None
+            }
+            FFO => {
+                let leading = if field == 0 {
+                    width
+                } else {
+                    field.leading_zeros() - (32 - width)
+                };
+                self.state.d[dn] = (offset as u32).wrapping_add(leading);
+                None
+            }
+            CHG => Some(!field & low_mask),
+            CLR => Some(0),
+            SET => Some(low_mask),
+            INS => Some(inserted),
+            _ => unreachable!(),
+        };
+        let Some(new_field) = replacement else {
+            return Ok(());
+        };
+        match location {
+            None => {
+                let bit = (offset as u32) & 31;
+                let r = reg as usize;
+                let mask = (low_mask << (32 - width)).rotate_right(bit);
+                let value = (new_field << (32 - width)).rotate_right(bit);
+                self.state.d[r] = (self.state.d[r] & !mask) | value;
+            }
+            Some((addr, bit, bytes, window)) => {
+                let shift = 64 - bit - width;
+                let mask = (low_mask as u64) << shift;
+                let window = (window & !mask) | ((new_field as u64) << shift);
+                for i in 0..bytes {
+                    self.bus_write_u8(bus, addr.wrapping_add(i), (window >> (56 - 8 * i)) as u8)?;
+                }
+            }
+        }
         Ok(())
     }
 }
