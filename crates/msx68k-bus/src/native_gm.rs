@@ -543,15 +543,10 @@ impl X68kBus {
         let (source, _) = self.peek_planar_target(source_ptr)?;
         let (dest, planes) = self.peek_planar_target(dest_ptr)?;
         let mask = self.peek_mask_bitmap(mask_ptr)?;
-        // The guest counts the words to copy from the source extent but takes the pixels within
-        // them from the destination alone, so a source narrower than the mask also draws past
-        // its edge, and far enough to overrun the guest's own row buffer.
-        if source_rect.left < source.rect.left
-            || source_rect.right > source.rect.right
-            || source_rect.right.wrapping_sub(source_rect.left) < mask_rect.right.wrapping_sub(mask_rect.left)
-        {
-            return None;
-        }
+        // A source narrower than the mask, or past the sides of its bitmap, is clipped to the
+        // source here. The guest counts the words to copy from the source but takes the pixels
+        // within them from the destination alone, so it draws past the source's edge and can
+        // overrun its own row buffer.
         let right = x.checked_add(mask_rect.right.wrapping_sub(mask_rect.left))?;
         let bottom = y.checked_add(mask_rect.bottom.wrapping_sub(mask_rect.top))?;
         let transfer = Transfer {
@@ -940,10 +935,11 @@ impl X68kBus {
         }
         let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
         if self.peek_u32(graph + GRAPH_BITMAP)? == dest_ptr {
-            if (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0
-                || self.peek_u16(graph + GRAPH_WORK_KIND)? >= 2
-                || self.peek_u32(graph + GRAPH_PROCS)? != 0
-            {
+            // `GMCopyMask` writes the bitmap itself, without the procedure table or recording.
+            let through_procs = bit_mask.is_none()
+                && (self.peek_u16(graph + GRAPH_WORK_KIND)? >= 2
+                    || self.peek_u32(graph + GRAPH_PROCS)? != 0);
+            if (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0 || through_procs {
                 return None;
             }
             let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
@@ -2773,6 +2769,34 @@ mod tests {
         assert_eq!(row, [0, 0, 0, 15, 0, 15, 0, 0]);
         assert_eq!(state.d[0], 0);
         assert!(state.flag(SR_N) && state.flag(SR_C), "flags of the guest's last subq");
+    }
+
+    #[test]
+    fn clips_a_masked_copy_to_a_source_narrower_than_the_mask() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const SOURCE: u32 = 0x1C00;
+        const MASK: u32 = 0x1C40;
+        const SOURCE_RECT: u32 = 0x1A00;
+        const MASK_RECT: u32 = 0x1A10;
+        write_row_bitmap(&mut bus, SOURCE, 0x2000, &[0xFFFF; 4]);
+        write_row_bitmap(&mut bus, MASK, 0x2100, &[0xFFFF]);
+        write_rect(&mut bus, SOURCE_RECT, [0, 0, 3, 1]);
+        write_rect(&mut bus, MASK_RECT, [0, 0, 8, 1]);
+        write_u32(&mut bus, STACK, SOURCE);
+        write_u32(&mut bus, STACK + 4, BITMAP);
+        write_u32(&mut bus, STACK + 8, MASK);
+        write_u32(&mut bus, STACK + 12, SOURCE_RECT);
+        write_u32(&mut bus, STACK + 16, 0);
+        write_u32(&mut bus, STACK + 20, MASK_RECT);
+        // Recording and a procedure table do not matter: the guest writes the bitmap itself.
+        write_u16(&mut bus, GRAPH + GRAPH_WORK_KIND, 2);
+        write_u32(&mut bus, GRAPH + GRAPH_PROCS, 0x1000);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_COPY_MASK),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        let row: Vec<u8> = (0..8).map(|x| pixel(&bus, x, 0)).collect();
+        assert_eq!(row, [15, 15, 15, 0, 0, 0, 0, 0], "only the source's three dots are copied");
     }
 
     #[test]
