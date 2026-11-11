@@ -97,12 +97,13 @@ Current result: in the scripted session, no guest code reads or writes the exten
 
 In order:
 
-1. **Find writers outside the session.** Add a strict mode in which a guest access to the extended framebuffer is reported (or faults) instead of served, and use it during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
-2. **Close the remaining guest cases.** Every case in the "Left to the guest" column still draws into the extended framebuffer. Guest bugs (Section 6.1) get a sensible native result rather than a copy of the bug.
-3. **Call guest services from native code.** `GMScroll` update regions that are not rectangles need the guest memory manager to resize a handle, and later APIs will need allocations too. This needs a way for a native handler to run a guest routine and resume afterwards.
-4. **Remove the guest mapping.** The screen bitmap's base stays as an identity token that native code recognises, but the guest can no longer address it. `GMNewBits` and `GMUnlockBits` immediates (Section 5.6 of the SX-Window reference) are revisited at this point.
-5. **Host TrueColor buffer.** Draw into a host buffer uploaded with `wgpu`, keeping the 16-color planar semantics where applications depend on them. Optimise only if performance requires it.
-6. **Partial VM for supervisor tasks.** SX applications run in user mode, and user-mode access to I/O and VRAM raises a bus error, so only `SYS/FSX.X` touches the screen. Tasks that switch to supervisor mode (DOS `_SUPER`, IOCS `_B_SUPER` `$81`) are to run with virtualized TVRAM and GVRAM.
+1. **Handle the routines that assume TVRAM.** The fast screen clear and the panic alert box (Section 6.2) draw into TVRAM in extended modes.
+2. **Find writers outside the session.** Add a strict mode in which a guest access to the extended framebuffer is reported (or faults) instead of served, and use it during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
+3. **Close the remaining guest cases.** Every case in the "Left to the guest" column still draws into the extended framebuffer. Guest bugs (Section 6.1) are fixed rather than copied.
+4. **Call guest services from native code.** `GMScroll` update regions that are not rectangles need the guest memory manager to resize a handle, and later APIs will need allocations too. This needs a way for a native handler to run a guest routine and resume afterwards.
+5. **Remove the guest mapping.** The screen bitmap's base stays as an identity token that native code recognises, but the guest can no longer address it. `GMNewBits` and `GMUnlockBits` immediates (Section 5.6 of the SX-Window reference) are revisited at this point.
+6. **Host TrueColor buffer.** Draw into a host buffer uploaded with `wgpu`, keeping the 16-color planar semantics where applications depend on them. Optimise only if performance requires it.
+7. **Partial VM for supervisor tasks.** SX applications run in user mode, and user-mode access to I/O and VRAM raises a bus error, so only `SYS/FSX.X` touches the screen. Tasks that switch to supervisor mode (DOS `_SUPER`, IOCS `_B_SUPER` `$81`) are to run with virtualized TVRAM and GVRAM.
 
 ---
 
@@ -112,15 +113,28 @@ Findings about `SYS/FSX.X` itself, gathered while comparing native and guest dra
 
 ### 6.1 Bugs
 
-Behaviour that gives a wrong result or crashes. The native versions do not copy these: each case either stays on the guest routine for now or gets a sensible native result (Section 5, step 2).
+Wrong results or crashes on the original screens too. These are fixed as bugs: the native versions give a correct result rather than copying them. Until then they stay on the guest routine.
 
-| API | Condition | Guest behaviour | Native handling |
+| API | Condition | Guest behaviour | Status |
 | :--- | :--- | :--- | :--- |
-| `SXGetDispRect` `$A432` (`+0x15196`) | An extended screen mode (`_CRTMOD` `$50`) | Indexes its fixed CRT table with the low 5 bits of the mode, so `$50` reads as mode `$10`, 768×512. Popup menus use this rect as their bounds and were confined to it. | Returns the actual display size. |
-| `GMCopyMask` `$A180` (`+0x24AF2`) | The source rect is narrower than the mask rect, or reaches past the left or right side of the source bitmap | Counts the words to copy from the clipped source, but takes the pixels within those words from the destination clip alone. It copies pixels past the source's edge up to the end of the word, and when the difference is large enough it overruns its row mask buffer on the stack and corrupts the return address, ending in a system error. | Left to the guest. To be replaced with a native result clipped to the source. |
-| `GMFrameRgn` `$A17A` (`+0x2283E`) | A 0×0 pen on a region that is not a rectangle | Draws stray dots outside the region, for example past the inner corner of an L-shaped region. | Left to the guest. To be replaced with a native result. |
+| `GMCopyMask` `$A180` (`+0x24AF2`) | The source rect is narrower than the mask rect, or reaches past the left or right side of the source bitmap | Counts the words to copy from the clipped source, but takes the pixels within those words from the destination clip alone. It copies pixels past the source's edge up to the end of the word, and when the difference is large enough it overruns its row mask buffer on the stack and corrupts the return address, ending in a system error. | Left to the guest. To be fixed by clipping to the source. |
+| `GMFrameRgn` `$A17A` (`+0x2283E`) | A 0×0 pen on a region that is not a rectangle | Draws stray dots outside the region, for example past the inner corner of an L-shaped region. | Left to the guest. To be fixed. |
 
-### 6.2 Quirks
+### 6.2 Limits of the Original Screen Model
+
+Not bugs: `SYS/FSX.X` was written for TVRAM and the standard screen modes, so it naturally does not handle msx68k's extended screens. Dealing with these is part of the screen extension itself.
+
+| Where | Assumption | Status |
+| :--- | :--- | :--- |
+| All guest drawing routines | Address the screen through `Bitmap.base`, `line`, and `page`, so they need the whole screen to be addressable. Screens above 1024×1024 have no room in the 24-bit address space, so guest drawing there is undefined. | Replaced natively, API by API (Sections 3 and 5). |
+| `SXGetDispRect` `$A432` (`+0x15196`) | Indexes its fixed CRT table with the low 5 bits of the mode, so extended mode `$50` reads as mode `$10`, 768×512. Popup menus use this rect as their bounds and were confined to it. | Native: returns the actual display size. |
+| Screen mode tables (`+0x552F6` virtual modes, `+0x151C0` CRT table) | Only the standard modes up to 1024×1024, each with base `$E00000`. | The resolution switch writes the extended geometry into the screen records instead (Section 5.6 of the SX-Window reference). |
+| `GMNewBits` (`+0x2F23A`) and `GMUnlockBits` (`+0x2F32E`) immediates | New screen bitmaps get base `$E00000`. | The resolution switch rewrites the immediates. |
+| Fast screen clear (`+0x133D4`) | Clears TVRAM at `$E00000` with the CRTC simultaneous plane write (R21). | Not handled: in extended modes it clears TVRAM, which is not displayed. |
+| Panic alert box (`+0x4BFC0`) | Draws straight into plane 0 at `$E00000`. | Not handled: in extended modes it is not displayed. |
+| Screen size during a drawing call | The kernel's size information is read during a call and must not change under it. | Resolution switches requested by the host are applied when a user-mode task calls `TSEventAvail` or `TSGetEvent`. |
+
+### 6.3 Quirks
 
 Odd but deterministic behaviour that callers can observe. The native versions reproduce all of these.
 
