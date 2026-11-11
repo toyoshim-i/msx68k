@@ -837,7 +837,7 @@ While 1024×768 and 1024×1024 fit within the standard 512 KB TVRAM memory space
 To support arbitrary modern high resolutions while maintaining **100% binary compatibility** with Graph Man's native 4-plane planar drawing routines without requiring hypercall translation of every single drawing primitive, **msx68k** implements **Approach B: Extended Planar Framebuffer**:
 
 #### 1. Screen Address Block (`$F000_0000`):
-- Screen `Bitmap` records hold a base in a 16 MB block that real machines leave to motherboard mirrors:
+- Screen `Bitmap` records hold a base in the first 16 MB block of the range reserved for msx68k extensions, `$F000_0000`..`$FEFF_FFFF`, which real machines leave to motherboard mirrors:
   ```text
   EXT_TVRAM_BASE = $F000_0000, EXT_TVRAM_WINDOW = 16 MB
   ```

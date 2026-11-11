@@ -22,13 +22,18 @@ pub const TVRAM_BYTES: usize = 512 * 1024;
 const RESET_SUPERVISOR_AREA: u32 = 0x2000;
 /// Everything from here up (VRAM, I/O, SRAM, and ROM) is reachable only in supervisor mode.
 const SUPERVISOR_ONLY_BASE: u32 = 0x00C0_0000;
-/// Base address that screen `Bitmap` records hold for resolutions beyond 1024×1024.
+/// Start of the address range reserved for msx68k extensions, `$F000_0000`..=`$FEFF_FFFF`.
 ///
-/// It lies in a 16 MB block that real machines leave to motherboard mirrors: above the
-/// X68030 and Xellent30 high memory at `$0100_0000` and the 060turbo high memory at
-/// `$1000_0000`, and below the `$FFxx_xxxx` block that sign-extended absolute short addresses
-/// reach. Other addresses above 24 bits mirror the 24-bit space as on the 68000.
-pub const EXT_TVRAM_BASE: u32 = 0xF000_0000;
+/// Real machines leave it to motherboard mirrors: it lies above the X68030 and Xellent30 high
+/// memory at `$0100_0000` and the 060turbo high memory at `$1000_0000`, and below the
+/// `$FFxx_xxxx` block that sign-extended absolute short addresses reach. Addresses above 24 bits
+/// that no extension uses mirror the 24-bit space as on the 68000.
+pub const MSX68K_RESERVED_BASE: u32 = 0xF000_0000;
+/// End (exclusive) of the address range reserved for msx68k extensions.
+pub const MSX68K_RESERVED_END: u32 = 0xFF00_0000;
+/// Base address that screen `Bitmap` records hold for resolutions beyond 1024×1024, the first
+/// block of the reserved range.
+pub const EXT_TVRAM_BASE: u32 = MSX68K_RESERVED_BASE;
 /// Size of the block at [`EXT_TVRAM_BASE`] that belongs to the extended screen.
 pub const EXT_TVRAM_WINDOW: u32 = 0x0100_0000;
 

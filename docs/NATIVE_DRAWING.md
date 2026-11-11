@@ -51,7 +51,8 @@ Internal callers do not always go through A-Line APIs. `GMPlotImg` calls the `GM
 
 ### 2.5 The screen address and illegal access detection
 
-- Screen `Bitmap` records hold `EXT_TVRAM_BASE` (`$F000_0000`). Its 16 MB block avoids every high memory that real machines map (X68030 and Xellent30 at `$0100_0000`, 060turbo at `$1000_0000`) and the `$FFxx_xxxx` block that sign-extended absolute short addresses reach. Other addresses above 24 bits mirror the 24-bit space as on the 68000.
+- `$F000_0000`..`$FEFF_FFFF` is reserved for msx68k extensions (`MSX68K_RESERVED_BASE`, `MSX68K_RESERVED_END`). It avoids every high memory that real machines map (X68030 and Xellent30 at `$0100_0000`, 060turbo at `$1000_0000`) and the `$FFxx_xxxx` block that sign-extended absolute short addresses reach, and software written since the 68030 does not use these address bits as flags. Addresses in it that no extension uses, and all other addresses above 24 bits, mirror the 24-bit space as on the 68000.
+- Screen `Bitmap` records hold `EXT_TVRAM_BASE`, the first 16 MB block of the reserved range (`$F000_0000`..`$F0FF_FFFF`).
 - Only native drawing writes the screen. A guest access to the block is counted in `X68kBus::illegal_screen_accesses`, writes are dropped, and reads return 0. The first access during each A-Line API is reported on standard error with the API and its call site, which `on_a_line` records on every A-Line call.
 - `X68kBus::guest_screen_mapped` maps the block for guest code again. Verification against the guest routines (Section 4) and tests that write the screen through the bus set it.
 - User-mode access to the block raises a bus error, like VRAM and I/O.
