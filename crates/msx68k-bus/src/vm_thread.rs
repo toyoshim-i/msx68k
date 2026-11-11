@@ -2,7 +2,8 @@
 //! SX-Window windows (see `docs/VMX68K.md`).
 //!
 //! The thread owns the VM and runs it one frame of guest time at a time. Between frames it
-//! carries out requests from other threads, which get at the VM only that way.
+//! carries out requests from other threads, which get at the VM only that way, and hands the VM
+//! to a vertical blank hook after each frame in which the VM's CRTC entered a vertical blank.
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -23,6 +24,7 @@ pub enum Pace {
 }
 
 type Request = Box<dyn FnOnce(&mut X68kVm) + Send>;
+type VblankHook = Box<dyn FnMut(&mut X68kVm) + Send>;
 
 /// A VM running on a thread of its own.
 pub struct VmThread {
@@ -33,10 +35,21 @@ pub struct VmThread {
 impl VmThread {
     /// Starts running `vm` on a new thread.
     pub fn spawn(vm: X68kVm, pace: Pace) -> Self {
+        Self::spawn_with_vblank(vm, pace, |_| {})
+    }
+
+    /// Starts running `vm` on a new thread, calling `on_vblank` there after each frame in which
+    /// the VM entered a vertical blank, as a VM's screen is composited.
+    pub fn spawn_with_vblank(
+        vm: X68kVm,
+        pace: Pace,
+        on_vblank: impl FnMut(&mut X68kVm) + Send + 'static,
+    ) -> Self {
         let (requests, queue) = mpsc::channel();
+        let on_vblank: VblankHook = Box::new(on_vblank);
         let thread = thread::Builder::new()
             .name("msx68k-vm".into())
-            .spawn(move || run(vm, pace, queue))
+            .spawn(move || run(vm, pace, queue, on_vblank))
             .expect("the VM thread must start");
         Self {
             requests: Some(requests),
@@ -81,7 +94,7 @@ impl Drop for VmThread {
 }
 
 /// Runs `vm` frame by frame until every sender of `queue` is gone, then returns it.
-fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>) -> X68kVm {
+fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: VblankHook) -> X68kVm {
     let start = Instant::now();
     let mut frames = 0u32;
     loop {
@@ -92,7 +105,11 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>) -> X68kVm {
                 Err(TryRecvError::Disconnected) => return vm,
             }
         }
+        let vblanks = vm.bus.crtc.frame_count();
         run_frame(&mut vm);
+        if vm.bus.crtc.frame_count() != vblanks {
+            on_vblank(&mut vm);
+        }
         frames += 1;
         if pace == Pace::RealTime {
             let due = start + FRAME * frames;
@@ -150,5 +167,17 @@ mod tests {
         );
         let vm = thread.stop();
         assert_eq!(vm.cpu_state.pc, 0x1000);
+    }
+
+    #[test]
+    fn the_hook_follows_the_vms_vertical_blanks() {
+        let (tx, rx) = mpsc::channel();
+        let thread = VmThread::spawn_with_vblank(idle_vm(), Pace::Unthrottled, move |vm| {
+            let _ = tx.send(vm.bus.crtc.frame_count());
+        });
+        let counts: Vec<u64> = rx.iter().take(10).collect();
+        drop(thread);
+        // One call per frame, each after a new vertical blank.
+        assert!(counts.windows(2).all(|w| w[1] > w[0]), "{counts:?}");
     }
 }

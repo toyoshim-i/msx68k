@@ -113,9 +113,20 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   VM only through requests it carries out between frames. On it, Human68k 3.02 boots from
   `disks/HUMAN302.XDF` to the `A>` prompt in about 10 s of guest time at 10 MHz
   (`crates/msx68k-vicon/tests/vm_thread_boot.rs`).
-- The VICON compositor (`crates/msx68k-vicon`) currently uploads the whole TVRAM, GVRAM, and
-  palette every frame, and draws the host cursor into its TVRAM copy; both change with Section
-  3.3.
+- The bus records the 4 KB TVRAM and GVRAM pages written by the CPU, raster copy, and graphic
+  fast clear (`crates/msx68k-bus/src/vram_pages.rs`); direct host access through `tvram_mut`
+  counts as writing all of TVRAM. The extended screen of the master VM is not recorded.
+- `VmScreen` (`crates/msx68k-vicon/src/vm_screen.rs`) composites a VM's screen on its thread
+  through a `VmThread` vertical blank hook, called after each frame of guest time in which the
+  VM entered a vertical blank. It uploads the written pages, the palette, and the display
+  registers, and dispatches into one of two 1024×1024 textures; `VmScreenOutput` gives the main
+  thread the latest completed one. At Human68k's `A>` prompt a frame uploads about 2 KB, and
+  10 KB when the cursor blinks (`crates/msx68k-vicon/tests/vm_screen.rs`).
+- The compositor shader has no scanline table, sprites, or BG yet; it composites text and
+  graphic page 0 from the state at the end of the frame.
+- The master VM's VICON compositor (`crates/msx68k-vicon`) still uploads the whole TVRAM, GVRAM,
+  and palette every frame, and draws the host cursor into its TVRAM copy; both change with
+  Section 3.3.
 
 ---
 

@@ -19,6 +19,7 @@ pub mod timing;
 pub mod vicon;
 pub mod vm;
 pub mod vm_thread;
+pub mod vram_pages;
 
 pub use msx68k_cpu::{Bus, BusFault, CpuModel, NoopTrapHandler, TrapHandler};
 pub use bus::{
@@ -30,6 +31,7 @@ pub use dmac::{DmaChannel, Dmac};
 pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};
 pub use gdb::GdbServer;
 pub use mfp::Mfp;
+pub use vram_pages::{DirtyVramPages, VRAM_PAGE_BYTES};
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use scsi::{
     build_bootable_sxwin_scsi_hdd, extract_files_from_xdf, parse_scsi_partitions,

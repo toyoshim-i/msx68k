@@ -4,13 +4,14 @@
 
 use msx68k_cpu::{Bus, BusCycle030, BusFault, CpuModel};
 
-use crate::crtc::Crtc;
+use crate::crtc::{Crtc, TVRAM_PLANE_BYTES};
 use crate::dmac::Dmac;
 use crate::fdc::{Fdc, IoInterruptController};
 use crate::mfp::Mfp;
 use crate::peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 use crate::timing::{BusTimingConfig, MemoryRegion, WaitStateTable};
 use crate::vicon::Vicon;
+use crate::vram_pages::DirtyVramPages;
 
 /// Maximum Main RAM size on X68000 (`12 MB`, `$000000`–`$BFFFFF`).
 pub const MAX_MAIN_RAM_BYTES: usize = 12 * 1024 * 1024;
@@ -93,6 +94,8 @@ pub struct X68kBus {
     pub(crate) gvram: Option<Box<[u8]>>,
     /// Lazily allocated TVRAM (`512 KB`, `$E00000`–`$E7FFFF`).
     pub(crate) tvram: Option<Box<[u8]>>,
+    /// TVRAM and GVRAM pages written since the last [`Self::take_written_vram_pages`].
+    vram_written: DirtyVramPages,
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
     sprite_bg: Option<Box<[u8]>>,
     /// Battery-backed SRAM (`$ED0000`–`$ED3FFF`, 16 KB).
@@ -217,6 +220,7 @@ impl X68kBus {
             main_ram: vec![0; ram_bytes],
             gvram: None,
             tvram: None,
+            vram_written: DirtyVramPages::default(),
             sprite_bg: None,
             sram,
             sram_write_enabled: false,
@@ -314,8 +318,25 @@ impl X68kBus {
     /// Direct mutable slice access to TVRAM (`512 KB`), allocating it if not yet allocated.
     #[inline]
     pub fn tvram_mut(&mut self) -> &mut [u8] {
+        self.vram_written.tvram = u128::MAX;
         self.tvram
             .get_or_insert_with(|| vec![0u8; TVRAM_BYTES].into_boxed_slice())
+    }
+
+    /// Returns the TVRAM and GVRAM pages written since the last call, and forgets them.
+    pub fn take_written_vram_pages(&mut self) -> DirtyVramPages {
+        std::mem::take(&mut self.vram_written)
+    }
+
+    /// Records a write to the TVRAM byte at `offset`, in every plane it reaches.
+    fn mark_tvram_write(&mut self, offset: usize) {
+        let r21 = self.crtc.regs[21];
+        if r21 & 0x0100 != 0 {
+            self.vram_written
+                .mark_tvram_planes(r21 >> 4, offset % TVRAM_PLANE_BYTES);
+        } else {
+            self.vram_written.mark_tvram(offset);
+        }
     }
 
     /// Returns `true` if the extended planar TVRAM at `0x1000_0000` is active.
@@ -569,7 +590,7 @@ impl X68kBus {
     pub fn advance_peripherals(&mut self, cycles_10mhz: u32) {
         let sync = self
             .crtc
-            .advance(cycles_10mhz, &mut self.tvram, &mut self.gvram);
+            .advance(cycles_10mhz, &mut self.tvram, &mut self.gvram, &mut self.vram_written);
         self.mfp.update_crtc_sync(sync);
         self.opm.advance(cycles_10mhz);
         self.mfp.set_opm_irq(self.opm.irq_active());
@@ -916,6 +937,7 @@ impl Bus for X68kBus {
                     .gvram
                     .get_or_insert_with(|| vec![0u8; GVRAM_BYTES].into_boxed_slice());
                 buf[(a as usize) & (GVRAM_BYTES - 1)] = val;
+                self.vram_written.mark_gvram((a as usize) & (GVRAM_BYTES - 1));
                 Ok(())
             }
             MemoryRegion::Tvram => {
@@ -923,11 +945,12 @@ impl Bus for X68kBus {
                     .tvram
                     .get_or_insert_with(|| vec![0u8; TVRAM_BYTES].into_boxed_slice());
                 self.crtc.write_tvram_u8(buf, a, val);
+                self.mark_tvram_write((a as usize) & (TVRAM_BYTES - 1));
                 Ok(())
             }
             MemoryRegion::Crtc => {
                 let res = self.crtc
-                    .write_u8(a, val, &mut self.tvram, &mut self.gvram);
+                    .write_u8(a, val, &mut self.tvram, &mut self.gvram, &mut self.vram_written);
                 if let Some((w, h)) = self.target_resolution {
                     if (w, h) != (768, 512) {
                         let offset = (a & 0x3F) as usize;
@@ -1128,6 +1151,7 @@ impl Bus for X68kBus {
                 .tvram
                 .get_or_insert_with(|| vec![0u8; TVRAM_BYTES].into_boxed_slice());
             self.crtc.write_tvram_u16(buf, a, val);
+            self.mark_tvram_write((a as usize) & (TVRAM_BYTES - 2));
             return Ok(());
         }
         // 8-bit odd-byte-mapped peripherals ($E86000..$E9DFFF):

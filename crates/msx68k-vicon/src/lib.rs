@@ -4,12 +4,17 @@
 //! - [`ViconGpuCompositor`]: Hardware-accelerated `wgpu` compute pipeline that composites the
 //!   4-plane TVRAM (`$E00000`–`$E7FFFF`), GVRAM (`$C00000`–`$DFFFFF`), and 16-bit `GGGGGRRRRRBBBBBI`
 //!   Text/Graphics Palettes (`$E82000`–`$E823FF`) according to CRTC scroll and VICON priority rules.
+//! - [`VmScreen`]: The same compositing for a VM on a thread of its own, uploading only the VRAM
+//!   pages written since the previous frame into one of two output textures.
 //! - [`render_bus_frame_cpu`]: Cycle/bit-identical CPU fallback compositor.
 //! - [`decode_tvram_ank_lines`]: X68000 CGROM (`$F3A800`, 8×16 ANK) glyph recognizer that reads
 //!   the rendered text rows back from the 4-plane TVRAM bitmap (matching X68000 `TextCopy`).
 
 use bytemuck::{Pod, Zeroable};
 use msx68k_bus::{X68kBus, GVRAM_BYTES, TVRAM_BYTES, TVRAM_PLANE_BYTES};
+
+mod vm_screen;
+pub use vm_screen::{CompletedFrame, VmScreen, VmScreenOutput, VM_SCREEN_MAX};
 
 /// Maximum framebuffer dimension (`3840 × 2160`).
 pub const MAX_FB_WIDTH: u32 = 3840;
@@ -150,7 +155,9 @@ impl ViconGpuCompositor {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("msx68k_vicon_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("vicon.wgsl"), include_str!("shader.wgsl")).into(),
+            ),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {

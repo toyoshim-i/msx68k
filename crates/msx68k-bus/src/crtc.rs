@@ -12,6 +12,7 @@
 use msx68k_cpu::BusFault;
 
 use crate::bus::TVRAM_BYTES;
+use crate::vram_pages::DirtyVramPages;
 
 /// Size of a single TVRAM bitplane (`128 KB`, 1024×1024×1bpp).
 pub const TVRAM_PLANE_BYTES: usize = 0x20000;
@@ -250,6 +251,7 @@ impl Crtc {
         val: u8,
         tvram: &mut Option<Box<[u8]>>,
         gvram: &mut Option<Box<[u8]>>,
+        dirty: &mut DirtyVramPages,
     ) -> Result<(), BusFault> {
         let a = addr & 0x00FF_FFFF;
         if a < 0x00E8_0400 {
@@ -269,7 +271,7 @@ impl Crtc {
                     self.rint_active = self.current_raster == irq_line;
                 } else if reg_idx == 22 && (offset & 1) == 1 && self.raster_copy_on {
                     // Software updated R22 (Src/Dst block) while Raster Copy is enabled.
-                    self.execute_raster_copy(tvram);
+                    self.execute_raster_copy(tvram, dirty);
                 }
             }
             Ok(())
@@ -283,13 +285,13 @@ impl Crtc {
                 let new_rc = (val & 0x08) != 0;
                 let new_fc = (val & 0x02) != 0;
                 if new_rc {
-                    self.execute_raster_copy(tvram);
+                    self.execute_raster_copy(tvram, dirty);
                 }
                 if new_fc && !self.fast_clear_standby {
                     self.fast_clear_standby = true;
                     // Also perform fast clear immediately if in V-Blank
                     if !self.v_disp {
-                        self.execute_fast_clear(gvram);
+                        self.execute_fast_clear(gvram, dirty);
                         self.fast_clear_standby = false;
                     }
                 }
@@ -391,7 +393,7 @@ impl Crtc {
 
     /// Executes a hardware 4-scanline (`512`-byte) raster copy from `R22` high byte (`src`)
     /// to `R22` low byte (`dst`) across the TVRAM planes selected in `R21 & 0x0F`.
-    pub fn execute_raster_copy(&self, tvram: &mut Option<Box<[u8]>>) {
+    pub fn execute_raster_copy(&self, tvram: &mut Option<Box<[u8]>>, dirty: &mut DirtyVramPages) {
         let plane_mask = self.regs[21] & 0x000F;
         if plane_mask == 0 {
             return;
@@ -411,12 +413,13 @@ impl Crtc {
                     (base + src_off)..(base + src_off + RASTER_BLOCK_BYTES),
                     base + dst_off,
                 );
+                dirty.mark_tvram_range(base + dst_off..base + dst_off + RASTER_BLOCK_BYTES);
             }
         }
     }
 
     /// Executes Graphic Fast Clear on GVRAM pages enabled in `R21 & 0x0F`.
-    pub fn execute_fast_clear(&self, gvram: &mut Option<Box<[u8]>>) {
+    pub fn execute_fast_clear(&self, gvram: &mut Option<Box<[u8]>>, dirty: &mut DirtyVramPages) {
         let page_mask = self.regs[21] & 0x000F;
         if page_mask == 0 {
             return;
@@ -424,6 +427,7 @@ impl Crtc {
         let Some(buf) = gvram.as_mut() else {
             return;
         };
+        dirty.gvram = u128::MAX;
         if page_mask == 0x000F {
             buf.fill(0);
             return;
@@ -451,6 +455,7 @@ impl Crtc {
         cycles_10mhz: u32,
         _tvram: &mut Option<Box<[u8]>>,
         gvram: &mut Option<Box<[u8]>>,
+        dirty: &mut DirtyVramPages,
     ) -> CrtcSyncEvents {
         // Approximate 10 MHz cycles per scanline:
         // In 31.5 kHz high-res mode, 1 scanline is ~317 cycles (10_000_000 / 31_500).
@@ -489,7 +494,7 @@ impl Crtc {
                     v_disp_fell = true;
                     self.frame_count = self.frame_count.wrapping_add(1);
                     if self.fast_clear_standby {
-                        self.execute_fast_clear(gvram);
+                        self.execute_fast_clear(gvram, dirty);
                         self.fast_clear_standby = false;
                     }
                 }
