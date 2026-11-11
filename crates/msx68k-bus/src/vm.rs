@@ -66,13 +66,20 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
 
 /// IOCS call number of `_SYS_STAT`.
 const IOCS_SYS_STAT: u32 = 0xAC;
-/// Address of the IOCS call table entry for `_SYS_STAT`.
-const IOCS_SYS_STAT_VECTOR: u32 = 0x0400 + IOCS_SYS_STAT * 4;
+/// IOCS calls next to `_SYS_STAT` that IPL ROMs before the X68030's leave undefined too.
+const IOCS_SYS_STAT_NEIGHBORS: [u32; 3] = [0xAB, 0xAD, 0xB0];
+
+/// Returns the address of the IOCS call table entry for call `number`.
+const fn iocs_vector(number: u32) -> u32 {
+    0x0400 + number * 4
+}
 
 /// Answers IOCS `_SYS_STAT` for an MC68030.
 ///
 /// Human68k 3.02 uses it for cache control once it finds an MC68030, but only the X68030
-/// IPL ROM has it, so it is answered natively while the call table still points into ROM.
+/// IPL ROM has it. It is answered natively only while the call table entry is the ROM's
+/// handler for undefined calls, shared with its neighbors, so the X68030 IPL ROM and drivers
+/// that install their own keep handling it.
 /// - `D1 = 0`: MPU status. 25 MHz MC68030, no FPU, and no MMU since none is emulated.
 /// - `D1 = 1`: cache state (bit 0 instruction cache, bit 1 data cache).
 /// - `D1 = 2`: restores the default state, both caches on, returning the previous state.
@@ -82,7 +89,12 @@ fn iocs_sys_stat(state: &mut CpuState, bus: &mut X68kBus) -> msx68k_cpu::TrapRes
     const CACR_EI: u32 = 0x0001;
     const CACR_ED: u32 = 0x0100;
     const MPU_68030_25MHZ: u32 = (250 << 16) | 3;
-    if !matches!(bus.peek_u32(IOCS_SYS_STAT_VECTOR), Some(0x00FE_0000..=0x00FF_FFFF)) {
+    let handler = bus.peek_u32(iocs_vector(IOCS_SYS_STAT));
+    let undefined = matches!(handler, Some(0x00FE_0000..=0x00FF_FFFF))
+        && IOCS_SYS_STAT_NEIGHBORS
+            .iter()
+            .any(|&n| bus.peek_u32(iocs_vector(n)) == handler);
+    if !undefined {
         return msx68k_cpu::TrapResult::PassToVector;
     }
     let caches = |cacr: u32| (cacr & CACR_EI) | ((cacr & CACR_ED) >> 7);

@@ -15,7 +15,7 @@ pub use bus::{Bus, BusFault, NoopTrapHandler, TrapHandler, TrapResult};
 pub use core::{CpuCore, StepOutcome};
 pub use policy::{Burst030Policy, BurstPolicy, CpuPolicy, TrackedPolicy};
 pub use state::{
-    CpuModel, CpuState, DataSize, ExceptionVector, SR_C, SR_CCR_MASK, SR_IPM_MASK, SR_M, SR_N,
+    CpuModel, CpuState, DataSize, ExceptionVector, MmuRegisters, SR_C, SR_CCR_MASK, SR_IPM_MASK, SR_M, SR_N,
     SR_S, SR_T, SR_T0, SR_VALID_MASK, SR_VALID_MASK_030, SR_V, SR_X, SR_Z,
 };
 

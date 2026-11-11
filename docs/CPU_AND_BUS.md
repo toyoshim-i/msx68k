@@ -35,7 +35,7 @@ pub trait CpuPolicy: Copy + Clone + Default + Send + Sync + 'static {
   - Used for the Master SX-Window VM and temporary fast-load boosts (`burst_on_disk_io`).
   - Because `P::TRACK_CYCLES` is a compile-time constant, Rust's dead-code elimination removes all cycle additions and `wait_cycles_16` lookups from the generated machine code.
 - **`Burst030Policy` (`TRACK_CYCLES = false`, `MC68030 = true`)**:
-  - Runs an MC68030 without cycle tracking (Section 7). A tracked MC68030 policy for the 25 MHz X68030 is required and not written yet (Section 7.3). MC68030 timing (caches, pipelining, 32-bit bus) is unrelated to the MC68000 tables, so it must get its own model rather than reuse them.
+  - Runs an MC68030 without cycle tracking (Section 7). A tracked MC68030 policy for the 25 MHz X68030 is required and not written yet (Section 7.4). MC68030 timing (caches, pipelining, 32-bit bus) is unrelated to the MC68000 tables, so it must get its own model rather than reuse them.
 
 ### 2.2 State Decoupling for Zero-Copy Mode Switching
 Architectural state (`CpuState`: `D0–D7`, `A0–A7`, `PC`, `IR`, `SR`, `USP`, `SSP`, interrupt lines, `total_cycles`, and the MC68030 registers `MSP`, `VBR`, `CACR`, `CAAR`, `SFC`, `DFC`) is stored independently of the `CpuPolicy` type parameter. `CpuState::model` names the CPU, and `X68kVm` picks the policy from it and the speed mode (`with_policy!` in `vm.rs`). `X68kVm` can switch between `CpuCore<TrackedPolicy>` and `CpuCore<BurstPolicy>` on any instruction boundary (e.g., when entering or leaving disk I/O or changing application speed profiles) without copying registers or memory.
@@ -144,13 +144,14 @@ The MC68000 core is validated against the [SingleStepTests/m68000](https://githu
 
 ## 7. MC68030 Emulation
 
-Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68030` in the desktop app. It currently runs in Burst only. Human68k 3.02 and SX-Window 3.1 boot to the desktop on it with the original X68000 IPL ROM 1.0 (`crates/msx68k-bus/tests/boot_030.rs`, which also checks that the desktop matches the MC68000 one byte for byte).
+Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68030` in the desktop app, which then loads `roms/IPLROM30.DAT` unless `--ipl` says otherwise. It currently runs in Burst only. Human68k 3.02 and SX-Window 3.1 boot to the desktop on it with both the X68030 IPL ROM 1.3 and the X68000 IPL ROM 1.0, as on an X68000 with an accelerator board (`crates/msx68k-bus/tests/boot_030.rs`, which also checks that both desktops match the MC68000 one byte for byte).
 
 ### 7.1 What the Core Implements
 
 | Area | MC68030 behavior |
 | :--- | :--- |
-| Instructions | 68020 additions: `Bcc.L`, `BFxxx`, `CAS`, `CAS2`, `CHK.L`, `CHK2`, `CMP2`, `DIVx.L`, `EXTB.L`, `LINK.L`, `MULx.L`, `PACK`, `UNPK`, `RTD`, `TRAPcc`, `MOVE from CCR`, `MOVEC`, `MOVES`. `BKPT` raises an illegal instruction exception. |
+| Instructions | 68020 additions: `Bcc.L`, `BFxxx`, `CAS`, `CAS2`, `CHK.L`, `CHK2`, `CMP2`, `DIVx.L`, `EXTB.L`, `LINK.L`, `MULx.L`, `PACK`, `UNPK`, `RTD`, `TRAPcc`, `MOVE from CCR`, `MOVEC`, `MOVES`. `BKPT` and the 68020-only `CALLM`/`RTM` raise an illegal instruction exception. `CLR` writes without reading its operand first, unlike the MC68000. |
+| MMU instructions | `PMOVE` to and from `TC`, `TT0`, `TT1`, `CRP`, `SRP`, and `MMUSR`, `PFLUSH`, `PLOAD`, and `PTEST` run and keep the registers (`CpuState::mmu`), but addresses are not translated and `PTEST` reports every address as invalid. |
 | Addressing | Scaled index, and the full extension word format (base and index suppression, 16/32-bit displacements, pre- and post-indexed memory indirection). |
 | Memory access | 32-bit addresses reach the bus. Misaligned word and long data accesses are split into byte cycles. Only instruction fetches from odd addresses raise an address error. |
 | Privilege | `MOVE from SR` is privileged. `S` and `M` select `USP`, `ISP`, or `MSP`. |
@@ -158,20 +159,26 @@ Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68
 | Control registers | `CACR` is stored but the caches are not emulated, so self-modifying code always sees memory. |
 
 Not implemented:
-- **MMU.** `PMOVE`, `PTEST`, `PFLUSH`, and `PLOAD` (`$F0xx`) raise the F-line exception, and addresses are not translated.
+- **MMU translation.** IPL ROM 1.3 tests the MMU by enabling a translation table that maps `$200000` onto `$F00000` and comparing the two. Without translation the test fails, so it concludes there is no MMU, unlike a real X68030.
 - **FPU.** Coprocessor instructions raise the F-line exception, as on an X68030 without an MC68882. `FLOAT*.X` keeps working through the `$FExx` calls.
-- **Format `$A`/`$B` restart.** `RTE` from a bus fault frame reruns the faulted instruction from the start rather than resuming the faulted bus cycle. Side effects of the first attempt, such as a postincrement, are not undone.
+- **Format `$A`/`$B` restart.** `RTE` from a bus fault frame reruns the faulted instruction from the start rather than resuming the faulted bus cycle. Side effects of the first attempt, such as a postincrement, are not undone. Handlers that rewrite the stacked `PC`, as the IPL ROM probes do, work.
 - `T0` (trace on change of flow) is stored but never traces.
 
-### 7.2 Firmware Gaps Covered Natively
+### 7.2 ROMs
 
-Only the X68000 IPL ROM 1.0 is available, so the X68030-only IOCS calls are missing.
+- The IPL ROMs come from Sharp's free release, distributed by X68000 LIBRARY (`retropc.net/x68000/software/sharp/x68bios/`): `IPLROM.DAT` (EXPERT, 1.0), `IPLROMXV.DAT` (XVI, 1.1), `IPLROMCO.DAT` (XVI Compact, 1.2), and `IPLROM30.DAT` (X68030, 1.3, the 128 KB at `$FE0000` only). They are kept out of the repository in `roms/`.
+- The bundled licence forbids modifying them, so msx68k never patches IPL ROM bytes. Every hook stays outside the ROM: the virtual SCSI ROM at `$FC0000`, F-line hypercalls, and native IOCS calls in `BusTrapHandler::on_trap`. Analysing them is fine, since the ROMs can also be read on real hardware.
+- The virtual SCSI ROM stands in for the X68030's internal SCSI ROM unchanged.
+- At reset the hardware also shows the ROM at `$000000` until the IPL releases it. The bus only provides the reset `SSP` and `PC` from the ROM.
+- CGROM is not part of the free release. The X68030 CGROM is not available yet, so MC68030 VMs use the same `CGROM.DAT` as MC68000 ones.
 
-- **IOCS `$AC` `_SYS_STAT`.** Once Human68k 3.02 detects an MC68030 (it writes `3` to `$0CBC` itself), it calls `_SYS_STAT` for cache control. IPL ROM 1.0 reports it as an unknown IOCS call and Human68k stops at an Abort/Retry/Ignore prompt. `BusTrapHandler::on_trap` answers it natively on MC68030 VMs while the IOCS table entry still points into ROM, so a driver that installs its own takes over. It reports a 25 MHz MC68030 without FPU or MMU, and maps the cache state to `CACR`.
+### 7.3 Firmware Gaps Covered Natively
 
-### 7.3 Remaining Plan
+- **IOCS `$AC` `_SYS_STAT`.** Once Human68k 3.02 detects an MC68030 (it writes `3` to `$0CBC` itself), it calls `_SYS_STAT` for cache control, which only IPL ROM 1.3 has. On IPL ROM 1.0, Human68k stops at an Abort/Retry/Ignore prompt. `BusTrapHandler::on_trap` answers it natively on MC68030 VMs only while its IOCS table entry is the ROM's handler for undefined calls, shared with `$AB`, `$AD`, or `$B0`. IPL ROM 1.3 and drivers that install their own keep handling it. The native answer reports a 25 MHz MC68030 without FPU or MMU, and maps the cache state to `CACR`.
 
-- **X68030 ROM set.** Run MC68030 VMs on the X68030's own IPL ROM 1.3, SCSI ROM, and CGROM rather than the X68000 IPL ROM 1.0, since the per-model ROMs differ (fonts included). The virtual SCSI ROM at `$FC0000` is expected to stand in for the X68030's internal SCSI ROM unchanged.
+### 7.4 Remaining Plan
+
 - **Cycle-accurate 25 MHz mode (required).** A tracked MC68030 policy with its own timing: instruction cache hits, the 32-bit bus with burst fills, and the X68030 system bus and I/O wait states, extending Sections 3.2 to 3.4. MC68000 cycle counts do not carry over.
+- **X68030 CGROM** and any other per-model ROM differences.
+- **MMU translation**, so IPL ROM 1.3 finds the MMU as on real hardware.
 - **Address map.** The guest now sees 32-bit addresses. X68030 high memory at `$0100_0000` and the reserved extension range at `$F000_0000`..`$FEFF_FFFF` ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5) are reachable as such, but everything else still mirrors the 24-bit space as on the 68000.
-- **X68030 IPL ROM.** With IPL ROM 1.3 the native `_SYS_STAT` would no longer be needed, and its MMU and FPU setup would need the missing units above.

@@ -28,6 +28,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const DEFAULT_IPL_PATH: &str = "roms/IPLROM.DAT";
+/// IPL ROM 1.3 of the X68030, the default for `--cpu 68030`.
+const DEFAULT_IPL30_PATH: &str = "roms/IPLROM30.DAT";
 const DEFAULT_CGROM_PATH: &str = "roms/CGROM.DAT";
 
 /// Maps a host `winit::keyboard::KeyCode` to a 7-bit X68000 hardware scan code (`0x01`..=`0x7F`).
@@ -117,7 +119,8 @@ const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
 
 #[derive(Debug, Clone)]
 struct AppArgs {
-    ipl_path: PathBuf,
+    /// IPL ROM given by `--ipl` or `MSX68K_IPL`; otherwise the one for the CPU is used.
+    ipl_path: Option<PathBuf>,
     cgrom_path: PathBuf,
     fd0_path: Option<PathBuf>,
     fd1_path: Option<PathBuf>,
@@ -134,9 +137,7 @@ struct AppArgs {
 
 impl Default for AppArgs {
     fn default() -> Self {
-        let ipl_path = std::env::var_os("MSX68K_IPL")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_IPL_PATH));
+        let ipl_path = std::env::var_os("MSX68K_IPL").map(PathBuf::from);
         let cgrom_path = std::env::var_os("MSX68K_CGROM")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CGROM_PATH));
@@ -178,7 +179,7 @@ impl AppArgs {
             match arg.as_str() {
                 "--ipl" => {
                     if let Some(p) = args.next() {
-                        cfg.ipl_path = PathBuf::from(p);
+                        cfg.ipl_path = Some(PathBuf::from(p));
                     }
                 }
                 "--cgrom" => {
@@ -269,7 +270,7 @@ impl AppArgs {
                     println!(
                         "msx68k — Sharp X68000 / SX-Window Hybrid Execution Environment\n\n\
                          Options:\n  \
-                           --ipl <path>         Path to IPLROM.DAT (default: {DEFAULT_IPL_PATH})\n  \
+                           --ipl <path>         Path to the IPL ROM (default: {DEFAULT_IPL_PATH}, {DEFAULT_IPL30_PATH} for 68030)\n  \
                            --cgrom <path>       Path to CGROM.DAT  (default: {DEFAULT_CGROM_PATH})\n  \
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD)\n  \
@@ -333,10 +334,16 @@ impl Msx68kApp {
             );
             std::process::exit(1);
         });
-        let ipl = std::fs::read(&args.ipl_path).unwrap_or_else(|e| {
+        let ipl_path = args.ipl_path.clone().unwrap_or_else(|| {
+            PathBuf::from(match args.cpu_model {
+                CpuModel::Mc68000 => DEFAULT_IPL_PATH,
+                CpuModel::Mc68030 => DEFAULT_IPL30_PATH,
+            })
+        });
+        let ipl = std::fs::read(&ipl_path).unwrap_or_else(|e| {
             eprintln!(
                 "Failed to read IPLROM at '{}': {e}\nUse --ipl <path> to specify IPLROM.",
-                args.ipl_path.display()
+                ipl_path.display()
             );
             std::process::exit(1);
         });
@@ -461,8 +468,9 @@ impl Msx68kApp {
         let initial_res = vm.bus.crtc.active_resolution();
         let initial_fs = vm.bus.fullscreen_mode;
         println!(
-            "Initialized X68000 VM ({:?}, {} MB RAM, initial PC=${:06X})",
-            vm.speed_mode(),
+            "Initialized X68000 VM ({:?} {:?}, {} MB RAM, initial PC=${:06X})",
+            vm.cpu_model(),
+            effective_speed_mode(&vm),
             args.ram_mb,
             vm.cpu_state.pc
         );

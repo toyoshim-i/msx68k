@@ -13,10 +13,18 @@ const DATA: u32 = 0x4000;
 
 struct FlatBus {
     mem: Vec<u8>,
+    /// A write-only register: reading it raises a bus error.
+    write_only: u32,
 }
 
 impl Bus for FlatBus {
     fn read_u8(&mut self, addr: u32, _supervisor: bool) -> Result<u8, BusFault> {
+        if addr == self.write_only {
+            return Err(BusFault::BusError {
+                addr,
+                is_write: false,
+            });
+        }
         self.mem.get(addr as usize).copied().ok_or(BusFault::BusError {
             addr,
             is_write: false,
@@ -66,7 +74,10 @@ impl FlatBus {
 }
 
 fn machine(code: &[u16]) -> (CpuCore<Burst030Policy>, FlatBus) {
-    let mut bus = FlatBus { mem: vec![0; 0x10000] };
+    let mut bus = FlatBus {
+        mem: vec![0; 0x10000],
+        write_only: u32::MAX,
+    };
     bus.long(0, STACK);
     bus.long(4, CODE);
     bus.words(CODE, code);
@@ -332,4 +343,44 @@ fn interrupt_on_master_stack_leaves_a_throwaway_frame() {
     assert_eq!((cpu.state.pc, cpu.state.a[7]), (CODE, 0x6000));
     assert_eq!(cpu.state.sr & (SR_S | SR_M), SR_S | SR_M);
     assert_eq!(cpu.state.get_ssp(), STACK);
+}
+
+#[test]
+fn clr_writes_without_reading() {
+    let (mut cpu, mut bus) = machine(&[0x4239, 0x0000, 0x6001]); // clr.b $6001
+    bus.long(2 * 4, 0x2000);
+    bus.write_only = 0x6001;
+    bus.mem[0x6001] = 0xAA;
+    step(&mut cpu, &mut bus, 1);
+    assert_eq!(cpu.state.pc, CODE + 6, "no bus error from reading the register");
+    assert_eq!(bus.mem[0x6001], 0);
+    assert!(cpu.state.flag(SR_Z));
+}
+
+#[test]
+fn mmu_registers_move_without_translation() {
+    let (mut cpu, mut bus) = machine(&[
+        0xF000, 0x2400, // pflusha
+        0xF010, 0x4C00, // pmove (a0),crp
+        0xF011, 0x4000, // pmove (a1),tc
+        0xF012, 0x4E00, // pmove crp,(a2)
+        0xF012, 0x6200, // pmove mmusr,(a2)
+    ]);
+    cpu.state.a[0] = DATA;
+    cpu.state.a[1] = DATA + 8;
+    cpu.state.a[2] = DATA + 16;
+    bus.long(DATA, 0x7FFF_0002);
+    bus.long(DATA + 4, 0x0000_3000);
+    bus.long(DATA + 8, 0x80D8_3440);
+    step(&mut cpu, &mut bus, 4);
+    assert_eq!(cpu.state.mmu.crp, 0x7FFF_0002_0000_3000);
+    assert_eq!(cpu.state.mmu.tc, 0x80D8_3440);
+    assert_eq!((bus.peek_u32(DATA + 16), bus.peek_u32(DATA + 20)), (0x7FFF_0002, 0x3000));
+    assert_eq!(cpu.state.pc, CODE + 16);
+
+    // The MMU instructions are privileged.
+    bus.long(8 * 4, 0x2000);
+    cpu.state.set_sr(0);
+    step(&mut cpu, &mut bus, 1);
+    assert_eq!(cpu.state.pc, 0x2000);
 }

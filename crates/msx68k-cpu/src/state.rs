@@ -113,6 +113,37 @@ impl DataSize {
     }
 }
 
+/// MC68030 MMU registers. Address translation is not emulated, so they only hold values.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct MmuRegisters {
+    /// Translation Control register (`TC`).
+    pub tc: u32,
+    /// Transparent Translation register 0 (`TT0`).
+    pub tt0: u32,
+    /// Transparent Translation register 1 (`TT1`).
+    pub tt1: u32,
+    /// CPU Root Pointer (`CRP`).
+    pub crp: u64,
+    /// Supervisor Root Pointer (`SRP`).
+    pub srp: u64,
+    /// MMU Status Register (`MMUSR`).
+    pub mmusr: u16,
+}
+
+impl MmuRegisters {
+    /// Creates the registers in their reset state.
+    pub const fn new() -> Self {
+        Self {
+            tc: 0,
+            tt0: 0,
+            tt1: 0,
+            crp: 0,
+            srp: 0,
+            mmusr: 0,
+        }
+    }
+}
+
 /// The stack pointer that `A7` currently stands for.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum StackPointer {
@@ -159,6 +190,8 @@ pub struct CpuState {
     pub sfc: u8,
     /// Destination Function Code register used by `MOVES` (MC68030).
     pub dfc: u8,
+    /// MC68030 MMU registers, written and read by `PMOVE`.
+    pub mmu: MmuRegisters,
     /// `true` when the CPU is halted in `STOP` state waiting for an interrupt/reset.
     pub stopped: bool,
     /// Current external interrupt priority level (`0`..=`7`).
@@ -203,6 +236,7 @@ impl CpuState {
             caar: 0,
             sfc: 0,
             dfc: 0,
+            mmu: MmuRegisters::new(),
             stopped: false,
             pending_ipl: 0,
             nmi_pending: false,

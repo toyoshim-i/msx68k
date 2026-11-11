@@ -84,6 +84,9 @@ impl<P: CpuPolicy> CpuCore<P> {
         self.state.sr = SR_S | 0x0700;
         self.state.vbr = 0;
         self.state.cacr = 0;
+        self.state.mmu.tc = 0;
+        self.state.mmu.tt0 = 0;
+        self.state.mmu.tt1 = 0;
         let ssp = self.bus_read_u32(bus, 0)?;
         let pc = self.bus_read_u32(bus, 4)?;
         self.state.a[7] = ssp;
@@ -789,6 +792,7 @@ impl<P: CpuPolicy> CpuCore<P> {
             0xC => self.exec_group_c(bus, op),
             0xD => self.exec_add_sub(bus, op, true),
             0xE => self.exec_group_e(bus, op),
+            0xF if P::MC68030 && (op & 0xFFC0) == 0xF000 => self.exec_mmu(bus, op),
             0xF => {
                 // F-Line ($Fxxx) Human68k DOS call / SX-Window API / FE-function
                 let ir_pc = self.state.ir_pc;
@@ -1652,7 +1656,12 @@ impl<P: CpuPolicy> CpuCore<P> {
             }
         };
         let loc = self.resolve_ea(bus, mode, reg, size)?;
-        let val = self.read_ea(bus, loc, size)?;
+        // The MC68000 reads the operand of CLR before clearing it; the MC68030 only writes.
+        let val = if P::MC68030 && sub == 1 {
+            0
+        } else {
+            self.read_ea(bus, loc, size)?
+        };
 
         match sub {
             0 => {
@@ -2604,5 +2613,107 @@ impl<P: CpuPolicy> CpuCore<P> {
             }
         }
         Ok(())
+    }
+
+    /// MC68030 MMU instructions (`PMOVE`, `PFLUSH`, `PLOAD`, `PTEST`).
+    ///
+    /// The registers are kept, but addresses are not translated, the translation cache is not
+    /// modelled, and `PTEST` reports every address as invalid.
+    fn exec_mmu<B: Bus>(&mut self, bus: &mut B, op: u16) -> Result<(), BusFault> {
+        if !self.state.is_supervisor() {
+            return self.privilege_violation(bus);
+        }
+        let ext = self.fetch_u16(bus)?;
+        let mode = ((op >> 3) & 7) as u8;
+        let reg = (op & 7) as u8;
+        const MMUSR_INVALID: u16 = 0x0400;
+        match ext >> 13 {
+            // PFLUSH, PFLUSHA, PLOAD: no translation cache to flush or load.
+            1 => {
+                // PLOAD (mode 0) and PFLUSH by address (mode 6) take an effective address.
+                if matches!((ext >> 10) & 7, 0 | 6) {
+                    self.resolve_ea(bus, mode, reg, DataSize::Byte)?;
+                }
+                Ok(())
+            }
+            // PTEST
+            4 => {
+                self.resolve_ea(bus, mode, reg, DataSize::Byte)?;
+                self.state.mmu.mmusr = MMUSR_INVALID;
+                if (ext & 0x0100) != 0 {
+                    // The A bit asks for the last descriptor address in An.
+                    self.state.a[((ext >> 5) & 7) as usize] = 0;
+                }
+                Ok(())
+            }
+            // PMOVE TT0/TT1 (0), TC/SRP/CRP (2), MMUSR (3)
+            group @ (0 | 2 | 3) => {
+                #[derive(PartialEq)]
+                enum Reg {
+                    Tc,
+                    Srp,
+                    Crp,
+                    Tt0,
+                    Tt1,
+                    Mmusr,
+                }
+                let target = match (group, (ext >> 10) & 7) {
+                    (2, 0) => Reg::Tc,
+                    (2, 2) => Reg::Srp,
+                    (2, 3) => Reg::Crp,
+                    (0, 2) => Reg::Tt0,
+                    (0, 3) => Reg::Tt1,
+                    (3, 0) => Reg::Mmusr,
+                    _ => return self.illegal(bus),
+                };
+                let size = match target {
+                    Reg::Mmusr => DataSize::Word,
+                    _ => DataSize::Long,
+                };
+                let quad = matches!(target, Reg::Srp | Reg::Crp);
+                let loc = self.resolve_ea(bus, mode, reg, if quad { DataSize::Long } else { size })?;
+                if quad && !matches!(loc, EaLocation::Memory(_)) {
+                    return self.illegal(bus);
+                }
+                let to_memory = (ext & 0x0200) != 0;
+                if to_memory {
+                    match target {
+                        Reg::Srp | Reg::Crp => {
+                            let EaLocation::Memory(addr) = loc else { unreachable!() };
+                            let value = if target == Reg::Srp {
+                                self.state.mmu.srp
+                            } else {
+                                self.state.mmu.crp
+                            };
+                            self.bus_write_u32(bus, addr, (value >> 32) as u32)?;
+                            self.bus_write_u32(bus, addr.wrapping_add(4), value as u32)?;
+                        }
+                        Reg::Tc => self.write_ea(bus, loc, size, self.state.mmu.tc)?,
+                        Reg::Tt0 => self.write_ea(bus, loc, size, self.state.mmu.tt0)?,
+                        Reg::Tt1 => self.write_ea(bus, loc, size, self.state.mmu.tt1)?,
+                        Reg::Mmusr => self.write_ea(bus, loc, size, self.state.mmu.mmusr as u32)?,
+                    }
+                } else {
+                    match target {
+                        Reg::Srp | Reg::Crp => {
+                            let EaLocation::Memory(addr) = loc else { unreachable!() };
+                            let hi = self.bus_read_u32(bus, addr)? as u64;
+                            let lo = self.bus_read_u32(bus, addr.wrapping_add(4))? as u64;
+                            if target == Reg::Srp {
+                                self.state.mmu.srp = (hi << 32) | lo;
+                            } else {
+                                self.state.mmu.crp = (hi << 32) | lo;
+                            }
+                        }
+                        Reg::Tc => self.state.mmu.tc = self.read_ea(bus, loc, size)?,
+                        Reg::Tt0 => self.state.mmu.tt0 = self.read_ea(bus, loc, size)?,
+                        Reg::Tt1 => self.state.mmu.tt1 = self.read_ea(bus, loc, size)?,
+                        Reg::Mmusr => self.state.mmu.mmusr = self.read_ea(bus, loc, size)? as u16,
+                    }
+                }
+                Ok(())
+            }
+            _ => self.illegal(bus),
+        }
     }
 }
