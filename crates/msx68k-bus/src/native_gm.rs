@@ -16,6 +16,8 @@ const GM_INVERT_RECT: u16 = 0xA1A3;
 const GM_MARCHING_RECT: u16 = 0xA1A4;
 const GM_FRAME_RGN: u16 = 0xA17A;
 const GM_FILL_RGN: u16 = 0xA17B;
+const GM_SCROLL: u16 = 0xA17E;
+const MS_SHOW_CSR: u16 = 0xA06B;
 const GM_COPY: u16 = 0xA17F;
 const GM_COPY_MASK: u16 = 0xA180;
 const GM_PLOT_IMG: u16 = 0xA182;
@@ -25,6 +27,10 @@ const GM_DUP_VRIMG: u16 = 0xA189;
 
 /// `text_base` offset of the pointer to the current `Graph` record.
 const CURRENT_GRAPH: u32 = 0x5523A;
+/// `text_base` offset of the A-Line handler table, indexed by the low 12 bits of the opcode.
+const A_LINE_TABLE: u32 = 0x400;
+/// `text_base` offset of the screen `Bitmap` record.
+const SCREEN_BITMAP: u32 = 0x55278;
 /// `text_base` offset of the default drawing procedure table.
 const DRIVER_TABLE: u32 = 0x5549E;
 /// `text_base` offset of the rectangle procedure, used to confirm the kernel build.
@@ -336,6 +342,7 @@ impl X68kBus {
             GM_FILL_RECT => self.gm_fill_rect(state, text_base),
             GM_FRAME_RGN => self.gm_frame_rgn(state, text_base),
             GM_FILL_RGN => self.gm_fill_rgn(state, text_base),
+            GM_SCROLL => self.gm_scroll(state, text_base),
             GM_COPY => self.gm_copy(state, text_base),
             GM_COPY_MASK => self.gm_copy_mask(state, text_base),
             GM_PLOT_IMG => self.gm_plot_img(state, text_base),
@@ -869,6 +876,27 @@ impl X68kBus {
             return None;
         }
 
+        let masked = bit_mask.as_ref().map(|mask| (mask, dest_rect));
+        self.blit(source, source_bits, dest, &spans, (dx, dy), masked, mode, active_pages)?;
+        return_result(state, 0);
+        Some(())
+    }
+
+    /// Copies `spans` of `dest` from `source` at `offset`, reading every span before writing any
+    /// so that overlapping areas see the original pixels. `masked` limits the pixels to the set
+    /// bits of a mask plane aligned to the given destination rectangle.
+    #[allow(clippy::too_many_arguments)]
+    fn blit(
+        &mut self,
+        source: PlanarBitmap,
+        source_bits: Option<&[u8]>,
+        dest: PlanarBitmap,
+        spans: &[(i16, i16, i16)],
+        (dx, dy): (i32, i32),
+        masked: Option<(&BitMask, Rect)>,
+        mode: u16,
+        active_pages: u16,
+    ) -> Option<()> {
         // Read everything before writing so overlapping copies see the original pixels.
         let read = |bits: Option<&[u8]>, addr: u32| match bits {
             Some(bits) => bits.get(addr as usize).copied(),
@@ -893,7 +921,7 @@ impl X68kBus {
         };
         let mut copies = Vec::with_capacity(spans.len());
         let mut masks = Vec::new();
-        for &(y, left, right) in &spans {
+        for &(y, left, right) in spans {
             let width = (right - left) as u32;
             let row = (y as i32 + dy - source.rect.top as i32) as u32;
             let pixel = (left as i32 + dx - source.rect.left as i32) as u32;
@@ -904,7 +932,7 @@ impl X68kBus {
                 }
             }
             copies.push(planes);
-            if let Some(mask) = &bit_mask {
+            if let Some((mask, dest_rect)) = masked {
                 let row = y as i32 - dest_rect.top as i32 + mask.top as i32 - mask.bitmap.rect.top as i32;
                 let pixel =
                     left as i32 - dest_rect.left as i32 + mask.left as i32 - mask.bitmap.rect.left as i32;
@@ -948,7 +976,6 @@ impl X68kBus {
                 }
             }
         }
-        return_result(state, 0);
         Some(())
     }
 
@@ -1179,6 +1206,147 @@ impl X68kBus {
         self.fill_area(state, text_base, bounds, FillShape::Spans(&frame))
     }
 
+    /// `GMScroll` (args: rect, offset, update region handle or 0): moves the pixels of the rect
+    /// that stay visible by the offset and, given a handle, stores the area left behind there and
+    /// fills it with the background color.
+    ///
+    /// A pixel moves only when both its source and destination are visible. The update region
+    /// is written in place, so calls that would leave a non-rectangular one, or that pass a
+    /// handle holding one, stay on the guest routine, which resizes the handle.
+    fn gm_scroll(&mut self, state: &mut CpuState, text_base: u32) -> Option<()> {
+        let args = state.a[7];
+        let rect = self.peek_rect(self.peek_u32(args)?)?;
+        let dh = self.peek_u16(args + 4)? as i16;
+        let dv = self.peek_u16(args + 6)? as i16;
+        let update = self.peek_u32(args + 8)?;
+        let update_region = match update {
+            0 => None,
+            handle => {
+                let region = self.peek_u32(handle)?;
+                if self.peek_u32(region)? != REGION_RECT_SIZE
+                    || region as usize + REGION_RECT_SIZE as usize > self.main_ram.len()
+                {
+                    return None;
+                }
+                Some(region)
+            }
+        };
+        let nothing = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let graph = self.peek_u32(text_base.wrapping_add(CURRENT_GRAPH))?;
+        if (dh, dv) == (0, 0) || (self.peek_u16(graph + GRAPH_DRAW_LEVEL)? as i16) < 0 {
+            return self.finish_scroll(state, update_region, nothing, 0);
+        }
+        if self.peek_u32(graph + GRAPH_PROCS)? != 0 || self.peek_u16(graph + GRAPH_WORK_KIND)? >= 2 {
+            return None;
+        }
+        let bitmap_ptr = self.peek_u32(graph + GRAPH_BITMAP)?;
+        let (bitmap, active_pages) = self.peek_planar_target(bitmap_ptr)?;
+        if !bitmap.is_screen() {
+            return None;
+        }
+        let visible = self.peek_region(graph + GRAPH_VISIBLE)?;
+        let clipping = self.peek_region(graph + GRAPH_CLIPPING)?;
+        let area = rect
+            .intersect(self.peek_rect(graph + GRAPH_RECT)?)
+            .intersect(self.peek_region_bounds(visible)?)
+            .intersect(self.peek_region_bounds(clipping)?)
+            .intersect(bitmap.rect);
+        if area.is_empty() {
+            return self.finish_scroll(state, update_region, nothing, 0);
+        }
+
+        let shown = self.graph_rows(graph, area)?;
+        let moved = shown.offset(dh, dv);
+        let kept = shown.intersect(&moved);
+        let exposed = match update_region {
+            Some(_) => shown.minus(&moved).as_rect()?,
+            None => nothing,
+        };
+        let background = self.resolve_pen_mode(graph, bitmap.rect, 0x0100)?;
+
+        let mut spans = Vec::new();
+        for (index, row) in kept.rows.iter().enumerate() {
+            let y = kept.top + index as i16;
+            spans.extend(row.iter().map(|&(left, right)| (y, left, right)));
+        }
+        let zones = self.cursor_zones(text_base, bitmap.rect)?;
+        let touches = |y: i16, left: i16, right: i16| {
+            zones
+                .iter()
+                .any(|zone| y >= zone.top && y < zone.bottom && left < zone.right && right > zone.left)
+        };
+        let near_cursor = spans
+            .iter()
+            .any(|&(y, left, right)| touches(y, left, right) || touches(y - dv, left - dh, right - dh))
+            || (update_region.is_some()
+                && (exposed.top..exposed.bottom).any(|y| touches(y, exposed.left, exposed.right)));
+        if near_cursor {
+            return None;
+        }
+
+        // On the screen, the guest ends with `MSShowCsr`, which leaves the handler address that
+        // the A-Line dispatcher loaded in D0.
+        let screen = self.peek_u32(text_base.wrapping_add(SCREEN_BITMAP + BITMAP_BASE))?;
+        let result = if bitmap.base == screen {
+            self.peek_u32(text_base.wrapping_add(A_LINE_TABLE + 4 * (MS_SHOW_CSR as u32 & 0xFFF)))?
+        } else {
+            0
+        };
+
+        self.blit(bitmap, None, bitmap, &spans, (-dh as i32, -dv as i32), None, 0, active_pages)?;
+        if update_region.is_some() && !exposed.is_empty() {
+            self.fill_with(state, text_base, exposed, FillShape::Rect, Some((background, active_pages)))?;
+        }
+        self.finish_scroll(state, update_region, exposed, result)
+    }
+
+    /// Stores `exposed` as the update region of a `GMScroll` call, if one was given, and returns
+    /// `result`.
+    fn finish_scroll(
+        &mut self,
+        state: &mut CpuState,
+        region: Option<u32>,
+        exposed: Rect,
+        result: u32,
+    ) -> Option<()> {
+        if let Some(region) = region {
+            let words = [exposed.left, exposed.top, exposed.right, exposed.bottom];
+            let bytes = REGION_RECT_SIZE
+                .to_be_bytes()
+                .into_iter()
+                .chain(words.iter().flat_map(|word| word.to_be_bytes()));
+            for (i, byte) in bytes.enumerate() {
+                self.poke_u8(region + i as u32, byte);
+            }
+        }
+        return_result(state, result);
+        Some(())
+    }
+
+    /// Reads the rows of `area` that both the visible and the clipping region of `graph` cover.
+    fn graph_rows(&self, graph: u32, area: Rect) -> Option<RowSpans> {
+        let mut cursors = [
+            self.region_cursor(self.peek_region(graph + GRAPH_VISIBLE)?, area.top)?,
+            self.region_cursor(self.peek_region(graph + GRAPH_CLIPPING)?, area.top)?,
+        ];
+        let mut rows = Vec::new();
+        for y in area.top..area.bottom {
+            for cursor in &mut cursors {
+                self.advance_region(cursor, y)?;
+            }
+            rows.push(clipped_spans(area, &cursors));
+        }
+        Some(RowSpans {
+            top: area.top,
+            rows,
+        })
+    }
+
     /// Reads every row of a `Region` within its bounds.
     fn region_rows(&self, region: u32) -> Option<RowSpans> {
         let bounds = self.peek_region_bounds(region)?;
@@ -1317,7 +1485,11 @@ impl X68kBus {
 
     /// Expands the pen of `graph` into per-plane source rows, or `None` if it is unsupported.
     fn resolve_pen(&self, graph: u32, bitmap_rect: Rect) -> Option<PlanePen> {
-        let mode = self.peek_u16(graph + GRAPH_PEN_MODE)?;
+        self.resolve_pen_mode(graph, bitmap_rect, self.peek_u16(graph + GRAPH_PEN_MODE)?)
+    }
+
+    /// Like [`Self::resolve_pen`] with `mode` in place of the graph's pen mode.
+    fn resolve_pen_mode(&self, graph: u32, bitmap_rect: Rect, mode: u16) -> Option<PlanePen> {
         if mode & 0xFF >= 8 {
             return None;
         }
@@ -1585,6 +1757,59 @@ impl RowSpans {
         RowSpans { top: self.top, rows }
     }
 
+    fn offset(&self, dh: i16, dv: i16) -> RowSpans {
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|&(left, right)| (left + dh, right + dh)).collect())
+            .collect();
+        RowSpans {
+            top: self.top + dv,
+            rows,
+        }
+    }
+
+    fn intersect(&self, other: &RowSpans) -> RowSpans {
+        let rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| intersect_spans(row, other.row(self.top + index as i16)))
+            .collect();
+        RowSpans { top: self.top, rows }
+    }
+
+    /// Returns the bounds of the shape if it is a rectangle, or an empty rectangle if it is empty.
+    fn as_rect(&self) -> Option<Rect> {
+        let mut rect: Option<Rect> = None;
+        for (index, row) in self.rows.iter().enumerate() {
+            let y = self.top + index as i16;
+            match (row.as_slice(), &mut rect) {
+                ([], _) => {}
+                (&[(left, right)], None) => {
+                    rect = Some(Rect {
+                        left,
+                        top: y,
+                        right,
+                        bottom: y + 1,
+                    })
+                }
+                (&[(left, right)], Some(rect))
+                    if left == rect.left && right == rect.right && y == rect.bottom =>
+                {
+                    rect.bottom += 1;
+                }
+                _ => return None,
+            }
+        }
+        Some(rect.unwrap_or(Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }))
+    }
+
     fn minus(&self, other: &RowSpans) -> RowSpans {
         let rows = self
             .rows
@@ -1817,6 +2042,29 @@ mod tests {
                 assert_eq!(pixel(&bus, x, y), if outer && !hole { 5 } else { 0 }, "({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn scrolls_a_rect_and_erases_the_area_left_behind() {
+        let (mut bus, mut state) = test_bus([0, 0, 8, 4]);
+        const UPDATE_HANDLE: u32 = 0x130C;
+        const UPDATE: u32 = 0x1780;
+        write_u32(&mut bus, UPDATE_HANDLE, UPDATE);
+        write_rect_region(&mut bus, UPDATE, [0, 0, 0, 0]);
+        write_u16(&mut bus, GRAPH + GRAPH_BG_COLOR, 0x3);
+        bus.ext_tvram.as_mut().unwrap()[2 * ROW_BYTES] = 0x80; // color 1 at (0, 2)
+        write_u32(&mut bus, STACK + 4, 0xFFFF); // dh = 0, dv = -1
+        write_u32(&mut bus, STACK + 8, UPDATE_HANDLE);
+        assert_eq!(
+            bus.handle_native_gm(&mut state, GM_SCROLL),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        assert_eq!(pixel(&bus, 0, 1), 1);
+        assert_eq!(pixel(&bus, 0, 2), 0);
+        assert_eq!(pixel(&bus, 0, 3), 3, "the row left behind takes the background color");
+        assert_eq!(pixel(&bus, 8, 3), 0);
+        assert_eq!(bus.peek_rect(UPDATE + 4), Some(Rect { left: 0, top: 3, right: 8, bottom: 4 }));
+        assert_eq!(state.d[0], 0);
     }
 
     #[test]
