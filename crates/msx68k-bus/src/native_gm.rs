@@ -24,6 +24,7 @@ const GM_COPY: u16 = 0xA17F;
 const GM_COPY_MASK: u16 = 0xA180;
 const GM_PLOT_IMG: u16 = 0xA182;
 const GM_PUT_RIMG: u16 = 0xA183;
+const GM_GET_PIXEL: u16 = 0xA1AF;
 const GM_DUP_HRIMG: u16 = 0xA188;
 const GM_DUP_VRIMG: u16 = 0xA189;
 
@@ -427,6 +428,7 @@ impl X68kBus {
             GM_COPY_MASK => self.gm_copy_mask(state, text_base),
             GM_PLOT_IMG => self.gm_plot_img(state, text_base),
             GM_PUT_RIMG => self.gm_put_rimg(state, text_base),
+            GM_GET_PIXEL => self.gm_get_pixel(state),
             GM_DUP_HRIMG => self.gm_dup_hrimg(state, text_base),
             GM_DUP_VRIMG => self.gm_dup_vrimg(state, text_base),
             GM_INVERT_RECT => self.gm_invert_rect(state, text_base),
@@ -1502,6 +1504,38 @@ impl X68kBus {
         self.fill_area(state, text_base, bounds, FillShape::Spans(&frame))
     }
 
+    /// `GMGetPixel` (args: bitmap, point): the color of a dot of the screen, built from the bits of
+    /// the active planes, or 0 outside the bitmap.
+    fn gm_get_pixel(&mut self, state: &mut CpuState) -> Option<()> {
+        let (bitmap, active_pages) = self.peek_planar_target(self.peek_u32(state.a[7])?)?;
+        if !bitmap.is_screen() {
+            return None;
+        }
+        let x = self.peek_u16(state.a[7] + 4)? as i16;
+        let y = self.peek_u16(state.a[7] + 6)? as i16;
+        let inside = Rect {
+            left: x,
+            top: y,
+            right: x.wrapping_add(1),
+            bottom: y.wrapping_add(1),
+        };
+        if inside.intersect(bitmap.rect) != inside {
+            return_result(state, 0);
+            return Some(());
+        }
+        let px = (x as i32 - bitmap.rect.left as i32) as u32;
+        let py = (y as i32 - bitmap.rect.top as i32) as u32;
+        let mut color = 0;
+        for plane in 0..4 {
+            if active_pages & (1 << plane) != 0 {
+                let byte = self.peek_u8(bitmap.row_addr(plane, py) + (px >> 3))?;
+                color |= (((byte >> (7 - (px & 7))) & 1) as u32) << plane;
+            }
+        }
+        return_result(state, color);
+        Some(())
+    }
+
     /// `GMScroll` (args: rect, offset, update region handle or 0): moves the pixels of the rect
     /// that stay visible by the offset and, given a handle, stores the area left behind there and
     /// fills it with the background color.
@@ -2419,6 +2453,20 @@ mod tests {
         let row: Vec<u8> = (0..8).map(|x| pixel(&bus, x, 0)).collect();
         // Dots 2..6: plane 0 copies 1010, plane 1 XORs 1 into a set plane, plane 2 is set.
         assert_eq!(row, [2, 2, 5, 4, 5, 4, 2, 2]);
+    }
+
+    #[test]
+    fn reads_a_screen_dot_from_the_active_planes() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.ext_tvram.as_mut().unwrap()[ROW_BYTES] = 0x40; // plane 0, (1, 1)
+        bus.ext_tvram.as_mut().unwrap()[2 * PLANE_BYTES + ROW_BYTES] = 0x40; // plane 2
+        write_u32(&mut bus, STACK, BITMAP);
+        write_u32(&mut bus, STACK + 4, 0x0001_0001);
+        assert_eq!(bus.handle_native_gm(&mut state, GM_GET_PIXEL), TrapResult::Handled { extra_cycles: 0 });
+        assert_eq!(state.d[0], 5);
+        write_u32(&mut bus, STACK + 4, 0x0100_0001); // x = 256 is outside
+        bus.handle_native_gm(&mut state, GM_GET_PIXEL);
+        assert!(state.d[0] == 0 && state.flag(SR_Z));
     }
 
     #[test]
