@@ -97,6 +97,8 @@ windows work the same way as the master VM.
   rather than through SX-Window events, so the VM sees physical key information.
 - The mouse is left out of the first version: relative motion would need pointer capture and a
   way out of it, which few early uses need.
+- For now the SX-Window cursor may go under VM windows. Over a VM's screen it reads as the
+  pointer being captured by the VM, so no cursor layer is needed before VM windows appear.
 
 ## 4. First Goal
 
@@ -130,8 +132,8 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   master VM's screen and clipped to the target (`crates/msx68k-vicon/tests/vm_layer.rs`). The
   app passes no layers until VMX68K.SX reports its windows.
 - The master VM's VICON compositor (`crates/msx68k-vicon`) still uploads the whole TVRAM, GVRAM,
-  and palette every frame, and draws the host cursor into its TVRAM copy, so the cursor would
-  go under VM layers; both change with Section 3.3.
+  and palette every frame, and draws the host cursor into its TVRAM copy, so the cursor goes
+  under VM layers (accepted for now, Section 3.4); both change with Section 3.3.
 
 ---
 
