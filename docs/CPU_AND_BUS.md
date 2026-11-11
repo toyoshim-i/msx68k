@@ -136,3 +136,13 @@ The MC68000 core is validated against the [SingleStepTests/m68000](https://githu
   - `CHK.W <ea>, Dn`: Clears `Z, V, C` (setting `Z` if `Dn.W == 0`) and sets `N = (Dn.W < 0)` even when no trap occurs (`0 <= Dn.W <= bound`).
   - `DIVU.W` / `DIVS.W`: Sets undocumented `N = 1` alongside `V = 1` (`Z = 0, C = 0`) on 16-bit quotient overflow.
   - `SBCD`: Computes high-nibble decimal correction (`-$60`) strictly from the 9-bit binary subtraction borrow (`dst < src + X`), while asserting `C = 1, X = 1` if the low-nibble `-$06` adjustment subsequently underflows.
+
+---
+
+## 7. Plan: MC68030 Emulation
+
+Planned after the extended screen has left guest memory ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 5), to cover the X68030:
+
+- **CPU core**: an MC68030 core alongside the MC68000 one, as another monomorphized `CpuPolicy`. With it the guest gets the 32-bit address bus, so the X68030 high memory at `$0100_0000` and the reserved extension range at `$F000_0000`..`$FEFF_FFFF` (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5) become reachable without the 68000's 24-bit mirroring.
+- **Speed modes**: a 25 MHz cycle-accurate mode and Burst mode, like the existing presets in Section 3.1.
+- **Bus speed**: the system bus clock and the I/O and memory wait states of the X68030 have to be modelled and tuned, extending the wait-state model of Sections 3.2 to 3.4.

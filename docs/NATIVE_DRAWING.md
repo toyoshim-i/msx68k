@@ -116,6 +116,7 @@ In order:
 5. **Remove the guest mapping.** Done: the screen base moved to `$F000_0000` and guest accesses are detected (Section 2.5). The mapping remains only for verification.
 6. **Host TrueColor buffer.** Draw into a host buffer uploaded with `wgpu`, keeping the 16-color planar semantics where applications depend on them. Optimise only if performance requires it.
 7. **Partial VM for supervisor tasks.** SX applications run in user mode, and user-mode access to I/O and VRAM raises a bus error, so only `SYS/FSX.X` touches the screen. Tasks that switch to supervisor mode (DOS `_SUPER`, IOCS `_B_SUPER` `$81`) are to run with virtualized TVRAM and GVRAM.
+8. **MC68030 emulation.** See [CPU_AND_BUS.md](CPU_AND_BUS.md) Section 7: a 25 MHz cycle-accurate mode, Burst mode, and tuned bus and I/O wait states.
 
 ---
 
