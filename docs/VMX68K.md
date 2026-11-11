@@ -5,7 +5,7 @@ hardware, change screen modes, or expect a plain Human68k console. Such programs
 start in an isolated VM rather than being detached after accessing unsupported
 hardware in the master VM.
 
-Only decisions are recorded as the plan. Proposals not yet decided are listed in Section 5.
+Only decisions are recorded as the plan. Proposals not yet decided are listed in Section 6.
 
 ---
 
@@ -46,14 +46,35 @@ run in a VM of their own from the start.
 
 ---
 
-## 3. First Goal
+## 3. VM Threads and Disk Requests
+
+The master VM and VMX68K.SX keep running on the main thread. Each VM runs on a host thread of its
+own and owns its `X68kVm`, at the pace of real time for its speed mode.
+
+### 3.1 Disk Requests
+A disk request is one command at the layer the VM emulates, and its reply comes from VMX68K.SX,
+which reads or writes the disk image through the master VM's DOS.
+
+| Device | One request | While the reply is pending |
+| :--- | :--- | :--- |
+| Floppy disk | One FDC command. A read asks for every sector the command will transfer (from its C, H, R, N up to EOT) when the command is issued; a write sends each sector once the VM has written it. | The VM keeps running on its emulated timing, seek and rotation included, since programs play music while they load. It stops only when it reaches the moment the FDC hands a sector to the DMAC (or the result phase of a write) without the reply, and resumes with its time made consistent once the reply arrives. |
+| SCSI | One IOCS `$F5` call, which msx68k already handles natively. | The VM stops until the reply arrives, so the call still completes at once as the guest sees it. |
+
+### 3.2 Picking Up Requests
+SX-Window multitasks cooperatively: VMX68K.SX runs only when the scheduler gives it a turn, and
+the host cannot make that happen sooner. So VMX68K.SX polls. On every pass of its event loop it
+asks the host for pending requests with a hypercall, carries them out, and returns the results.
+Its loop waits for events in a way that also returns when there are none, so it keeps polling
+while idle.
+
+## 4. First Goal
 
 Boot Human68k 3.02 from `HUMAN302.XDF` as drive A in a VM, shown in a VMX68K.SX window. The
 floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 
 ---
 
-## 4. Known Facts
+## 5. Known Facts
 
 - `X68kVm` is `Send`, so a VM can move to and run on a thread of its own.
 - The VICON compositor (`crates/msx68k-vicon`) currently uploads the whole TVRAM, GVRAM, and
@@ -61,14 +82,12 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 
 ---
 
-## 5. Open Questions
+## 6. Open Questions
 
 - **Screen integration.** How the VM's screen is composed into the window efficiently: proposed
   were one compositor per VM sharing the GPU device, dirty-page uploads at each vertical blank
   through a triple buffer, one final pass that draws each VM into its window's content rectangle
   clipped to the window's visible region, and the cursor as a separate overlay.
-- **Drive and bridge transport.** How requests travel between the VM thread and VMX68K.SX
-  (proposed: request and reply messages over a channel, with the VM's time stopped while it waits).
 - **Bridge hook point.** DOS calls (`$FFxx`) directly, or a remote drive device driver in the VM's
   Human68k.
 - **Input routing.** Keyboard and mouse to the VM while its window is active, and how focus
