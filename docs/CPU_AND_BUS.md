@@ -35,7 +35,7 @@ pub trait CpuPolicy: Copy + Clone + Default + Send + Sync + 'static {
   - Used for the Master SX-Window VM and temporary fast-load boosts (`burst_on_disk_io`).
   - Because `P::TRACK_CYCLES` is a compile-time constant, Rust's dead-code elimination removes all cycle additions and `wait_cycles_16` lookups from the generated machine code.
 - **`Burst030Policy` (`TRACK_CYCLES = false`, `MC68030 = true`)**:
-  - Runs an MC68030 without cycle tracking (Section 7). There is deliberately no tracked MC68030 policy: MC68030 timing (caches, pipelining, 32-bit bus) is unrelated to the MC68000 tables, so it must not reuse them.
+  - Runs an MC68030 without cycle tracking (Section 7). A tracked MC68030 policy for the 25 MHz X68030 is required and not written yet (Section 7.3). MC68030 timing (caches, pipelining, 32-bit bus) is unrelated to the MC68000 tables, so it must get its own model rather than reuse them.
 
 ### 2.2 State Decoupling for Zero-Copy Mode Switching
 Architectural state (`CpuState`: `D0–D7`, `A0–A7`, `PC`, `IR`, `SR`, `USP`, `SSP`, interrupt lines, `total_cycles`, and the MC68030 registers `MSP`, `VBR`, `CACR`, `CAAR`, `SFC`, `DFC`) is stored independently of the `CpuPolicy` type parameter. `CpuState::model` names the CPU, and `X68kVm` picks the policy from it and the speed mode (`with_policy!` in `vm.rs`). `X68kVm` can switch between `CpuCore<TrackedPolicy>` and `CpuCore<BurstPolicy>` on any instruction boundary (e.g., when entering or leaving disk I/O or changing application speed profiles) without copying registers or memory.
@@ -144,7 +144,7 @@ The MC68000 core is validated against the [SingleStepTests/m68000](https://githu
 
 ## 7. MC68030 Emulation
 
-Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68030` in the desktop app. Human68k 3.02 and SX-Window 3.1 boot to the desktop on it with the original X68000 IPL ROM 1.0 (`crates/msx68k-bus/tests/boot_030.rs`, which also checks that the desktop matches the MC68000 one byte for byte).
+Selected per VM with `VmConfig::with_cpu_model(CpuModel::Mc68030)`, or `--cpu 68030` in the desktop app. It currently runs in Burst only. Human68k 3.02 and SX-Window 3.1 boot to the desktop on it with the original X68000 IPL ROM 1.0 (`crates/msx68k-bus/tests/boot_030.rs`, which also checks that the desktop matches the MC68000 one byte for byte).
 
 ### 7.1 What the Core Implements
 
@@ -171,6 +171,7 @@ Only the X68000 IPL ROM 1.0 is available, so the X68030-only IOCS calls are miss
 
 ### 7.3 Remaining Plan
 
-- **Cycle-accurate 25 MHz mode.** A tracked MC68030 policy with its own timing: instruction cache hits, the 32-bit bus with burst fills, and the X68030 system bus and I/O wait states, extending Sections 3.2 to 3.4. MC68000 cycle counts do not carry over.
+- **X68030 ROM set.** Run MC68030 VMs on the X68030's own IPL ROM 1.3, SCSI ROM, and CGROM rather than the X68000 IPL ROM 1.0, since the per-model ROMs differ (fonts included). The virtual SCSI ROM at `$FC0000` is expected to stand in for the X68030's internal SCSI ROM unchanged.
+- **Cycle-accurate 25 MHz mode (required).** A tracked MC68030 policy with its own timing: instruction cache hits, the 32-bit bus with burst fills, and the X68030 system bus and I/O wait states, extending Sections 3.2 to 3.4. MC68000 cycle counts do not carry over.
 - **Address map.** The guest now sees 32-bit addresses. X68030 high memory at `$0100_0000` and the reserved extension range at `$F000_0000`..`$FEFF_FFFF` ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5) are reachable as such, but everything else still mirrors the 24-bit space as on the 68000.
 - **X68030 IPL ROM.** With IPL ROM 1.3 the native `_SYS_STAT` would no longer be needed, and its MMU and FPU setup would need the missing units above.
