@@ -22,7 +22,7 @@ use msx68k_bus::{CpuModel, CpuSpeedMode, FrameBudget, GdbServer, VmConfig, X68kV
 use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -105,6 +105,9 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     };
     Some(sc)
 }
+
+/// Trackpad scrolling, in host pixels, that makes one wheel notch.
+const WHEEL_PIXELS_PER_NOTCH: f64 = 40.0;
 
 /// Host time left free each frame for rendering while Burst runs flat out.
 const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
@@ -308,6 +311,9 @@ struct Msx68kApp {
     last_cursor_pos: Option<(f64, f64)>,
     mouse_left: bool,
     mouse_right: bool,
+    shift_held: bool,
+    /// Wheel motion not yet worth a whole notch, horizontally and vertically.
+    wheel_remainder: (f64, f64),
     last_resolution: (u32, u32),
     last_fullscreen: bool,
 }
@@ -484,6 +490,8 @@ impl Msx68kApp {
             last_cursor_pos: None,
             mouse_left: false,
             mouse_right: false,
+            shift_held: false,
+            wheel_remainder: (0.0, 0.0),
             last_resolution: initial_res,
             last_fullscreen: initial_fs,
         }
@@ -832,6 +840,37 @@ impl ApplicationHandler for Msx68kApp {
                     .scc
                     .set_mouse_buttons(self.mouse_left, self.mouse_right);
                 self.vm.bus.scc.add_mouse_delta(0, 0);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_held = modifiers.state().shift_key();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
+                    MouseScrollDelta::PixelDelta(pos) => (
+                        pos.x / WHEEL_PIXELS_PER_NOTCH,
+                        pos.y / WHEEL_PIXELS_PER_NOTCH,
+                    ),
+                };
+                // Shift turns the wheel sideways.
+                let (x, y) = if self.shift_held { (x + y, 0.0) } else { (x, y) };
+                self.wheel_remainder.0 += x;
+                self.wheel_remainder.1 += y;
+                let whole = |remainder: &mut f64| {
+                    let notches = remainder.trunc();
+                    *remainder -= notches;
+                    notches as i32
+                };
+                // Positive deltas move the content right and down, revealing what is left and
+                // above, so they scroll toward the start.
+                let horizontal = whole(&mut self.wheel_remainder.0);
+                let vertical = whole(&mut self.wheel_remainder.1);
+                if vertical != 0 {
+                    self.vm.bus.post_mouse_wheel(-vertical, false);
+                }
+                if horizontal != 0 {
+                    self.vm.bus.post_mouse_wheel(-horizontal, true);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {

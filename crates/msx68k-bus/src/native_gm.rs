@@ -164,11 +164,11 @@ const PATTERN_ROWS: usize = 16;
 
 /// Half-open rectangle in the coordinates of its source record.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct Rect {
-    left: i16,
-    top: i16,
-    right: i16,
-    bottom: i16,
+pub(crate) struct Rect {
+    pub(crate) left: i16,
+    pub(crate) top: i16,
+    pub(crate) right: i16,
+    pub(crate) bottom: i16,
 }
 
 impl Rect {
@@ -1808,6 +1808,17 @@ impl X68kBus {
         })
     }
 
+    /// Returns whether the `Region` record at `region` covers the dot at `x`, `y`.
+    pub(crate) fn region_contains(&self, region: u32, x: i16, y: i16) -> Option<bool> {
+        let bounds = self.peek_region_bounds(region)?;
+        if !(bounds.left..bounds.right).contains(&x) || !(bounds.top..bounds.bottom).contains(&y) {
+            return Some(false);
+        }
+        let mut cursor = self.region_cursor(region, y)?;
+        self.advance_region(&mut cursor, y)?;
+        Some(spans(bounds, &cursor).into_iter().any(|(left, right)| (left..right).contains(&x)))
+    }
+
     /// Reads every row of a `Region` within its bounds.
     fn region_rows(&self, region: u32) -> Option<RowSpans> {
         let bounds = self.peek_region_bounds(region)?;
@@ -2076,7 +2087,7 @@ impl X68kBus {
         }
     }
 
-    fn peek_u16(&self, addr: u32) -> Option<u16> {
+    pub(crate) fn peek_u16(&self, addr: u32) -> Option<u16> {
         let hi = self.peek_u8(addr)? as u16;
         let lo = self.peek_u8(addr.wrapping_add(1))? as u16;
         Some((hi << 8) | lo)
@@ -2088,7 +2099,7 @@ impl X68kBus {
         Some((hi << 16) | lo)
     }
 
-    fn peek_rect(&self, addr: u32) -> Option<Rect> {
+    pub(crate) fn peek_rect(&self, addr: u32) -> Option<Rect> {
         Some(Rect {
             left: self.peek_u16(addr)? as i16,
             top: self.peek_u16(addr + 2)? as i16,

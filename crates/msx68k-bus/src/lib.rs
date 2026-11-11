@@ -10,6 +10,7 @@ pub mod mfp;
 pub mod native_gm;
 pub mod peripherals;
 pub mod scsi;
+pub mod sx_wheel;
 pub mod sxwin;
 pub mod timing;
 pub mod vicon;

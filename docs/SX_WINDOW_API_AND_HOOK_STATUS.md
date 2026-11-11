@@ -926,6 +926,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$FE8D`**..**`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x4C41E`, `+ 0x4C3CC`, `+ 0x4C2CA` | `22 D8 22 D8`, `22 D8 32 D8`, `89 18 51 C8` | System error alert box (TRAP #14) | **`[x] Hooked`** | **Alert Box on Extended Screens**: the three instructions that touch the box are mapped onto plane 0 of the extended screen. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17E`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMScroll` | **`[x] Hooked`** | **Native Scroll**. Update regions that are not rectangles stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17A`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRgn` | **`[x] Hooked`** | **Native Region Frame**. A 0×0 pen on a shaped region stays on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
+| **`$A0A5`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Event Man: `EMGet` | **`[x] Hooked`** | **Mouse Wheel**: before the guest takes an event, one queued host wheel notch is posted as a click on an arrow of the active window's scroll bar. See Section 8. |
 | **`$A1A3`**, **`$A1A4`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMInvertRect`, unnamed marching frame | **`[x] Hooked`** | **Native Dashed Frames**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17F`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMCopy` | **`[x] Hooked`** | **Native Copy**. Scaled copies stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A1AF`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMGetPixel` | **`[x] Hooked`** | **Native Screen Read**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
@@ -1179,3 +1180,41 @@ When resolution expands live:
      - Simulates right-click desktop popup menu at `(1500, 200)` in extended TVRAM.
      - Executes a complete downscale/upscale cycle `1920×1080 -> 768×512 -> 1920×1080`, verifying window pixel preservation at `(1350, 780)` and unclipped visible regions.
      - Switches back via CLI mode to 1024×1024, verifying V-Blank advance and seamless downscaling.
+
+---
+
+## 8. Mouse Wheel (`crates/msx68k-bus/src/sx_wheel.rs`)
+
+SX-Window has no wheel, and applications scroll their own windows when a scroll bar arrow is clicked: they pass the left-down event to `SXCallCtrlM` (`$A3A3`), which scrolls the window for them, or to `CMFind` and `CMCheck` and scroll themselves. So msx68k turns each wheel notch into a click on an arrow of the active window's scroll bar, whatever the pointer is over. Inactive tasks are not made to handle events, and the cursor does not move. Shift turns the wheel to the horizontal bar, and a window without the bar ignores the notch.
+
+### 8.1 Where Scroll Bars Come From
+Scroll bars look the same everywhere because the Control Manager draws them with shared control definition resources:
+
+| `'CDEF'` ID | Name | Use |
+| :---: | :--- | :--- |
+| `0x40` (64) | `CI_SCLBRWH` | Window scroll bar, horizontal ("Real horizontal scroll bar definition function ID 64") |
+| `0x41` (65) | `CI_SCLBRWV` | Window scroll bar, vertical ("Real vertical scroll bar definition function ID 65") |
+| `0x42`, `0x43` | `CI_SCRLBRH`, `CI_SCRLBRV` | General scroll bars, as in dialogs |
+
+- `CMOpen` (`$A289`) loads `'CDEF'` `cDefID >> 4` and stores its handle in the control's `def` (`+24`), the low four bits in `+28`. All controls of one kind share the handle, so `RMHdlToRsc` (`$A0E9`) names the kind.
+- Resource maps form chains from `text_base + 0x53B6A` and `+ 0x53B6E`, linked through `+4` of each map. A map counts its types at `+0` and lists them from `+16` as (type, ID list handle) pairs of 8 bytes; an ID list counts at `+0` and lists 16-byte entries from `+16`, with the ID at `+0` and the resource handle at `+8`.
+- Window scroll bars sit in the 18-dot strips along the right and bottom of the window, which `SXInvalScBar` (`$A3AA`) and `SXValidScBar` (`$A3AB`) assume.
+- Records (`SXDEF2.H`, `CONTROL.H`): a window keeps its control list handle at `+98`; a control links to the next at `+0` and has its rectangle at `+8`, `visible` at `+16`, `hilite` at `+17` (255 when inactive), and `value`, `min`, `max` at `+18`, `+20`, `+22`.
+
+### 8.2 Arrow Positions
+Unlike the Macintosh, both arrows sit in a box at the middle of the bar, not at its ends, and the thumb moves along the rest. From the part test (`CWHERE`) of CDEF 64 and 65:
+
+| Bar | Arrow box | First arrow (part 20) | Second arrow (part 21) |
+| :--- | :--- | :--- | :--- |
+| Vertical | `middle - 25` to `middle + 26`, `middle = (top + bottom) >> 1` | `y <= middle` (up) | below (down) |
+| Horizontal | `middle - 26` to `middle + 27`, `middle = (left + right) >> 1` | `x <= middle` (left) | right of it (right) |
+
+A notch clicks 12 or 13 dots from the middle, 9 dots into the bar. `CMCheck` (`$A29A`) only tracks the mouse on buttons, check boxes, and thumbs; on arrows and page areas it returns the part at the event position at once, so the click needs no faked mouse position. The real button is up, so the application's auto-repeat stops after one step.
+
+### 8.3 Posting the Click
+- The click goes in when the guest calls `EMGet` (`$A0A5`, about once per task turn), when the queue is consistent, one notch at a time.
+- Globals (`text_base +`): active window `0x543CA` (`WMActive`), Event Manager work area `0x543E2` (queue head `+2`, tail `+6`, event mask `+1546`, free list `+1548`), system time `0x549F2`, mouse position `0x549F6`, keyboard state pointer `0x54AA6`, last modifiers `0x54A00`.
+- Entries are taken from the free list like `EMSet` (`$A0A4`) does: `+0` next, `+4` kind `3`, `+6` what, `+8` whom, `+12` when, `+16` where (global `x`, `y`), `+20` modifiers. A left-down and a left-up go in at the arrow.
+- The click is skipped when the bar is hidden or inactive, when the window is hidden, or when another window covers the arrow (outside the window's visible region), so it can never reach another window.
+- The host gives notches from wheel lines, or from every 40 pixels of trackpad scrolling (`msx68k-app`).
+

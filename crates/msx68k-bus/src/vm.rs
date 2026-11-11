@@ -30,6 +30,9 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
         pc: u32,
     ) -> msx68k_cpu::TrapResult {
         bus.last_a_line = (opcode, pc);
+        if opcode == crate::sx_wheel::EM_GET {
+            bus.deliver_wheel_notch();
+        }
         bus.apply_pending_resolution(state, opcode);
         bus.handle_native_gm(state, opcode)
     }
