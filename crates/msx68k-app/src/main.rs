@@ -309,6 +309,8 @@ struct Msx68kApp {
     mouse_left: bool,
     mouse_right: bool,
     shift_held: bool,
+    /// Whether the host OS pointer is hidden because msx68k draws SX-Window's cursor.
+    os_pointer_hidden: bool,
     /// Wheel motion not yet worth a whole notch, horizontally and vertically.
     wheel_remainder: (f64, f64),
     last_resolution: (u32, u32),
@@ -488,6 +490,7 @@ impl Msx68kApp {
             mouse_left: false,
             mouse_right: false,
             shift_held: false,
+            os_pointer_hidden: false,
             wheel_remainder: (0.0, 0.0),
             last_resolution: initial_res,
             last_fullscreen: initial_fs,
@@ -524,6 +527,14 @@ impl Msx68kApp {
 
     /// Presents the current guest screen and refreshes the window title.
     fn render_frame(&mut self) {
+        // Show one cursor: while msx68k draws SX-Window's, the OS pointer over the window hides.
+        let hide_os_pointer = self.vm.bus.host_draws_cursor();
+        if hide_os_pointer != self.os_pointer_hidden {
+            if let Some(gpu) = &self.gpu {
+                gpu.window.set_cursor_visible(!hide_os_pointer);
+                self.os_pointer_hidden = hide_os_pointer;
+            }
+        }
         let active_res = self.vm.bus.crtc.active_resolution();
         let active_fs = self.vm.bus.fullscreen_mode;
         if active_res != self.last_resolution || active_fs != self.last_fullscreen {

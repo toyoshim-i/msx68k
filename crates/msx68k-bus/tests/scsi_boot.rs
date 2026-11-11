@@ -720,6 +720,10 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         vm.bus.is_mouse_polling_active(),
         "Mouse polling must be active once SX-Window desktop is running"
     );
+    assert!(
+        vm.bus.host_draws_cursor(),
+        "The host draws the SX-Window cursor on the desktop, so the OS pointer can hide"
+    );
 
     let vec_a44e = vm.bus.read_u32(text_base + 0x1538, true).unwrap();
     let vec_a44f = vm.bus.read_u32(text_base + 0x153C, true).unwrap();

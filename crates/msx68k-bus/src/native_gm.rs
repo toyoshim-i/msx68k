@@ -340,6 +340,17 @@ impl X68kBus {
         }
     }
 
+    /// Returns whether the host draws SX-Window's mouse cursor now, so the host OS pointer can be
+    /// hidden instead of showing two cursors.
+    pub fn host_draws_cursor(&self) -> bool {
+        let shown = || {
+            let text_base = self.native_gm_text_base.filter(|_| self.host_cursor)?;
+            let mouse = self.peek_u32(text_base + MOUSE_RECORD)?;
+            Some(self.peek_u8(mouse + MOUSE_CURSOR_SHOWN)? != 0)
+        };
+        shown().unwrap_or(false)
+    }
+
     /// Returns the screen bytes the cursor changes, as `(offset, bytes)` pairs aligned to four
     /// bytes within [`X68kBus::active_tvram`], for the presenter to apply over its copy.
     pub fn cursor_overlay(&self) -> Vec<(usize, [u8; 4])> {
