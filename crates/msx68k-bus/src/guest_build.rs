@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use clap::Parser;
 use rhas::{context, error, options, pass};
 
@@ -50,11 +51,18 @@ pub fn build_guest_x_executable(
     source_path: &Path,
     include_dirs: &[&Path],
 ) -> Result<Vec<u8>, String> {
+    static BUILDS: AtomicU64 = AtomicU64::new(0);
     let obj_bytes = assemble_file(source_path, include_dirs)?;
     let temp_dir = std::env::temp_dir();
-    let unique_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
+    // Tests build in parallel threads and processes, so a timestamp alone can repeat.
+    let unique_id = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        BUILDS.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
     let temp_obj = temp_dir.join(format!("msx68k_build_{unique_id}.o"));
     let temp_out = temp_dir.join(format!("msx68k_build_{unique_id}.x"));
 
