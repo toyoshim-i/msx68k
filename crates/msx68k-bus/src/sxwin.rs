@@ -30,6 +30,9 @@ pub enum HypercallId {
     /// Native replacement of the `SYS/FSX.X` text span routine, patched over its first
     /// instruction.
     GmTextSpan = 0xFE8B,
+    /// Native replacement of the `SYS/FSX.X` pen span routine, patched over its first
+    /// instruction.
+    GmPenSpan = 0xFE8C,
 }
 
 impl HypercallId {
@@ -45,6 +48,7 @@ impl HypercallId {
             0xFE87 => Some(Self::ScsiDriverInterrupt),
             0xFE88 => Some(Self::SxSetScreenMode),
             0xFE8B => Some(Self::GmTextSpan),
+            0xFE8C => Some(Self::GmPenSpan),
             _ => None,
         }
     }
@@ -72,6 +76,7 @@ impl X68kBus {
             HypercallId::ScsiDriverInterrupt => self.hypercall_scsi_driver_interrupt(state),
             HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
             HypercallId::GmTextSpan => self.hypercall_text_span(state),
+            HypercallId::GmPenSpan => self.hypercall_pen_span(state),
         }
     }
 

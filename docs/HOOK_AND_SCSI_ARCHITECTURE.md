@@ -43,7 +43,7 @@ flowchart LR
 - We reserve a dedicated range of unallocated F-Line opcodes (`$FE80`–`$FE8F`, declared in [`HypercallId`](../crates/msx68k-bus/src/sxwin.rs) and dispatched by `X68kBus::handle_hypercall`) as **Native Hypercalls**.
 - When the monomorphized MC68000 core fetches an F-Line opcode in `$FE80`–`$FE8F`, `BusTrapHandler::on_f_line` delegates to `X68kBus::handle_hypercall`, which traps directly into the Rust hypercall handlers in **0 emulated CPU cycles**, without pushing a 68000 exception frame or traversing RAM vectors.
   - SX-Window integration and host display/mouse synchronization hypercalls (`$FE81` `SxMouseSync`, `$FE88` `SxSetScreenMode`) are routed to [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs).
-  - `$FE8B` `GmTextSpan` replaces the first instruction of the `SYS/FSX.X` text span routine and is handled in [`crates/msx68k-bus/src/native_gm.rs`](../crates/msx68k-bus/src/native_gm.rs) (Section 2.3, pattern 3).
+  - `$FE8B` `GmTextSpan` and `$FE8C` `GmPenSpan` replace the first instructions of the `SYS/FSX.X` text and pen span routines and are handled in [`crates/msx68k-bus/src/native_gm.rs`](../crates/msx68k-bus/src/native_gm.rs) (Section 2.3, pattern 3).
   - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiRomBoot`, `$FE83` `ScsiRomdbBuild`, `$FE84` `ScsiIocsInstall`, `$FE85` `ScsiIocsDispatch`, `$FE86` `ScsiDriverStrategy`, `$FE87` `ScsiDriverInterrupt`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
   - All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
 - In addition to F-Line hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
@@ -78,7 +78,7 @@ flowchart LR
 3. **Replaced First Instruction with Guest Fallback (`SYS/FSX.X` Internal Level)**:
    - Used when a routine is called directly, with no A-Line API in front of it, and the native version must be able to decline some calls. Only the first word of the routine is overwritten with the hypercall, so no guest memory is consumed.
    - When the native version handles the call, the hypercall performs the routine's `RTS` itself. Otherwise it performs the replaced instruction on the CPU state and continues at the instruction after it, so the original routine runs unchanged.
-   - `$FE8B` `GmTextSpan` replaces `MOVEM.L D3-D7/A1-A4,-(SP)` at `text_base + 0x381FE` this way. The cursor routines at `text_base + 0x521BA` and `+ 0x521DC` are patched to a bare `RTS` because the host draws the cursor.
+   - `$FE8B` `GmTextSpan` replaces `MOVEM.L D3-D7/A1-A4,-(SP)` at `text_base + 0x381FE` this way, and `$FE8C` `GmPenSpan` replaces `MOVEM.L D2-D7/A1/A3/A6,-(SP)` at `text_base + 0x37212`. The cursor routines at `text_base + 0x521BA` and `+ 0x521DC` are patched to a bare `RTS` because the host draws the cursor.
 
 ---
 

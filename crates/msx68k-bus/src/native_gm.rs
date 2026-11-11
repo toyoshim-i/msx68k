@@ -9,6 +9,8 @@ use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
 use crate::bus::{is_ext_screen_addr, X68kBus, EXT_TVRAM_BASE};
 
 const SX_GET_DISP_RECT: u16 = 0xA432;
+/// Task Manager: `TSTiniCrtM`, which clears the screen and returns it to text mode 16.
+const TS_TINI_CRTM: u16 = 0xA34F;
 const GM_FRAME_RECT: u16 = 0xA172;
 const GM_FILL_RECT: u16 = 0xA173;
 const GM_INVERT_RECT: u16 = 0xA1A3;
@@ -64,6 +66,27 @@ const SPAN_KEEP_PLANE: u32 = 0x382D0;
 const SPAN_AND: u32 = 0x3851E;
 const SPAN_OR: u32 = 0x385E8;
 const SPAN_XOR: u32 = 0x386D6;
+
+/// `text_base` offset of the routine that fills one row of a pen span into a planar bitmap,
+/// through which every guest shape fill reaches the screen.
+const PEN_SPAN: u32 = 0x37212;
+/// Its first instruction, `MOVEM.L D2-D7/A1/A3/A6,-(SP)`, and the instructions after it.
+const PEN_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x3F, 0x52, 0x2C, 0x55, 0x90, 0x6E];
+/// Hypercall that replaces the first instruction of the pen span routine.
+const PEN_SPAN_HYPERCALL: [u8; 2] = [0xFE, 0x8C];
+
+// Pen span context offsets, as the pen setup at `text_base + 0x369A6` fills them.
+const PEN_ROUTINES: u32 = 4;
+const PEN_PATTERN_ROW: u32 = 20;
+const PEN_PATTERNS: u32 = 26;
+/// Bytes of pattern per plane in the pen span context: 16 rows of one word.
+const PEN_PATTERN_BYTES: u32 = 32;
+
+// `text_base` offsets of the per-plane pen span routines that read the pattern.
+const PEN_COPY: u32 = 0x372D0;
+const PEN_AND: u32 = 0x37358;
+const PEN_OR: u32 = 0x373CE;
+const PEN_XOR: u32 = 0x37450;
 /// Margin around the cursor position within which drawing is left to the 68000 cursor shielding.
 const CURSOR_MARGIN: i16 = 64;
 /// `text_base` offsets of the routines that draw and erase the software cursor in VRAM.
@@ -165,6 +188,8 @@ enum SpanAction {
     Invert,
     /// Combines the source, XORed with the byte, by the two-bit logical operation.
     Source(u8, u8),
+    /// Combines the pattern word, repeated across the row, by the two-bit logical operation.
+    Pattern(u8, u16),
 }
 
 /// A pen resolved to source bits for each plane and pattern row, in bitmap pixel alignment.
@@ -273,6 +298,11 @@ impl X68kBus {
         if self.main_ram.get(span..span + TEXT_SPAN_PROLOGUE.len()) == Some(&TEXT_SPAN_PROLOGUE[..]) {
             self.main_ram[span..span + 2].copy_from_slice(&TEXT_SPAN_HYPERCALL);
         }
+        // Likewise, every guest shape fill reaches planar bitmaps one row at a time.
+        let span = (text_base + PEN_SPAN) as usize;
+        if self.main_ram.get(span..span + PEN_SPAN_PROLOGUE.len()) == Some(&PEN_SPAN_PROLOGUE[..]) {
+            self.main_ram[span..span + 2].copy_from_slice(&PEN_SPAN_HYPERCALL);
+        }
     }
 
     /// Returns the screen bytes the cursor changes, as `(offset, bytes)` pairs aligned to four
@@ -376,6 +406,14 @@ impl X68kBus {
                 Some(()) => TrapResult::Handled { extra_cycles: 0 },
                 None => TrapResult::PassToVector,
             };
+        }
+        // The guest clears TVRAM before it returns the screen to mode 16, which then copies the
+        // extended screen into TVRAM, so the extended screen must be cleared as well.
+        if opcode == TS_TINI_CRTM {
+            if let Some(screen) = self.ext_tvram.as_mut() {
+                screen.fill(0);
+            }
+            return TrapResult::PassToVector;
         }
         if !self.native_gm_enabled || !self.is_ext_tvram_active() {
             return TrapResult::PassToVector;
@@ -1022,6 +1060,11 @@ impl X68kBus {
             state.d[3], state.d[4], state.d[5], state.d[6], state.d[7],
             state.a[1], state.a[2], state.a[3], state.a[4],
         ];
+        self.resume_after_movem(state, entry, &saved)
+    }
+
+    /// Performs a replaced `MOVEM.L regs,-(SP)` of four bytes and continues after it.
+    fn resume_after_movem(&mut self, state: &mut CpuState, entry: u32, saved: &[u32]) -> TrapResult {
         let stack = state.a[7].wrapping_sub(4 * saved.len() as u32);
         for (i, byte) in saved.iter().flat_map(|value| value.to_be_bytes()).enumerate() {
             self.poke_u8(stack.wrapping_add(i as u32), byte);
@@ -1029,6 +1072,104 @@ impl X68kBus {
         state.a[7] = stack;
         state.pc = entry.wrapping_add(4);
         TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// Handles the hypercall that replaces the first instruction of the pen span routine.
+    ///
+    /// When the native version cannot run, this performs the replaced
+    /// `MOVEM.L D2-D7/A1/A3/A6,-(SP)` and continues with the guest routine after it.
+    pub(crate) fn hypercall_pen_span(&mut self, state: &mut CpuState) -> TrapResult {
+        let entry = state.ir_pc;
+        // The guest shields its own cursor around whole shapes, so only a host cursor is safe.
+        let handled = self.native_gm_enabled
+            && self.host_cursor
+            && self.is_ext_tvram_active()
+            && self.pen_span(state).is_some();
+        if handled {
+            self.native_gm_calls += 1;
+            return TrapResult::Handled { extra_cycles: 0 };
+        }
+        let saved = [
+            state.d[2], state.d[3], state.d[4], state.d[5], state.d[6], state.d[7],
+            state.a[1], state.a[3], state.a[6],
+        ];
+        self.resume_after_movem(state, entry, &saved)
+    }
+
+    /// The pen span routine: with the context `A0` that the pen setup prepared for the graph
+    /// `A5`, fills dots `D0` to `D1` (exclusive, graph coordinates) of the destination row `A1`
+    /// on every active plane, and returns.
+    ///
+    /// The context holds a routine per plane, chosen from the pen kind, operation, and colors,
+    /// and the pen pattern per plane, already rotated to the bitmap. Its pattern row offset
+    /// selects the word of each pattern for this row.
+    fn pen_span(&mut self, state: &mut CpuState) -> Option<()> {
+        let text_base = self.native_gm_text_base?;
+        let context = state.a[0];
+        let bitmap = self.peek_u32(state.a[5])?;
+        let left = self.peek_u16(bitmap + BITMAP_RECT)? as i16;
+        let page = self.peek_u32(bitmap + BITMAP_PAGE)?;
+        let active_pages = self.peek_u16(bitmap + BITMAP_ACTIVE_PAGES)?;
+        let pattern_row = self.peek_u16(context + PEN_PATTERN_ROW)? as u32;
+        let start = (state.d[0] as i16).wrapping_sub(left);
+        let end = (state.d[1] as i16).wrapping_sub(left);
+        let return_address = self.peek_u32(state.a[7])?;
+        if start < 0 || end < 0 {
+            return None;
+        }
+
+        let mut planes = Vec::with_capacity(4);
+        for plane in 0..4u32 {
+            if active_pages & (1 << plane) == 0 {
+                continue;
+            }
+            let routine = self.peek_u32(context + PEN_ROUTINES + plane * 4)?;
+            let pattern = self.peek_u16(context + PEN_PATTERNS + plane * PEN_PATTERN_BYTES + pattern_row)?;
+            let action = match routine.wrapping_sub(text_base) {
+                SPAN_CLEAR => SpanAction::Fill(0),
+                SPAN_SET => SpanAction::Fill(0xFF),
+                SPAN_KEEP => SpanAction::Keep,
+                SPAN_INVERT_DEST => SpanAction::Invert,
+                PEN_COPY => SpanAction::Pattern(0, pattern),
+                PEN_AND => SpanAction::Pattern(1, pattern),
+                PEN_OR => SpanAction::Pattern(2, pattern),
+                PEN_XOR => SpanAction::Pattern(3, pattern),
+                _ => return None,
+            };
+            planes.push((plane, action));
+        }
+
+        if end > start {
+            let (first, last) = (start as u32, end as u32 - 1);
+            for (plane, action) in planes {
+                let line = state.a[1].wrapping_add(page.wrapping_mul(plane));
+                for byte in (first >> 3)..=(last >> 3) {
+                    let mut mask = 0xFFu8;
+                    if byte == first >> 3 {
+                        mask &= 0xFF >> (first & 7);
+                    }
+                    if byte == last >> 3 {
+                        mask &= 0xFF << (7 - (last & 7));
+                    }
+                    let addr = line + byte;
+                    let current = self.peek_u8(addr)?;
+                    let value = match action {
+                        SpanAction::Keep => continue,
+                        SpanAction::Fill(value) => (current & !mask) | (value & mask),
+                        SpanAction::Invert => current ^ mask,
+                        SpanAction::Pattern(op, pattern) => {
+                            let bits = pattern.to_be_bytes()[(byte & 1) as usize];
+                            combine(op, current, bits, mask)
+                        }
+                        SpanAction::Source(..) => return None,
+                    };
+                    self.store_plane_byte(addr, value);
+                }
+            }
+        }
+        state.a[7] = state.a[7].wrapping_add(4);
+        state.pc = return_address;
+        Some(())
     }
 
     /// The text span routine: with the context `A0` that the text drawing setup prepared, draws
@@ -1102,6 +1243,7 @@ impl X68kBus {
                             let set = packed_byte(&bits, byte as i32 * 8 - first as i32) ^ invert;
                             combine(op, current, set, mask)
                         }
+                        SpanAction::Pattern(..) => return None,
                     };
                     self.store_plane_byte(addr, value);
                 }
@@ -2254,6 +2396,34 @@ mod tests {
     }
 
     #[test]
+    fn fills_a_pen_span_with_each_plane_routine_and_returns() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.host_cursor = true;
+        const CONTEXT: u32 = 0x1D00;
+        let routines = [PEN_COPY, PEN_XOR, SPAN_SET, SPAN_KEEP];
+        for (plane, routine) in routines.iter().enumerate() {
+            write_u32(&mut bus, CONTEXT + PEN_ROUTINES + plane as u32 * 4, TEXT_BASE + routine);
+        }
+        // Row 1 of the patterns: plane 0 alternates dots, plane 1 sets the left half.
+        write_u16(&mut bus, CONTEXT + PEN_PATTERN_ROW, 2);
+        write_u16(&mut bus, CONTEXT + PEN_PATTERNS + 2, 0xAAAA);
+        write_u16(&mut bus, CONTEXT + PEN_PATTERNS + PEN_PATTERN_BYTES + 2, 0xFF00);
+        bus.ext_tvram.as_mut().unwrap()[PLANE_BYTES] = 0xFF; // plane 1 starts set
+        write_u32(&mut bus, STACK, 0x4000); // return address
+        state.a[0] = CONTEXT;
+        state.a[1] = EXT_TVRAM_BASE;
+        state.a[5] = GRAPH;
+        state.d[0] = 2;
+        state.d[1] = 6;
+        state.ir_pc = 0x3000;
+        assert_eq!(bus.hypercall_pen_span(&mut state), TrapResult::Handled { extra_cycles: 0 });
+        assert_eq!((state.pc, state.a[7]), (0x4000, STACK + 4));
+        let row: Vec<u8> = (0..8).map(|x| pixel(&bus, x, 0)).collect();
+        // Dots 2..6: plane 0 copies 1010, plane 1 XORs 1 into a set plane, plane 2 is set.
+        assert_eq!(row, [2, 2, 5, 4, 5, 4, 2, 2]);
+    }
+
+    #[test]
     fn leaves_unknown_text_span_routines_to_the_guest() {
         let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
         bus.host_cursor = true;
@@ -2294,6 +2464,14 @@ mod tests {
                 assert_eq!(pixel(&bus, x, y), if outer && !hole { 5 } else { 0 }, "({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn clears_the_extended_screen_before_returning_to_text_mode() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        bus.ext_tvram.as_mut().unwrap().fill(0x5A);
+        assert_eq!(bus.handle_native_gm(&mut state, TS_TINI_CRTM), TrapResult::PassToVector);
+        assert!(bus.ext_tvram.as_ref().unwrap().iter().all(|&byte| byte == 0));
     }
 
     #[test]

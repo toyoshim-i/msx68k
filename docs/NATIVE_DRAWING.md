@@ -20,7 +20,7 @@ Screens above 1024×1024 live in a host buffer that screen `Bitmap` records name
 | Hook | Used for | Guest memory |
 | :--- | :--- | :--- |
 | A-Line APIs, intercepted by `BusTrapHandler::on_a_line` before the `SYS/FSX.X` dispatcher | Graph Man and system APIs ([`native_gm.rs`](../crates/msx68k-bus/src/native_gm.rs)) | Not patched or consumed |
-| First instruction of an internal routine replaced with a hypercall (pattern 3 of [HOOK_AND_SCSI_ARCHITECTURE.md](HOOK_AND_SCSI_ARCHITECTURE.md) Section 2.3) | Routines that `SYS/FSX.X` calls directly, with no A-Line API in front: the text span routine (`$FE8B`) | One word, verified by signature |
+| First instruction of an internal routine replaced with a hypercall (pattern 3 of [HOOK_AND_SCSI_ARCHITECTURE.md](HOOK_AND_SCSI_ARCHITECTURE.md) Section 2.3) | Routines that `SYS/FSX.X` calls directly, with no A-Line API in front: the text span routine (`$FE8B`) and the pen span routine (`$FE8C`) | One word, verified by signature |
 | Cursor draw and erase entries patched to `RTS` | Host cursor | Two words |
 
 An API or case without a native implementation returns `PassToVector` (or, for a hypercall, performs the replaced instruction) and runs the original `SYS/FSX.X` code.
@@ -78,6 +78,8 @@ All of the following are verified against the guest (Section 4) on screens above
 | `GMInvertRect` `$A1A3`, unnamed `$A1A4` | One-pixel outlines with a 16-bit dash style, clipped to the bitmap only. Rotation comes from the low word of the bitmap pointer, as in the guest, and the sides also cover the top and bottom rows unless the frame is at the bitmap edge. `$A1A3` XORs the dash. `$A1A4` (args: rect, pointer to style) writes it, rotates the stored style right by one, and holds the caller until a V-DISP falling edge by re-executing the A-Line instruction, so interrupts keep running. | None. |
 | `SXGetDispRect` `$A432` | Returns the actual display size. The guest indexes its CRT table with the low 5 bits of the mode, so mode `$50` reads as 768×512 and popup menus were confined to it. Answered whenever an extended mode is active, independently of the other APIs. | None. |
 | Text span routine (`$FE8B`) | All text rows. See [NATIVE_FONTS.md](NATIVE_FONTS.md). | Unknown span routines, reversed spans. |
+| Pen span routine (`$FE8C`, `+0x37212`) | Every row that a guest shape fill draws into a planar bitmap: lines, ovals, rounded rects, arcs, polygons, regions, and rects that the APIs above leave to the guest. The pen setup at `+0x369A6` fills a context: the span routine at +0, a routine per plane at +4..+16 (clear, set, keep, invert, or copy, AND, OR, or XOR the pattern), the pattern row offset at +20, and 16 pattern words per plane from +26, already rotated to the bitmap. Args: `A0` context, `A5` graph, `A1` destination row, `D0`..`D1` dots (exclusive, graph coordinates). Verified by rewriting live `GMFillRect` calls into `GMLine`, `GMFrameOval`, `GMFillOval`, `GMFrameRRect`, `GMFillRRect`, `GMFrameArc`, `GMFillArc`, `GMFramePoly`, and `GMFillPoly` with random shapes, pen kinds, operations, and pen sizes: all 205 cases, 159 of them drawing, matched the guest. | Unknown span routines. |
+| `TSTiniCrtM` `$A34F` | The guest clears TVRAM and returns the screen to mode 16, which copies the extended screen into TVRAM, so the extended screen is cleared first and the guest routine then runs. | Everything else in the call. |
 | Mouse cursor | The guest's draw and erase entries (`text_base + 0x521BA` and `+ 0x521DC`, both starting `48E7 000C 2868 0000`) return at once. Each frame the presenter applies the `MsCsr` at `**csrHdl` (`Mouse` +40) at `thePosition` (+16) minus its hot spot when `cached` (+50) is set, as `(screen AND NOT mask) XOR pattern` on each plane in `bits` (+44). The `Mouse` record pointer is at `text_base + 0x633CA`. | None. |
 
 Results that do not match the guest byte for byte, by design:
@@ -106,8 +108,8 @@ Current result: in the scripted session, no guest code reads or writes the exten
 
 In order:
 
-1. **Handle the routines that assume TVRAM.** The fast screen clear and the panic alert box (Section 6.2) draw into TVRAM in extended modes.
-2. **Find writers outside the session.** Use the illegal access reports (Section 2.5) during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
+1. **Handle the panic alert box** (Section 6.2), which draws into TVRAM in extended modes.
+2. **Find writers outside the session.** Use the illegal access reports (Section 2.5) during ordinary use and with more applications. Shape fills are native through the pen span routine. Paths not yet covered include scaled `GMCopy` and other copies through the bitmap transfer setup at `+0x38040`, and any routine that writes a bitmap without the pen or text span routines. Replacing the shape APIs at the A-Line level, so that each shape is one native call, is a later performance step.
 3. **Close the remaining guest cases.** Every case in the "Left to the guest" column draws nothing on an extended screen. Guest bugs (Section 6.1) are fixed rather than copied.
 4. **Call guest services from native code.** `GMScroll` update regions that are not rectangles need the guest memory manager to resize a handle, and later APIs will need allocations too. This needs a way for a native handler to run a guest routine and resume afterwards.
 5. **Remove the guest mapping.** Done: the screen base moved to `$F000_0000` and guest accesses are detected (Section 2.5). The mapping remains only for verification.
@@ -139,8 +141,8 @@ Not bugs: `SYS/FSX.X` was written for TVRAM and the standard screen modes, so it
 | `SXGetDispRect` `$A432` (`+0x15196`) | Indexes its fixed CRT table with the low 5 bits of the mode, so extended mode `$50` reads as mode `$10`, 768×512. Popup menus use this rect as their bounds and were confined to it. | Native: returns the actual display size. |
 | Screen mode tables (`+0x552F6` virtual modes, `+0x151C0` CRT table) | Only the standard modes up to 1024×1024, each with base `$E00000`. | The resolution switch writes the extended geometry into the screen records instead (Section 5.6 of the SX-Window reference). |
 | `GMNewBits` (`+0x2F23A`) and `GMUnlockBits` (`+0x2F32E`) immediates | New screen bitmaps get base `$E00000`. | The resolution switch rewrites the immediates. |
-| Fast screen clear (`+0x133D4`) | Clears TVRAM at `$E00000` with the CRTC simultaneous plane write (R21). | Not handled: in extended modes it clears TVRAM, which is not displayed. |
-| Panic alert box (`+0x4BFC0`) | Draws straight into plane 0 at `$E00000`. | Not handled: in extended modes it is not displayed. |
+| `TSTiniCrtM` `$A34F` (`+0x133D8`) | Clears TVRAM at `$E00000` with the CRTC simultaneous plane write (R21), resets the text palette, and returns to mode 16 with `_CONCTRL`, which copies the extended screen into TVRAM. | Native: the extended screen is cleared first. |
+| Panic alert box (`+0x4BFC4`) | Centres a 384×70 box in `SXGetDispRect` and draws its text from the CGROM into plane 0 at `$E00000 + y * 128 + x / 8`, with row offsets 1032, 3336, 5768, and 1538 and a row step of 128 fixed in the code, and sets the text palette. | Not handled: in extended modes it is not displayed. |
 | Screen size during a drawing call | The kernel's size information is read during a call and must not change under it. | Resolution switches requested by the host are applied when a user-mode task calls `TSEventAvail` or `TSGetEvent`. |
 
 ### 6.3 Quirks
