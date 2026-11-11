@@ -17,6 +17,7 @@ Original SX-Window renders its entire GUI into the 512 KB Text VRAM (`$E00000`, 
 - Higher-level SX-Window managers (Window Manager, Menu Manager, and application `RastPort` / `BitMap` APIs) already operate on signed 16-bit coordinates (`-32768` to `+32767`).
 - By hooking the low-level Drawing Manager (DM) primitives via A-Line/F-Line traps and redirecting rendering to native `wgpu` surfaces, **msx68k** removes the 1024×1024 / 16-color hardware ceiling, enabling Full HD (1920×1080) and 4K (3840×2160) TrueColor SX-Window desktops.
 - Current status and plans: [docs/NATIVE_DRAWING.md](docs/NATIVE_DRAWING.md) for drawing and [docs/NATIVE_FONTS.md](docs/NATIVE_FONTS.md) for text and fonts, and [docs/VMX68K.md](docs/VMX68K.md) for X68000 VMs shown as SX-Window applications.
+- Bugs found but not yet fixed: [docs/KNOWN_BUGS.md](docs/KNOWN_BUGS.md).
 
 ### 1.3 Monomorphized 4-Mode MC68000 Core, Bus Timing & Mixed Mode Bridge
 The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a region-aware system bus timing model so cycle-accounting and wait-state overhead completely vanish in `burst` mode:
