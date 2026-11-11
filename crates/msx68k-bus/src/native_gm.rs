@@ -4,7 +4,7 @@
 //! here one at a time. Every API returns [`TrapResult::PassToVector`] for cases it does not
 //! support, which leaves them to the original `SYS/FSX.X` code.
 
-use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
+use msx68k_cpu::{Bus, CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
 
 use crate::bus::{is_ext_screen_addr, X68kBus, EXT_TVRAM_BASE};
 
@@ -74,6 +74,31 @@ const PEN_SPAN: u32 = 0x37212;
 const PEN_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x3F, 0x52, 0x2C, 0x55, 0x90, 0x6E];
 /// Hypercall that replaces the first instruction of the pen span routine.
 const PEN_SPAN_HYPERCALL: [u8; 2] = [0xFE, 0x8C];
+
+// The system error alert box draws a 384×70 box into plane 0 of TVRAM at `$E00000`, with a
+// row step of 128 bytes fixed in its code. On an extended screen, the instructions that touch
+// the box are replaced with hypercalls that map the box onto the screen.
+/// `text_base` offset of the box's top left TVRAM address, as the alert box computes it.
+const ALERT_BOX_ADDR: u32 = 0x54B16;
+/// `text_base` offset of the box's screen rect, as `GMCenterRect` places it.
+const ALERT_BOX_RECT: u32 = 0x54B2A;
+/// Rows and bytes per row of the box, and the row step of its TVRAM addresses.
+const ALERT_BOX_ROWS: u32 = 70;
+const ALERT_BOX_ROW_BYTES: u32 = 48;
+const ALERT_BOX_STRIDE: u32 = 128;
+/// The 48-byte row copy that saves, draws, and restores the box: its first `MOVE.L (A0)+,(A1)+`.
+const ALERT_ROW_COPY: u32 = 0x4C41E;
+const ALERT_ROW_COPY_CODE: [u8; 8] = [0x22, 0xD8, 0x22, 0xD8, 0x22, 0xD8, 0x22, 0xD8];
+/// The 6-byte icon row copy: `MOVE.L (A0)+,(A1)+` followed by `MOVE.W (A0)+,(A1)+`.
+const ALERT_ICON_COPY: u32 = 0x4C3CC;
+const ALERT_ICON_COPY_CODE: [u8; 8] = [0x22, 0xD8, 0x32, 0xD8, 0xD5, 0xC0, 0x51, 0xC9];
+/// The glyph store in the string drawing routine: `OR.B D4,(A0)+`.
+const ALERT_GLYPH_OR: u32 = 0x4C2CA;
+const ALERT_GLYPH_OR_CODE: [u8; 8] = [0x89, 0x18, 0x51, 0xC8, 0xFF, 0xF4, 0xD6, 0xBC];
+/// Hypercalls that replace those instructions.
+const ALERT_ROW_COPY_HYPERCALL: [u8; 2] = [0xFE, 0x8D];
+const ALERT_ICON_COPY_HYPERCALL: [u8; 2] = [0xFE, 0x8E];
+const ALERT_GLYPH_OR_HYPERCALL: [u8; 2] = [0xFE, 0x8F];
 
 // Pen span context offsets, as the pen setup at `text_base + 0x369A6` fills them.
 const PEN_ROUTINES: u32 = 4;
@@ -297,6 +322,16 @@ impl X68kBus {
         let span = (text_base + TEXT_SPAN) as usize;
         if self.main_ram.get(span..span + TEXT_SPAN_PROLOGUE.len()) == Some(&TEXT_SPAN_PROLOGUE[..]) {
             self.main_ram[span..span + 2].copy_from_slice(&TEXT_SPAN_HYPERCALL);
+        }
+        for (offset, code, hypercall) in [
+            (ALERT_ROW_COPY, ALERT_ROW_COPY_CODE, ALERT_ROW_COPY_HYPERCALL),
+            (ALERT_ICON_COPY, ALERT_ICON_COPY_CODE, ALERT_ICON_COPY_HYPERCALL),
+            (ALERT_GLYPH_OR, ALERT_GLYPH_OR_CODE, ALERT_GLYPH_OR_HYPERCALL),
+        ] {
+            let addr = (text_base + offset) as usize;
+            if self.main_ram.get(addr..addr + code.len()) == Some(&code[..]) {
+                self.main_ram[addr..addr + 2].copy_from_slice(&hypercall);
+            }
         }
         // Likewise, every guest shape fill reaches planar bitmaps one row at a time.
         let span = (text_base + PEN_SPAN) as usize;
@@ -1072,6 +1107,106 @@ impl X68kBus {
         }
         state.a[7] = stack;
         state.pc = entry.wrapping_add(4);
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// Maps an address in the alert box's TVRAM window onto plane 0 of the extended screen.
+    fn alert_box_screen_addr(&self, addr: u32) -> Option<u32> {
+        if !self.is_ext_tvram_active() {
+            return None;
+        }
+        let text_base = self.native_gm_text_base?;
+        let offset = addr.wrapping_sub(self.peek_u32(text_base + ALERT_BOX_ADDR)?);
+        let (row, column) = (offset / ALERT_BOX_STRIDE, offset % ALERT_BOX_STRIDE);
+        if row >= ALERT_BOX_ROWS || column >= ALERT_BOX_ROW_BYTES {
+            return None;
+        }
+        let left = self.peek_u16(text_base + ALERT_BOX_RECT)? as u32;
+        let top = self.peek_u16(text_base + ALERT_BOX_RECT + 2)? as u32;
+        let line = self.ext_tvram_row_bytes as u32;
+        Some(EXT_TVRAM_BASE + (top + row) * line + (left >> 4) * 2 + column)
+    }
+
+    /// Reads a byte as the alert box sees it: its box from the extended screen, anything else
+    /// from the bus.
+    fn alert_box_read(&mut self, addr: u32) -> u8 {
+        match self.alert_box_screen_addr(addr) {
+            Some(screen) => self.peek_u8(screen).unwrap_or(0),
+            None => Bus::read_u8(self, addr, true).unwrap_or(0),
+        }
+    }
+
+    fn alert_box_write(&mut self, addr: u32, value: u8) {
+        match self.alert_box_screen_addr(addr) {
+            Some(screen) => self.store_plane_byte(screen, value),
+            None => {
+                let _ = Bus::write_u8(self, addr, value, true);
+            }
+        }
+    }
+
+    /// Copies `len` bytes from `A0` to `A1` for the alert box, advancing both, and sets the flags
+    /// of the last `MOVE` of `size` bytes.
+    fn alert_box_copy(&mut self, state: &mut CpuState, len: u32, size: u32) {
+        let mut last = 0u32;
+        for i in 0..len {
+            let value = self.alert_box_read(state.a[0].wrapping_add(i));
+            self.alert_box_write(state.a[1].wrapping_add(i), value);
+            last = (last << 8) | value as u32;
+        }
+        state.a[0] = state.a[0].wrapping_add(len);
+        state.a[1] = state.a[1].wrapping_add(len);
+        let sign = 1u32 << (size * 8 - 1);
+        let last = if size == 4 { last } else { last & ((1 << (size * 8)) - 1) };
+        state.set_flag(SR_N, last & sign != 0);
+        state.set_flag(SR_Z, last == 0);
+        state.set_flag(SR_V, false);
+        state.set_flag(SR_C, false);
+    }
+
+    /// Hypercall over the first `MOVE.L (A0)+,(A1)+` of the alert box's 48-byte row copy. On an
+    /// extended screen it copies the whole row and returns, since every instruction of the
+    /// routine may touch the box; otherwise it performs the one instruction.
+    pub(crate) fn hypercall_alert_row_copy(&mut self, state: &mut CpuState) -> TrapResult {
+        let entry = state.ir_pc;
+        if self.is_ext_tvram_active() && self.native_gm_text_base.is_some() {
+            self.alert_box_copy(state, ALERT_BOX_ROW_BYTES, 4);
+            let return_address = Bus::read_u32(self, state.a[7], true).unwrap_or(0);
+            state.a[7] = state.a[7].wrapping_add(4);
+            state.pc = return_address;
+        } else {
+            self.alert_box_copy(state, 4, 4);
+            state.pc = entry.wrapping_add(2);
+        }
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// Hypercall over the `MOVE.L (A0)+,(A1)+` that starts each 6-byte icon row of the alert box.
+    /// On an extended screen it also performs the `MOVE.W (A0)+,(A1)+` after it.
+    pub(crate) fn hypercall_alert_icon_copy(&mut self, state: &mut CpuState) -> TrapResult {
+        let entry = state.ir_pc;
+        if self.is_ext_tvram_active() && self.native_gm_text_base.is_some() {
+            self.alert_box_copy(state, 4, 4);
+            self.alert_box_copy(state, 2, 2);
+            state.pc = entry.wrapping_add(4);
+        } else {
+            self.alert_box_copy(state, 4, 4);
+            state.pc = entry.wrapping_add(2);
+        }
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// Hypercall over the alert box's glyph store, `OR.B D4,(A0)+`.
+    pub(crate) fn hypercall_alert_glyph_or(&mut self, state: &mut CpuState) -> TrapResult {
+        let addr = state.a[0];
+        let value = self.alert_box_read(addr) | state.d[4] as u8;
+        self.alert_box_write(addr, value);
+        state.a[0] = addr.wrapping_add(1);
+        state.set_flag(SR_N, value & 0x80 != 0);
+        state.set_flag(SR_Z, value == 0);
+        state.set_flag(SR_V, false);
+        state.set_flag(SR_C, false);
+        state.pc = state.ir_pc.wrapping_add(2);
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -2467,6 +2602,45 @@ mod tests {
         write_u32(&mut bus, STACK + 4, 0x0100_0001); // x = 256 is outside
         bus.handle_native_gm(&mut state, GM_GET_PIXEL);
         assert!(state.d[0] == 0 && state.flag(SR_Z));
+    }
+
+    #[test]
+    fn maps_the_alert_box_onto_plane_0_of_the_extended_screen() {
+        let (mut bus, mut state) = test_bus([0, 0, 0, 0]);
+        const BOX: u32 = 0x00E0_1000;
+        write_u32(&mut bus, TEXT_BASE + ALERT_BOX_ADDR, BOX);
+        write_u16(&mut bus, TEXT_BASE + ALERT_BOX_RECT, 16); // left: byte 2
+        write_u16(&mut bus, TEXT_BASE + ALERT_BOX_RECT + 2, 2); // top
+        let screen = |bus: &X68kBus, row: usize, byte: usize| bus.ext_tvram.as_ref().unwrap()[row * ROW_BYTES + byte];
+
+        // A glyph byte ORs into box row 1, byte 3.
+        state.a[0] = BOX + ALERT_BOX_STRIDE + 3;
+        state.d[4] = 0x81;
+        state.ir_pc = 0x3000;
+        bus.hypercall_alert_glyph_or(&mut state);
+        assert_eq!(screen(&bus, 3, 5), 0x81);
+        assert_eq!((state.a[0], state.pc), (BOX + ALERT_BOX_STRIDE + 4, 0x3002));
+
+        // An icon row copies six bytes from Main RAM into box row 2 and skips the MOVE.W.
+        const ICON: u32 = 0x2000;
+        for i in 0..6 {
+            bus.main_ram_mut()[(ICON + i) as usize] = 0x10 + i as u8;
+        }
+        state.a[0] = ICON;
+        state.a[1] = BOX + 2 * ALERT_BOX_STRIDE;
+        bus.hypercall_alert_icon_copy(&mut state);
+        let row: Vec<u8> = (2..8).map(|byte| screen(&bus, 4, byte)).collect();
+        assert_eq!(row, [0x10, 0x11, 0x12, 0x13, 0x14, 0x15]);
+        assert_eq!((state.a[0], state.a[1], state.pc), (ICON + 6, BOX + 2 * ALERT_BOX_STRIDE + 6, 0x3004));
+
+        // A row copy saves a whole box row to Main RAM and returns.
+        const SAVE: u32 = 0x2100;
+        write_u32(&mut bus, STACK, 0x4000);
+        state.a[0] = BOX + 2 * ALERT_BOX_STRIDE;
+        state.a[1] = SAVE;
+        bus.hypercall_alert_row_copy(&mut state);
+        assert_eq!(bus.main_ram()[SAVE as usize..SAVE as usize + 6], [0x10, 0x11, 0x12, 0x13, 0x14, 0x15]);
+        assert_eq!((state.pc, state.a[7]), (0x4000, STACK + 4));
     }
 
     #[test]

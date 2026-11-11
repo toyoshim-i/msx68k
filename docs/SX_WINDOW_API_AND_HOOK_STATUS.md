@@ -746,7 +746,7 @@ There are **exactly 13 occurrences of `$00E00000`** and **3 occurrences of `$00E
 | **`text_base + 0x133E3`** | Fast TVRAM Screen Clear | `LEA ($00E00000).L, A0` inside CRTC simultaneous multi-write clear loop. |
 | **`text_base + 0x2F22B`** | `GMCalcBitmap` (`0x2F120`) | Default TVRAM Plane 0 base pointer assigned to `BitMap.baseAddr` (+0x0A). |
 | **`text_base + 0x2F31F`** | `GMNewBits` (`0x2F1F6`) | Default TVRAM Plane 0 base pointer assigned to newly created screen BitMaps. |
-| **`text_base + 0x4C011`** | Panic Alert Box (`0x4BFC0`) | Emergency crash dialog writer targeting Plane 0 framebuffer directly. |
+| **`text_base + 0x4C01E`** | System Error Alert Box (`0x4BFC4`) | Emergency crash dialog writer targeting Plane 0 framebuffer directly. |
 | **`text_base + 0x55282`** | `ActiveScreenModeRecord` | Mode 3 (`768×512`) active screen `baseAddr` in data segment (`0x55278 + 0x0A`). |
 | **`text_base + 0x55298`** | Default Screen `Bitmap` | Master screen BitMap template `baseAddr` (`0x5528E + 0x0A`). |
 | **`text_base + 0x55300`** | Virtual Screen Mode 0 | 256×256 Low-Res TVRAM `baseAddr` in mode table (`0x552F6 + 0x0A`). |
@@ -923,6 +923,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A180`**, **`$A182`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMCopyMask`, `GMPlotImg` | **`[x] Hooked`** | **Native Masked Copy**. A source narrower than the mask stays on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x381FE` | `48 E7 1F 78 4A 28 00 28` | Text span routine (no A-Line API) | **`[x] Hooked`** | **Native Text Span**: every text row, including `IFM.X` output, is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_FONTS.md](NATIVE_FONTS.md). |
 | **`$FE8C`** | `SYS/FSX.X`<br/>`text_base + 0x37212` | `48 E7 3F 52 2C 55 90 6E` | Pen span routine (no A-Line API) | **`[x] Hooked`** | **Native Pen Span**: every row of a guest shape fill (lines, ovals, rounded rects, arcs, polygons, regions) is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
+| **`$FE8D`**..**`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x4C41E`, `+ 0x4C3CC`, `+ 0x4C2CA` | `22 D8 22 D8`, `22 D8 32 D8`, `89 18 51 C8` | System error alert box (TRAP #14) | **`[x] Hooked`** | **Alert Box on Extended Screens**: the three instructions that touch the box are mapped onto plane 0 of the extended screen. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17E`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMScroll` | **`[x] Hooked`** | **Native Scroll**. Update regions that are not rectangles stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17A`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRgn` | **`[x] Hooked`** | **Native Region Frame**. A 0×0 pen on a shaped region stays on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A1A3`**, **`$A1A4`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMInvertRect`, unnamed marching frame | **`[x] Hooked`** | **Native Dashed Frames**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |

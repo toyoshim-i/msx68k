@@ -33,6 +33,12 @@ pub enum HypercallId {
     /// Native replacement of the `SYS/FSX.X` pen span routine, patched over its first
     /// instruction.
     GmPenSpan = 0xFE8C,
+    /// The 48-byte row copy of the `SYS/FSX.X` system error alert box.
+    AlertRowCopy = 0xFE8D,
+    /// The 6-byte icon row copy of the alert box.
+    AlertIconCopy = 0xFE8E,
+    /// The glyph store of the alert box.
+    AlertGlyphOr = 0xFE8F,
 }
 
 impl HypercallId {
@@ -49,6 +55,9 @@ impl HypercallId {
             0xFE88 => Some(Self::SxSetScreenMode),
             0xFE8B => Some(Self::GmTextSpan),
             0xFE8C => Some(Self::GmPenSpan),
+            0xFE8D => Some(Self::AlertRowCopy),
+            0xFE8E => Some(Self::AlertIconCopy),
+            0xFE8F => Some(Self::AlertGlyphOr),
             _ => None,
         }
     }
@@ -77,6 +86,9 @@ impl X68kBus {
             HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
             HypercallId::GmTextSpan => self.hypercall_text_span(state),
             HypercallId::GmPenSpan => self.hypercall_pen_span(state),
+            HypercallId::AlertRowCopy => self.hypercall_alert_row_copy(state),
+            HypercallId::AlertIconCopy => self.hypercall_alert_icon_copy(state),
+            HypercallId::AlertGlyphOr => self.hypercall_alert_glyph_or(state),
         }
     }
 
