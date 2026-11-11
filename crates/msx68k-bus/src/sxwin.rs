@@ -325,7 +325,8 @@ impl X68kBus {
         TrapResult::PassToVector
     }
 
-    /// Scans SCSI HDD 0 for `/SYS/MSX68K.CFG` or `/MSX68K.CFG` and applies display configuration.
+    /// Scans SCSI HDD 0 for msx68k's resource library, `/MSX68K.LB` or `/SYS/MSX68K.LB`, and
+    /// applies the screen and wheel settings it holds (see [`crate::sx_settings`]).
     pub fn load_disk_config_if_present(&mut self) {
         let Some(disk) = self.scsi.hdd_data(0) else {
             return;
@@ -373,11 +374,11 @@ impl X68kBus {
             None
         };
 
-        // 1. Try finding MSX68K.CFG in root directory
+        // 1. Try finding MSX68K.LB in root directory
         let mut target_file = find_file(
             &disk[root_dir_off..root_dir_off + root_dir_bytes],
             b"MSX68K  ",
-            b"CFG",
+            b"LB ",
         );
 
         // 2. If not found in root, look for SYS directory and search inside it
@@ -400,7 +401,7 @@ impl X68kBus {
                             target_file = find_file(
                                 &disk[sys_off..sys_off + cluster_bytes],
                                 b"MSX68K  ",
-                                b"CFG",
+                                b"LB ",
                             );
                         }
                     }
@@ -423,54 +424,18 @@ impl X68kBus {
             return;
         }
 
-        let cfg_data = &disk[file_off..file_off + read_len];
-        let mut cfg_w: Option<u32> = None;
-        let mut cfg_h: Option<u32> = None;
-        let mut cfg_fullscreen: Option<bool> = None;
-        let mut wheel = self.wheel_config;
-
-        if let Ok(text) = std::str::from_utf8(cfg_data) {
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("SCREEN_WIDTH=") {
-                    if let Ok(val) = rest.trim().parse::<u32>() {
-                        cfg_w = Some(val);
-                    }
-                } else if let Some(rest) = line.strip_prefix("SCREEN_HEIGHT=") {
-                    if let Ok(val) = rest.trim().parse::<u32>() {
-                        cfg_h = Some(val);
-                    }
-                } else if let Some(rest) = line.strip_prefix("WHEEL_REVERSE=") {
-                    wheel.reverse = rest.trim() == "1" || rest.trim().eq_ignore_ascii_case("true");
-                } else if let Some(rest) = line.strip_prefix("WHEEL_CLICKS=") {
-                    if let Ok(val) = rest.trim().parse::<u8>() {
-                        wheel.clicks_per_notch = val;
-                    }
-                } else if let Some(rest) = line.strip_prefix("WHEEL_TRACKPAD_PIXELS=") {
-                    if let Ok(val) = rest.trim().parse::<u16>() {
-                        wheel.trackpad_pixels = val;
-                    }
-                } else if let Some(rest) = line.strip_prefix("FULLSCREEN=") {
-                    let val = rest.trim();
-                    if val == "1" || val.eq_ignore_ascii_case("true") {
-                        cfg_fullscreen = Some(true);
-                    } else if val == "0" || val.eq_ignore_ascii_case("false") {
-                        cfg_fullscreen = Some(false);
-                    }
-                }
-            }
-        }
-
-        self.wheel_config = wheel.clamped();
-
-        if cfg_fullscreen == Some(true) {
+        let Some(settings) =
+            crate::sx_settings::Settings::from_library(&disk[file_off..file_off + read_len])
+        else {
+            return;
+        };
+        self.wheel_config = settings.wheel;
+        if settings.fullscreen {
             self.fullscreen_mode = true;
             self.target_resolution = Some(self.host_native_resolution);
-        } else if let (Some(w), Some(h)) = (cfg_w, cfg_h) {
-            if w >= 256 && h >= 256 {
-                self.fullscreen_mode = false;
-                self.target_resolution = Some((w, h));
-            }
+        } else if settings.screen.0 >= 256 && settings.screen.1 >= 256 {
+            self.fullscreen_mode = false;
+            self.target_resolution = Some(settings.screen);
         }
     }
 

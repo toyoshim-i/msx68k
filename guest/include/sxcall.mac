@@ -60,6 +60,11 @@ TSGetEvent		.equ	$A358	; Yield and retrieve event (EMPostYield)
 EMPostYield		.equ	$A358	; Compatibility alias
 TSPostEventTsk		.equ	$A35A
 TSGetID			.equ	$A360	; Get current task / app RefCon
+TSResNew		.equ	$A4A0	; Create an empty resource map for the task's resource chain
+TSResOpen		.equ	$A4A1	; Open a resource file for the task (name ptr) -> A0 map
+TSResClose		.equ	$A4A2	; Save the current resource map to a file and close it (name ptr)
+TSRscAdd		.equ	$A4AA	; Add a resource (type, id.w, handle, size)
+TSRscRemove		.equ	$A4AC	; Remove a resource (type, id.w)
 GetAppRefCon		.equ	$A360	; Compatibility alias
 SXCallWindM		.equ	$A3A2	; Window drag, close-box & content event processor
 WDoEvent		.equ	$A3A2	; Compatibility alias

@@ -12,6 +12,7 @@ pub mod peripherals;
 pub mod scsi;
 pub mod sx_control_panel;
 pub mod sx_resource;
+pub mod sx_settings;
 pub mod sx_wheel;
 pub mod sxwin;
 pub mod timing;

@@ -51,7 +51,7 @@ flowchart LR
   - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).
   - `D1.W == $0150, D2.L == 0`: Host Native Fullscreen 1:1 mode.
   - `D1.W == $0150, D2.L > 0`: Windowed 1:1 mode (`w = D2.L >> 16, h = D2.L & $FFFF`).
-  - Active settings are automatically persisted to `A:\SYS\MSX68K.CFG` and battery-backed SRAM `$ED007E` (`0x80 | 0x30 = 0xB0`).
+  - The mode is kept in battery-backed SRAM `$ED007E` (`0x80 | 0x30 = 0xB0`), and `SXMODE.X` saves the resolution in msx68k's resource library `A:\SYS\MSX68K.LB`.
 - On MC68030 VMs, `BusTrapHandler::on_trap` also answers **`IOCS _SYS_STAT` (`D0.B == $AC`)**, which only the X68030 IPL ROM provides, while its IOCS table entry is the ROM's handler for undefined calls. See [CPU_AND_BUS.md](CPU_AND_BUS.md) Section 7.3.
 - A native replacement stub in 68k memory or ROM requires only **4 bytes (2 words)**:
   ```text

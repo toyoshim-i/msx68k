@@ -101,7 +101,8 @@ fn settings_item_sets_the_wheel_and_saves_it() {
     };
     assert_eq!(vm.bus.wheel_config, chosen);
 
-    // The app saved the settings in A:\SYS\MSX68K.CFG, which the next boot reads.
+    // The app saved the settings in its resource library, A:\SYS\MSX68K.LB, which the next
+    // boot reads.
     vm.bus.wheel_config = WheelConfig::default();
     vm.bus.load_disk_config_if_present();
     assert_eq!(vm.bus.wheel_config, chosen);

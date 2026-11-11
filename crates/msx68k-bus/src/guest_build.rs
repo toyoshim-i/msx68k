@@ -343,8 +343,9 @@ mod tests {
                 _pc: u32,
             ) -> msx68k_cpu::TrapResult {
                 match opcode {
-                    0xA352 => {
-                        // TSExit ($A352)
+                    0xA352 | 0xA4A0 | 0xA4A1 | 0xA4A2 | 0xA4AA | 0xA4AC => {
+                        // TSExit ($A352), and the resource calls that save the settings:
+                        // TSResNew, TSResOpen, TSResClose, TSRscAdd, TSRscRemove
                         msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
                     }
                     _ => panic!("Unhandled mock SXCALL: 0x{:04X}", opcode),
@@ -482,10 +483,11 @@ mod tests {
                     }
                     0xA131 | 0xA144 | 0xA147 | 0xA148 | 0xA18B | 0xA18D | 0xA18E | 0xA207 | 0xA16E | 0xA172
                     | 0xA173 | 0xA190 | 0xA1A3 | 0xA1FE | 0xA358 | 0xA20D | 0xA20E | 0xA1FC
-                    | 0xA352 => {
+                    | 0xA352 | 0xA4A0 | 0xA4A1 | 0xA4A2 | 0xA4AA | 0xA4AC => {
                         // GMSetGraph, GMPenMode, GMForeColor, GMBackColor, GMFontKind, GMFontMode, GMFontSize,
                         // WMShow, GMMove, GMFrameRect, GMFillRect, GMDrawStrL, GMInvertRect,
-                        // WMSelect, TSGetEvent, WMUpdate, WMUpdtOver, WMDispose, TSExit
+                        // WMSelect, TSGetEvent, WMUpdate, WMUpdtOver, WMDispose, TSExit, and the
+                        // resource calls that save the settings
                         msx68k_cpu::TrapResult::Handled { extra_cycles: 4 }
                     }
                     0xA357 => {

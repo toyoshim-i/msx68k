@@ -69,7 +69,8 @@ const CDEF: u32 = u32::from_be_bytes(*b"CDEF");
 const HORIZONTAL_SCROLL_BAR: i16 = 0x40;
 const VERTICAL_SCROLL_BAR: i16 = 0x41;
 
-/// User settings for the wheel, kept in `MSX68K.CFG` and set by the guest settings app.
+/// User settings for the wheel, kept in `MSX68K.LB` ([`crate::sx_settings`]) and set by the
+/// guest settings app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WheelConfig {
     /// Scrolls the other way, as with "natural" scrolling.

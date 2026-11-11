@@ -1,6 +1,9 @@
 //! Tests for Beyond 1K×1K (Approach B): `IOCS _CRTMOD` Mode `$50`,
-//! Extended Planar Framebuffer at `$1000_0000` (`EXT_TVRAM_BASE`), and `MSX68K.CFG` disk config parsing.
+//! Extended Planar Framebuffer at `$1000_0000` (`EXT_TVRAM_BASE`), and the settings in
+//! `MSX68K.LB` on disk.
 
+use msx68k_bus::sx_settings::Settings;
+use msx68k_bus::sx_wheel::WheelConfig;
 use msx68k_bus::{Bus, EXT_TVRAM_BASE, X68kVm};
 
 #[test]
@@ -122,10 +125,10 @@ fn test_iocs_crtmod_mode_50_queries_and_mode_switches() {
 }
 
 #[test]
-fn test_disk_config_parser_applies_fullscreen_and_custom_resolution() {
+fn test_disk_settings_apply_the_resolution_and_wheel() {
     let mut vm = X68kVm::new_app_vm();
 
-    // Synthesize a minimal SCSI HDD image with MSX68K.CFG in root
+    // Synthesize a minimal SCSI HDD image with MSX68K.LB in root
     let total_bytes = 8 * 1024 * 1024;
     let mut disk = vec![0u8; total_bytes];
     let partition_start_rec = 32u32;
@@ -148,14 +151,25 @@ fn test_disk_config_parser_applies_fullscreen_and_custom_resolution() {
     let root_off = boot_off + (1 + 2 * 64) * 1024;
     let data_start_off = root_off + 1024 * 32;
 
-    // Write MSX68K.CFG data to Cluster 2 (data_start_off)
-    let cfg_content = b"SCREEN_WIDTH=2560\nSCREEN_HEIGHT=1440\nFULLSCREEN=0\n";
+    // Write MSX68K.LB, as the settings app saves it, to Cluster 2 (data_start_off)
+    let wheel = WheelConfig {
+        reverse: true,
+        clicks_per_notch: 2,
+        trackpad_pixels: 80,
+    };
+    let cfg_content = Settings {
+        screen: (2560, 1440),
+        fullscreen: false,
+        wheel,
+    }
+    .to_library();
+    let cfg_content = cfg_content.as_slice();
     disk[data_start_off..data_start_off + cfg_content.len()].copy_from_slice(cfg_content);
 
-    // Write root directory entry for MSX68K.CFG
+    // Write root directory entry for MSX68K.LB
     let entry_off = root_off;
     disk[entry_off..entry_off + 8].copy_from_slice(b"MSX68K  ");
-    disk[entry_off + 8..entry_off + 11].copy_from_slice(b"CFG");
+    disk[entry_off + 8..entry_off + 11].copy_from_slice(b"LB ");
     disk[entry_off + 11] = 0x20;
     disk[entry_off + 26..entry_off + 28].copy_from_slice(&2u16.to_le_bytes()); // Cluster 2
     disk[entry_off + 28..entry_off + 32].copy_from_slice(&(cfg_content.len() as u32).to_le_bytes());
@@ -172,4 +186,5 @@ fn test_disk_config_parser_applies_fullscreen_and_custom_resolution() {
 
     assert_eq!(vm.bus.target_resolution, Some((2560, 1440)));
     assert!(!vm.bus.fullscreen_mode);
+    assert_eq!(vm.bus.wheel_config, wheel);
 }

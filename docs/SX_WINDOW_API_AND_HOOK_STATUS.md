@@ -417,16 +417,8 @@ To eliminate collisions with Sharp firmware (`0..27`) and XEiJ emulator extensio
   - **Bit 5 (`0x20`)**: msx68k Extended Mode indicator flag. Ignored by `SYS/FSX.X`'s `ANDI.W #$1F` mask!
   - **Bits 0..4 (`16`)**: Preserves base CRT Mode 16 identity for all unpatched firmware paths.
 
-#### 4. Disk-Based Extended Configuration File (`A:\SYS\MSX68K.CFG`):
-Because the SX-Window SRAM partition contains only 16 bytes (`$ED0072..$ED0081`), detailed settings (custom resolutions like 1920×1080, fullscreen preference, integer scaling vs bilinear filtering, audio latency) are stored in an ASCII configuration file on the boot drive at **`A:\SYS\MSX68K.CFG`**:
-```ini
-[display]
-mode=extended
-width=1024
-height=1024
-fullscreen=0
-aspect_ratio=1:1
-```
+#### 4. Disk-Based Settings (`A:\SYS\MSX68K.LB`):
+Because the SX-Window SRAM partition contains only 16 bytes (`$ED0072..$ED0081`), detailed settings (custom resolutions like 1920×1080, fullscreen preference, mouse wheel) are kept the SX-Window way: as resource `'MX68'` ID 0 of msx68k's own resource library **`A:\SYS\MSX68K.LB`** (Section 7.3).
 This guarantees that resolution preferences persist cleanly across cold boots without crowding SRAM or altering standard Human68k system files.
 
 ---
@@ -873,21 +865,24 @@ When `apply_screen_resolution` switches between standard TVRAM and Extended TVRA
   - Dynamically binds either `bus.tvram()` or `bus.ext_tvram()` via `bus.active_tvram()`.
   - Passes dynamic strides `(row_bytes: u32, plane_bytes: u32)` to WGSL render and presentation pipelines (`shader.wgsl` and `present.wgsl`) via uniform buffers, enabling direct GPU conversion of planar 16-color buffers of any resolution to 32-bit RGBA without CPU copy overhead.
 
-#### 5. Disk Configuration File Persistence (`A:\SYS\MSX68K.CFG`):
+#### 5. Disk Settings Persistence (`A:\SYS\MSX68K.LB`):
 To persist display resolutions across cold boots and emulator restarts:
-- **Format** (ASCII text):
-  ```text
-  # MSX68K Display Configuration
-  SCREEN_WIDTH=1920
-  SCREEN_HEIGHT=1080
-  FULLSCREEN=0
-  ```
-- **Guest Writer (`SXMODE.X`)**: When a new resolution or fullscreen toggle is applied in `SXMODE.X`, it creates or overwrites `A:\SYS\MSX68K.CFG` using standard Human68k DOS calls (`_CREATE` `$FF3C`, `_WRITE` `$FF40`, `_CLOSE` `$FF3E`), guarded against execution in pre-boot test environments.
+- **Format**: resource `'MX68'` ID 0 of the resource library `A:\SYS\MSX68K.LB` (format in Section 9.2), a record of seven big-endian words (`crates/msx68k-bus/src/sx_settings.rs`):
+
+| Offset | Content |
+| :---: | :--- |
+| `+0` | Version (1) |
+| `+2`, `+4` | Screen width, height |
+| `+6` | Screen flags (bit 0: host native fullscreen) |
+| `+8` | Wheel flags (bit 0: reverse) |
+| `+10` | Arrow clicks per wheel notch (1 to 10) |
+| `+12` | Trackpad pixels per wheel notch (5 to 400) |
+
+- **Guest Writer (`SXMODE.X`)**: When a setting changes in its window, `SXMODE.X` opens the library with `TSResOpen` (`$A4A1`, or starts one with `TSResNew` `$A4A0` if there is none), replaces the record with `TSRscRemove` (`$A4AC`) and `TSRscAdd` (`$A4AA`, passing a pseudo-handle to its record), and writes the library with `TSResClose` (`$A4A2`), as SX-Window applications keep their settings in resources. From the command line, where SX-Window may not be running, a resolution change is not saved.
 - **Boot-Time Parser (`load_disk_config_if_present`)**:
   - During VM initialization, `X68kBus::load_disk_config_if_present()` inspects SCSI HDD 0's partition table and FAT filesystem.
-  - Searches root directory `\MSX68K.CFG` and subdirectory `\SYS\MSX68K.CFG`.
-  - Parses `SCREEN_WIDTH`, `SCREEN_HEIGHT`, and `FULLSCREEN` keys.
-  - Applies the target resolution and fullscreen state before `HUMAN.SYS` or `SYS/FSX.X` boot, allowing seamless booting directly into 1920×1080 or native fullscreen mode without manual reconfiguration.
+  - Searches root directory `\MSX68K.LB` and subdirectory `\SYS\MSX68K.LB`.
+  - Reads the record and applies the target resolution, fullscreen state, and wheel settings before `HUMAN.SYS` or `SYS/FSX.X` boot, allowing seamless booting directly into 1920×1080 or native fullscreen mode without manual reconfiguration.
 
 ---
 
@@ -909,7 +904,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$FE85`** | Virtual SCSI ROM<br/>`$FC0068` | ROM Stub | `ScsiIocsDispatch` | **`[x] Hooked`** | **`IOCS $F5` (`_SCSIDRV`) Bridge**: Handles SCSI command packets (read, write, inquiry, capacity, ready) directly from guest space. |
 | **`$FE86`** | Virtual SCSI ROM<br/>`$FC006C` | ROM Stub | `ScsiDriverStrategy` | **`[x] Hooked`** | **Block Driver Strategy**: the `romdb` driver header points its strategy entry here. Latches the request packet pointer (`A5`). |
 | **`$FE87`** | Virtual SCSI ROM<br/>`$FC0070` | ROM Stub | `ScsiDriverInterrupt` | **`[x] Hooked`** | **Block Driver Interrupt**: Executes Human68k commands: 0 (INIT), 1 (MEDIA CHECK), 2 (BUILD BPB), 4 (READ), 5 (MEDIA SENSE), 8/9 (WRITE). |
-| **`IOCS $10` (`_CRTMOD` `$50`)** | Trap #15 Handler<br/>`D0 = $10, D1 = $0150` | IOCS Vector $10 | `IOCS _CRTMOD Mode $50` | **`[x] Hooked`** | **Dynamic Display Resolution Query & Mode Switch**: Standardized high-level resolution interface. Query (`D2 = -1`): returns current mode (`$50` or 16) in `D0`, `(W << 16) \| H` in `D1`, fullscreen flag in `D2`, host native `(W << 16) \| H` in `D3`. Apply (`D2 = 0` for host fullscreen, `D2 = (W << 16) \| H` for windowed): applies resolution (up to 3840×2160), updates SRAM `$ED007E = $B0`, updates `_CRT_MODE` (`$093C`), and persists to `A:\SYS\MSX68K.CFG`. |
+| **`IOCS $10` (`_CRTMOD` `$50`)** | Trap #15 Handler<br/>`D0 = $10, D1 = $0150` | IOCS Vector $10 | `IOCS _CRTMOD Mode $50` | **`[x] Hooked`** | **Dynamic Display Resolution Query & Mode Switch**: Standardized high-level resolution interface. Query (`D2 = -1`): returns current mode (`$50` or 16) in `D0`, `(W << 16) \| H` in `D1`, fullscreen flag in `D2`, host native `(W << 16) \| H` in `D3`. Apply (`D2 = 0` for host fullscreen, `D2 = (W << 16) \| H` for windowed): applies resolution (up to 3840×2160), updates SRAM `$ED007E = $B0`, and updates `_CRT_MODE` (`$093C`). `SXMODE.X` saves the resolution in `A:\SYS\MSX68K.LB`. |
 | **`Patch-ModeTable`** | `SYS/FSX.X`<br/>`text_base + 0x55338` | `03 00 02 00 00 E0 00 00 00 80` | Screen Mode Table (Mode 3) | **`[ ] Planned (Phase 2A)`** | **Hi-Res Viewport Patch**: Overwrites Mode 3 width (`768`) and height (`512`) with host display dimensions (e.g. `1280×720`). |
 | **`$A077`** | `SYS/FSX.X`<br/>`text_base + 0x04FEB6` | `2F 10 61 92` | Mouse Manager: `MSBoundSet` | **`[ ] Planned (Phase 2A)`** | **Mouse Bounding Box Hook**: Intercepts guest desktop boundary configuration to maintain host aspect ratio and screen boundaries. |
 | **`$A1C4`** | `SYS/FSX.X`<br/>`text_base + 0x02F1A4` | `4E 56 FF C0` | Graph Man: `GMGetScrnSize` | **`[ ] Planned (Phase 2A)`** | **Screen Dimension Query Hook**: Returns dynamic host window dimensions `(Width, Height)` in `D0`. |
@@ -988,8 +983,7 @@ The msx68k settings app: a hybrid CLI and interactive SX-Window GUI application 
   - Preset 5 (`$064004B0`): `1600 x 1200` (UXGA 4:3)
   - Preset 6 (`$07800438`): `1920 x 1080` (Full HD 16:9)
   - Preset 7 (`$00000000`): `Native Full` (Host Native 1:1 Fullscreen)
-- **Configuration Persistence (`A:\SYS\MSX68K.CFG`)**:
-  - Automatically generates `A:\SYS\MSX68K.CFG` using standard Human68k DOS calls (`_CREATE` `$FF3C`, `_WRITE` `$FF40`, `_CLOSE` `$FF3E`), guarded by verifying that DOS vectors are initialized (`$002C.w != 0`).
+- **Settings Persistence (`A:\SYS\MSX68K.LB`)**: the settings window saves its settings as a resource of msx68k's resource library (Section 5.6, item 5).
 - **CLI Mode**:
   - Reads command line argument buffer from `A3` (Human68k ABI: `0(A3)` is length byte, `1(A3)` is argument characters).
   - Supported CLI options:
@@ -1024,13 +1018,13 @@ The msx68k settings app: a hybrid CLI and interactive SX-Window GUI application 
     - `appQuitEvt` (12): cleans up via `WMDispose` (`$A1FC`) and `TSExit` (`$A352`).
     - `mouseDown` (1): brings window to front (`WMSelect` `$A1FE`), sets port (`GMSetGraph` `$A131`), and delegates window drag, close box, and content testing to `SXCallWindM` (`$A3A2`):
       - Close box confirmed (`D0 == 7`): calls `WMDispose` (`$A1FC`), `TSExit` (`$A352`), and exits cleanly via `DOS _EXIT2`.
-      - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit (looping across 8 button bounds), invokes `IOCS _CRTMOD` (`$10, $0150`) to dynamically resize the desktop in real time, persists to `A:\SYS\MSX68K.CFG`, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
+      - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit (looping across 8 button bounds), invokes `IOCS _CRTMOD` (`$10, $0150`) to dynamically resize the desktop in real time, saves the settings in `A:\SYS\MSX68K.LB`, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
 - **Wheel Settings (right half)**: buttons from the `wheel_widgets` table (rectangle, caption offset, setting, value), so the code stays position independent:
   - `Wheel direction:` `Normal` / `Reverse`.
   - `Lines per notch:` `1` to `5` arrow clicks per wheel notch.
   - `Trackpad speed:` `Slow` (80 host pixels per notch), `Medium` (40), `Fast` (20).
   - The current values come from `HYPER_SX_WHEEL_CONFIG` (`$FE89`, `D0.W = 0`) and are inverted with the same XOR fill; a click sets them with `D0.W = 1` and saves the file.
-- **Configuration File**: `A:\SYS\MSX68K.CFG` holds `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `FULLSCREEN`, `WHEEL_REVERSE` (0 or 1), `WHEEL_CLICKS` (1 to 10), and `WHEEL_TRACKPAD_PIXELS` (5 to 400), one `KEY=value` per line. The host reads it at boot (`load_disk_config_if_present`). HAS-format strings take no escapes, so the path is written with single backslashes.
+- **Settings**: kept in msx68k's own resource library `A:\SYS\MSX68K.LB` as resource `'MX68'` ID 0 (Section 5.6, item 5), which the host reads at boot (`load_disk_config_if_present`). HAS-format strings take no escapes, so the path is written with single backslashes.
 - **Console Fallback Mode (Launched without arguments outside SX-Window)**:
   - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> ... -> 0`) and exits cleanly.
 - **SCSI HDD Installation & File Layout**:
@@ -1178,7 +1172,7 @@ When resolution expands live:
      - Boots `SXWIN31.HDS`, spawns `SXMODE.X` Task 6 via `TSFock` (`$A351`), and clicks Button 2 to switch resolution to 1024×1024 live.
      - Simulates dragging `SXMODE.X`'s window titlebar across the 768×512 boundary to `(730, 565)`.
      - Verifies `SXMODE->outside` and `SXMODE->inside` span past 768 and 512 with `visRgn` remaining unclipped at `(0, 0, 220, 276)` (`size = 12`).
-     - Verifies configuration persistence: checks that `A:\SYS\MSX68K.CFG` exists on the SCSI HDD and SRAM mode byte is `$B0`.
+     - Verifies settings persistence: reads the resolution back from `A:\SYS\MSX68K.LB` on the SCSI HDD, and checks that the SRAM mode byte is `$B0`.
      - Switches to Beyond 1K×1K (1920×1080) live via `IOCS _CRTMOD` (`$10, $0150, D2 = (1920<<16) | 1080`).
      - Verifies `active_resolution() == (1920, 1080)`, `is_ext_tvram_active() == true`, `row_bytes == 240`, `plane_bytes == 259,200`.
      - Drags `SXMODE.X` window past the 1024×1024 boundary to `(1300, 750)`.
@@ -1224,7 +1218,7 @@ A notch clicks 12 or 13 dots from the middle, 9 dots into the bar. `CMCheck` (`$
 - Globals (`text_base +`): active window `0x543CA` (`WMActive`), Event Manager work area `0x543E2` (queue head `+2`, tail `+6`, event mask `+1546`, free list `+1548`), system time `0x549F2`, mouse position `0x549F6`, keyboard state pointer `0x54AA6`, last modifiers `0x54A00`.
 - Entries are taken from the free list like `EMSet` (`$A0A4`) does: `+0` next, `+4` kind `3`, `+6` what, `+8` whom, `+12` when, `+16` where (global `x`, `y`), `+20` modifiers. A left-down and a left-up go in at the arrow.
 - The click is skipped when the bar is hidden or inactive, when the window is hidden, or when another window covers the arrow (outside the window's visible region), so it can never reach another window.
-- The host gives notches from wheel lines, or from every `WHEEL_TRACKPAD_PIXELS` (40 by default) of trackpad scrolling (`msx68k-app`). Each notch becomes `WHEEL_CLICKS` arrow clicks, the other way with `WHEEL_REVERSE` (`WheelConfig`), set in the settings app (Section 7.3).
+- The host gives notches from wheel lines, or from every so many trackpad pixels (40 by default) of scrolling (`msx68k-app`). Each notch becomes the set number of arrow clicks, the other way when reversed (`WheelConfig`), as set in the settings app (Section 7.3).
 
 ---
 

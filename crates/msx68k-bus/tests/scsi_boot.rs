@@ -1163,11 +1163,16 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         eprintln!("[Screenshot Moved] Saved moved SXMODE PNG ({}x{}) to {:?}", wm, hm, moved_path);
     }
 
-    // Verify A:\SYS\MSX68K.CFG was created on the SCSI disk by SXMODE.X
-    let hdd_data = vm.bus.scsi.hdd_data(0).expect("SCSI HDD 0 must be present");
-    // Match a written value, since SXMODE.X itself holds the bare key.
-    let has_cfg = hdd_data.windows(b"SCREEN_WIDTH=1024".len()).any(|w| w == b"SCREEN_WIDTH=1024");
-    assert!(has_cfg, "A:\\SYS\\MSX68K.CFG must be persisted on SCSI HDD by SXMODE.X");
+    // Verify SXMODE.X saved the resolution in A:\SYS\MSX68K.LB on the SCSI disk
+    let saved_target = vm.bus.target_resolution;
+    vm.bus.target_resolution = None;
+    vm.bus.load_disk_config_if_present();
+    assert_eq!(
+        vm.bus.target_resolution,
+        Some((1024, 1024)),
+        "A:\\SYS\\MSX68K.LB must hold the chosen resolution"
+    );
+    vm.bus.target_resolution = saved_target;
     assert_eq!(vm.bus.sram()[0x7E], 0x80 | 0x30, "SRAM crtmode must be $B0 (extended)");
 
     // Switch to Beyond 1K×1K (1920x1080) via IOCS _CRTMOD Mode $50

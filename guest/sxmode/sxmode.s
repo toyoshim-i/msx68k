@@ -78,9 +78,10 @@ apply_dos_cycled:
 	* Fall through to apply_dos_mode
 
 apply_dos_mode:
+	* SX-Window may not be running here, so the change lasts for this session only;
+	* the settings window saves settings.
 	move.w	d1, -(sp)		; Save target mode_idx for _EXIT2
 	bsr	apply_mode_by_index
-	bsr	save_config_file
 	move.w	(sp)+, -(sp)
 	DOS	_EXIT2
 
@@ -115,7 +116,7 @@ skip_gui_spaces:
 
 apply_gui_cli_mode:
 	bsr	apply_mode_by_index
-	bsr	save_config_file
+	bsr	save_settings
 	clr.l	-(sp)
 	SXCALL	TSExit			; $A352
 	clr.w	-(sp)
@@ -299,7 +300,7 @@ next_click_btn:
 
 apply_gui_mode:
 	bsr	apply_mode_by_index
-	bsr	save_config_file
+	bsr	save_settings
 	bsr	draw_window_contents
 	bra	event_loop
 
@@ -325,7 +326,7 @@ wheel_click_loop:
 	lea	wheel_reverse(pc), a0
 	move.w	12(a2), 0(a0, d0.w)
 	bsr	set_wheel_config
-	bsr	save_config_file
+	bsr	save_settings
 	bsr	draw_window_contents
 	bra.s	post_mouse_event
 wheel_click_next:
@@ -619,19 +620,6 @@ set_wheel_config:
 	rts
 
 * -----------------------------------------------------------------------------
-* Helper: append_cfg_line
-* Appends the key at (A1), the decimal value of D0.W, and CR LF at (A0)+
-* -----------------------------------------------------------------------------
-append_cfg_line:
-	move.b	(a1)+, (a0)+
-	bne.s	append_cfg_line
-	subq.l	#1, a0
-	bsr	format_dec_u16
-	move.b	#13, (a0)+
-	move.b	#10, (a0)+
-	rts
-
-* -----------------------------------------------------------------------------
 * Helper: apply_mode_by_index
 * Input: D1.W = mode index (0..7)
 * -----------------------------------------------------------------------------
@@ -648,138 +636,66 @@ apply_mode_by_index:
 	rts
 
 * -----------------------------------------------------------------------------
-* Helper: save_config_file
-* Saves A:\SYS\MSX68K.CFG with SCREEN_WIDTH, SCREEN_HEIGHT, FULLSCREEN
+* Helper: save_settings
+* Saves the screen and wheel settings as resource 'MX68' ID 0 of A:\SYS\MSX68K.LB,
+* the msx68k resource library, which the host reads at boot. Needs SX-Window.
 * -----------------------------------------------------------------------------
-save_config_file:
-	movem.l	d0-d4/a0-a1, -(sp)
+SETTINGS_TYPE	.equ	'MX68'
+SETTINGS_ID	.equ	0
+SETTINGS_VERSION .equ	1
+SETTINGS_SIZE	.equ	14
 
-	* Query active resolution and fullscreen flag via IOCS _CRTMOD
+save_settings:
+	movem.l	d0-d3/a0-a1, -(sp)
+
+	* +0 version, +2 width, +4 height, +6 flags (bit 0 fullscreen)
 	moveq.l	#$10, d0
 	move.w	#$0150, d1
 	moveq.l	#-1, d2
 	trap	#15
-	* D1.L = (w << 16) | h, D2.L = fullscreen (1 or 0)
+	lea	settings_rec(pc), a0
+	move.w	#SETTINGS_VERSION, (a0)+
+	move.l	d1, (a0)+
+	andi.w	#1, d2
+	move.w	d2, (a0)+
 
-	lea	cfg_buf(pc), a0
-
-	* 1. Write "SCREEN_WIDTH="
-	lea	str_cfg_w(pc), a1
-copy_cfg_w:
-	move.b	(a1)+, (a0)+
-	bne.s	copy_cfg_w
-	subq.l	#1, a0
-
-	* Format width (D1 high word)
-	move.l	d1, d0
-	swap	d0
-	bsr	format_dec_u16
-
-	* Append \r\n
-	move.b	#13, (a0)+
-	move.b	#10, (a0)+
-
-	* 2. Write "SCREEN_HEIGHT="
-	lea	str_cfg_h(pc), a1
-copy_cfg_h:
-	move.b	(a1)+, (a0)+
-	bne.s	copy_cfg_h
-	subq.l	#1, a0
-
-	* Format height (D1 low word)
-	move.w	d1, d0
-	bsr	format_dec_u16
-
-	* Append \r\n
-	move.b	#13, (a0)+
-	move.b	#10, (a0)+
-
-	* 3. Write "FULLSCREEN="
-	lea	str_cfg_fs(pc), a1
-copy_cfg_fs:
-	move.b	(a1)+, (a0)+
-	bne.s	copy_cfg_fs
-	subq.l	#1, a0
-
-	* Format fullscreen flag (0 or 1)
-	move.b	d2, d0
-	andi.b	#1, d0
-	addi.b	#'0', d0
-	move.b	d0, (a0)+
-
-	* Append \r\n
-	move.b	#13, (a0)+
-	move.b	#10, (a0)+
-
-	* 4. Wheel settings
+	* +8 wheel flags (bit 0 reverse), +10 clicks per notch, +12 trackpad pixels
 	bsr	query_wheel_config
-	lea	str_cfg_wheel_reverse(pc), a1
-	move.w	wheel_reverse(pc), d0
-	bsr	append_cfg_line
-	lea	str_cfg_wheel_clicks(pc), a1
-	move.w	wheel_clicks(pc), d0
-	bsr	append_cfg_line
-	lea	str_cfg_wheel_pixels(pc), a1
-	move.w	wheel_pixels(pc), d0
-	bsr	append_cfg_line
+	move.w	wheel_reverse(pc), (a0)+
+	move.w	wheel_clicks(pc), (a0)+
+	move.w	wheel_pixels(pc), (a0)
 
-	* Total length = a0 - cfg_buf
-	lea	cfg_buf(pc), a1
-	move.l	a0, d3
-	sub.l	a1, d3			; D3.L = length to write
+	* A pseudo-handle to the record
+	lea	settings_rec(pc), a0
+	lea	settings_handle(pc), a1
+	move.l	a0, (a1)
 
-	* Open/create A:\SYS\MSX68K.CFG using DOS _CREATE ($FF3C)
-	move.w	#$0020, -(sp)		; mode: archive/write
-	pea	cfg_path(pc)		; path
-	DOS	_CREATE			; $FF3C
+	* Open the library, or start an empty one
+	pea	settings_path(pc)
+	SXCALL	TSResOpen		; $A4A1
+	addq.l	#4, sp
+	move.l	a0, d0
+	bne.s	save_settings_open
+	SXCALL	TSResNew		; $A4A0
+save_settings_open:
+	move.w	#SETTINGS_ID, -(sp)
+	move.l	#SETTINGS_TYPE, -(sp)
+	SXCALL	TSRscRemove		; $A4AC
 	addq.l	#6, sp
 
-	tst.l	d0
-	bmi	save_cfg_done		; If failed (D0 < 0), return
-	move.w	d0, d4			; D4.W = file handle
+	move.l	#SETTINGS_SIZE, -(sp)
+	pea	settings_handle(pc)
+	move.w	#SETTINGS_ID, -(sp)
+	move.l	#SETTINGS_TYPE, -(sp)
+	SXCALL	TSRscAdd		; $A4AA
+	lea	14(sp), sp
 
-	* Write buffer using DOS _WRITE ($FF40)
-	move.l	d3, -(sp)		; len
-	pea	cfg_buf(pc)		; buf
-	move.w	d4, -(sp)		; handle
-	DOS	_WRITE			; $FF40
-	lea	10(sp), sp
+	* Write the library and close it
+	pea	settings_path(pc)
+	SXCALL	TSResClose		; $A4A2
+	addq.l	#4, sp
 
-	* Close handle using DOS _CLOSE ($FF3E)
-	move.w	d4, -(sp)		; handle
-	DOS	_CLOSE			; $FF3E
-	addq.l	#2, sp
-
-save_cfg_done:
-	movem.l	(sp)+, d0-d4/a0-a1
-	rts
-
-* -----------------------------------------------------------------------------
-* Helper: format_dec_u16
-* Formats unsigned 16-bit number in D0.W into ASCII decimal at (A0)+
-* -----------------------------------------------------------------------------
-format_dec_u16:
-	movem.l	d1-d3, -(sp)
-	clr.w	d3			; digit count
-fmt_dec_div_loop:
-	andi.l	#$FFFF, d0
-	divu.w	#10, d0
-	swap	d0			; remainder in low word
-	move.w	d0, -(sp)
-	addq.w	#1, d3
-	clr.w	d0
-	swap	d0			; quotient in low word
-	tst.w	d0
-	bne.s	fmt_dec_div_loop
-
-fmt_dec_pop_loop:
-	move.w	(sp)+, d1
-	addi.b	#'0', d1
-	move.b	d1, (a0)+
-	subq.w	#1, d3
-	bne.s	fmt_dec_pop_loop
-
-	movem.l	(sp)+, d1-d3
+	movem.l	(sp)+, d0-d3/a0-a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -978,25 +894,14 @@ str_mode6:
 str_mode7:
 	.dc.b	11, "Native Full", 0, 0, 0, 0
 
-str_cfg_w:
-	.dc.b	"SCREEN_WIDTH=", 0
-str_cfg_h:
-	.dc.b	"SCREEN_HEIGHT=", 0
-str_cfg_fs:
-	.dc.b	"FULLSCREEN=", 0
-str_cfg_wheel_reverse:
-	.dc.b	"WHEEL_REVERSE=", 0
-str_cfg_wheel_clicks:
-	.dc.b	"WHEEL_CLICKS=", 0
-str_cfg_wheel_pixels:
-	.dc.b	"WHEEL_TRACKPAD_PIXELS=", 0
-cfg_path:
-	.dc.b	"A:\SYS\MSX68K.CFG", 0
+settings_path:
+	.dc.b	"A:\SYS\MSX68K.LB", 0
 	.even
-
-cfg_buf:
-	.ds.b	256
+settings_rec:
+	.ds.b	SETTINGS_SIZE
 	.even
+settings_handle:
+	.dc.l	0
 
 win_ptr:
 	.dc.l	0
