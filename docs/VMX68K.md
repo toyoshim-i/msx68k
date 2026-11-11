@@ -91,6 +91,13 @@ windows work the same way as the master VM.
   whatever speed the VM runs at.
 - Windows start at the VM's native size; scaling comes later.
 
+### 3.4 Input
+- While the VMX68K.SX window is active, the host keyboard goes to the VM unconditionally, as
+  SX-Window gives input to the active window. It goes natively, straight into the VM's MFP,
+  rather than through SX-Window events, so the VM sees physical key information.
+- The mouse is left out of the first version: relative motion would need pointer capture and a
+  way out of it, which few early uses need.
+
 ## 4. First Goal
 
 Boot Human68k 3.02 from `HUMAN302.XDF` as drive A in a VM, shown in a VMX68K.SX window. The
@@ -111,8 +118,7 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 
 - **Bridge hook point.** DOS calls (`$FFxx`) directly, or a remote drive device driver in the VM's
   Human68k.
-- **Input routing.** Keyboard and mouse to the VM while its window is active, and how focus
-  returns to the desktop.
+- **Mouse input to VMs**: relative or absolute motion, pointer capture, and how to leave it.
 - **Settings file format** and how double-clicking a settings file opens VMX68K.SX with it.
 - **Display scaling**: how a VM screen is scaled, once windows go beyond native size.
 - **The special hook** for booting in the master VM's environment.
