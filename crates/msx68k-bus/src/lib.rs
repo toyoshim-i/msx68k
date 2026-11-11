@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn test_only_the_extended_screen_block_leaves_the_24_bit_mirror() {
+    fn test_only_the_reserved_range_leaves_the_24_bit_mirror() {
         let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
         bus.write_u16(0x0400, 0x1234, true).unwrap();
         // Tagged pointers and the 060turbo high memory range mirror Main RAM, as on the 68000.
@@ -87,11 +87,29 @@ mod tests {
         bus.write_rom_u16(0x00FF_8000, 0xBEEF);
         assert_eq!(bus.read_u16(0xFFFF_8000, true).unwrap(), 0xBEEF);
 
+        // Compatibility VMs mirror the reserved range too.
+        assert_eq!(bus.read_u16(EXT_TVRAM_BASE + 0x0400, true).unwrap(), 0x1234);
+        assert_eq!(bus.read_u16(MSX68K_RESERVED_END - 0x0100_0000 + 0x0400, true).unwrap(), 0x1234);
+
+        // The master SX-Window VM reserves it, and guest access to it is detected.
+        bus.extensions_reserved = true;
         assert!(is_ext_screen_addr(EXT_TVRAM_BASE));
         assert!(is_ext_screen_addr(EXT_TVRAM_BASE + EXT_TVRAM_WINDOW - 1));
         assert!(!is_ext_screen_addr(EXT_TVRAM_BASE + EXT_TVRAM_WINDOW));
         assert_eq!(bus.read_u16(EXT_TVRAM_BASE, true).unwrap(), 0);
-        assert_eq!(bus.illegal_screen_accesses, 1, "guest access to the screen block is detected");
+        assert_eq!(bus.read_u16(MSX68K_RESERVED_END - 2, true).unwrap(), 0);
+        bus.write_u16(0xF800_0400, 0xFFFF, true).unwrap();
+        assert_eq!(bus.read_u16(0x0400, true).unwrap(), 0x1234, "reserved writes do not mirror");
+        assert_eq!(bus.illegal_reserved_accesses, 3);
+        assert!(bus.read_u16(0xF800_0000, false).is_err(), "user mode cannot reach it");
+        // Addresses outside the range still mirror.
+        assert_eq!(bus.read_u16(0xFF00_0400, true).unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn test_only_the_master_sx_vm_reserves_the_extension_range() {
+        assert!(X68kVm::new_master_sx().bus.extensions_reserved);
+        assert!(!X68kVm::new_app_vm().bus.extensions_reserved);
     }
 
     #[test]

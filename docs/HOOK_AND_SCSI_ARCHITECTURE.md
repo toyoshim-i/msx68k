@@ -59,7 +59,7 @@ flowchart LR
 
 - SX-Window APIs are replaced natively through `TrapHandler::on_a_line` without patching guest memory. Drawing that `SYS/FSX.X` reaches through direct calls rather than A-Line APIs uses pattern 3 of Section 2.3. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md) and [NATIVE_FONTS.md](NATIVE_FONTS.md).
 
-- Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions. The extended screen uses the first 16 MB block (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5). Unused parts mirror the 24-bit space as on the 68000.
+- Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions in the master SX-Window VM, and the extended screen uses the first 16 MB block. Partial and full VMs mirror the range to the 24-bit space as on the 68000 (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5).
 
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).

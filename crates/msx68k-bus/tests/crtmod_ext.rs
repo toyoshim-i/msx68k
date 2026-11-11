@@ -5,7 +5,7 @@ use msx68k_bus::{Bus, EXT_TVRAM_BASE, X68kVm};
 
 #[test]
 fn test_iocs_crtmod_mode_50_queries_and_mode_switches() {
-    let mut vm = X68kVm::new_app_vm();
+    let mut vm = X68kVm::new_master_sx();
 
     // Default resolution: 768x512, extended crtmod inactive
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
@@ -84,7 +84,7 @@ fn test_iocs_crtmod_mode_50_queries_and_mode_switches() {
     // Guest code cannot reach the extended screen unless it is mapped for verification.
     vm.bus.write_u8(EXT_TVRAM_BASE, 0xAA, true).unwrap();
     assert_eq!(vm.bus.read_u8(EXT_TVRAM_BASE, true).unwrap(), 0, "unmapped writes are dropped");
-    assert_eq!(vm.bus.illegal_screen_accesses, 2);
+    assert_eq!(vm.bus.illegal_reserved_accesses, 2);
     vm.bus.guest_screen_mapped = true;
 
     // Enable CRTC simultaneous write across all 4 planes (R21 bit 8 + plane mask 0x0F)

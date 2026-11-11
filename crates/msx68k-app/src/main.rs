@@ -304,7 +304,7 @@ struct Msx68kApp {
 impl Msx68kApp {
     fn new(args: AppArgs) -> Self {
         let mut vm = X68kVm::new(
-            VmConfig::app_vm()
+            VmConfig::master_sx()
                 .with_speed_mode(args.speed_mode)
                 .with_ram_mb(args.ram_mb),
         );

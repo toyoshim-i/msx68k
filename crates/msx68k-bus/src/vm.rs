@@ -195,10 +195,14 @@ impl X68kVm {
     /// Creates a new X68000 VM instance from `config`.
     pub fn new(config: VmConfig) -> Self {
         let timing = config.speed_mode.timing_config();
+        let mut bus = X68kBus::new(config.ram_size_bytes, timing);
+        // Only the master SX-Window VM runs software known not to use upper address bits as
+        // flags, so other VMs keep the 68000's mirroring for compatibility.
+        bus.extensions_reserved = config.role == VmRole::MasterSx;
         Self {
             config,
             cpu_state: CpuState::new(),
-            bus: X68kBus::new(config.ram_size_bytes, timing),
+            bus,
             disk_io_burst_active: false,
             debug: DebugState::default(),
             host_clock: HostClock::default(),

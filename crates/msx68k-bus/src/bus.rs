@@ -37,6 +37,12 @@ pub const EXT_TVRAM_BASE: u32 = MSX68K_RESERVED_BASE;
 /// Size of the block at [`EXT_TVRAM_BASE`] that belongs to the extended screen.
 pub const EXT_TVRAM_WINDOW: u32 = 0x0100_0000;
 
+/// Whether `addr` falls in the range reserved for msx68k extensions.
+#[inline]
+pub fn is_reserved_addr(addr: u32) -> bool {
+    addr.wrapping_sub(MSX68K_RESERVED_BASE) < MSX68K_RESERVED_END - MSX68K_RESERVED_BASE
+}
+
 /// Whether `addr` falls in the extended screen block at [`EXT_TVRAM_BASE`].
 #[inline]
 pub fn is_ext_screen_addr(addr: u32) -> bool {
@@ -151,14 +157,19 @@ pub struct X68kBus {
     pub native_gm_enabled: bool,
     /// Number of Graph Manager calls completed natively.
     pub native_gm_calls: u64,
+    /// Whether the reserved range serves msx68k extensions, as in the master SX-Window VM,
+    /// whose `HUMAN.SYS` and `SYS/FSX.X` use no address bits above 24 as flags. Otherwise the
+    /// range mirrors the 24-bit space like every other address above it, for compatibility.
+    pub extensions_reserved: bool,
     /// Lets guest code read and write the extended screen, as verification against the guest
     /// drawing routines needs. Otherwise such accesses are dropped and counted as illegal.
     pub guest_screen_mapped: bool,
-    /// Number of guest accesses to the extended screen while it is not mapped.
-    pub illegal_screen_accesses: u64,
-    /// The last A-Line opcode and its address, for reporting illegal screen accesses.
+    /// Number of guest accesses to the reserved range that no extension serves to the guest,
+    /// including the extended screen while it is not mapped.
+    pub illegal_reserved_accesses: u64,
+    /// The last A-Line opcode and its address, for reporting illegal reserved range accesses.
     pub(crate) last_a_line: (u16, u32),
-    /// A-Line opcodes already reported for illegal screen accesses.
+    /// A-Line opcodes already reported for illegal reserved range accesses.
     reported_screen_accesses: std::collections::HashSet<u16>,
     pub(crate) ext_tvram_row_bytes: usize,
     pub(crate) ext_tvram_plane_bytes: usize,
@@ -230,8 +241,9 @@ impl X68kBus {
             pending_resolution: None,
             native_gm_enabled: true,
             native_gm_calls: 0,
+            extensions_reserved: false,
             guest_screen_mapped: false,
-            illegal_screen_accesses: 0,
+            illegal_reserved_accesses: 0,
             last_a_line: (0, 0),
             reported_screen_accesses: std::collections::HashSet::new(),
             ext_tvram_row_bytes: 0,
@@ -471,20 +483,28 @@ impl X68kBus {
         self.write_rom_u8(addr.wrapping_add(1), val as u8);
     }
 
-    /// Notes a guest access to the extended screen and returns whether the guest may reach it.
+    /// Whether a guest access to `addr` goes to the reserved range rather than the 24-bit space.
+    #[inline]
+    fn in_reserved_range(&self, addr: u32) -> bool {
+        self.extensions_reserved && is_reserved_addr(addr)
+    }
+
+    /// Notes a guest access to the reserved range and returns whether it reaches the extended
+    /// screen.
     ///
-    /// The screen's base lies above the 68000's 24-bit address bus, so only code that took it
-    /// from a screen `Bitmap` record gets here: guest drawing that native code has not replaced.
+    /// The range lies above the 68000's 24-bit address bus, so only code that took an address
+    /// from an extension gets here, such as guest drawing that native code has not replaced
+    /// taking the screen base from a `Bitmap` record.
     #[cold]
-    fn guest_screen_access(&mut self, addr: u32, is_write: bool) -> bool {
-        if self.guest_screen_mapped {
+    fn guest_reserved_access(&mut self, addr: u32, is_write: bool) -> bool {
+        if self.guest_screen_mapped && is_ext_screen_addr(addr) {
             return true;
         }
-        self.illegal_screen_accesses += 1;
+        self.illegal_reserved_accesses += 1;
         let (opcode, pc) = self.last_a_line;
         if self.reported_screen_accesses.insert(opcode) {
             eprintln!(
-                "Illegal screen {} at ${addr:08X} during A-Line ${opcode:04X} called at ${pc:06X}",
+                "Illegal {} of reserved address ${addr:08X} during A-Line ${opcode:04X} called at ${pc:06X}",
                 if is_write { "write" } else { "read" }
             );
         }
@@ -638,14 +658,14 @@ impl Bus for X68kBus {
     }
 
     fn read_u8(&mut self, addr: u32, supervisor: bool) -> Result<u8, BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || self.in_reserved_range(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: false,
             });
         }
-        if is_ext_screen_addr(addr) {
-            if !self.guest_screen_access(addr, false) {
+        if self.in_reserved_range(addr) {
+            if !self.guest_reserved_access(addr, false) {
                 return Ok(0);
             }
             let off = (addr - EXT_TVRAM_BASE) as usize;
@@ -774,14 +794,14 @@ impl Bus for X68kBus {
     }
 
     fn read_u16(&mut self, addr: u32, supervisor: bool) -> Result<u16, BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || self.in_reserved_range(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: false,
             });
         }
-        if is_ext_screen_addr(addr) {
-            if !self.guest_screen_access(addr, false) {
+        if self.in_reserved_range(addr) {
+            if !self.guest_reserved_access(addr, false) {
                 return Ok(0);
             }
             let off = (addr - EXT_TVRAM_BASE) as usize;
@@ -824,14 +844,14 @@ impl Bus for X68kBus {
     }
 
     fn write_u8(&mut self, addr: u32, val: u8, supervisor: bool) -> Result<(), BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || self.in_reserved_range(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: true,
             });
         }
-        if is_ext_screen_addr(addr) {
-            if !self.guest_screen_access(addr, true) {
+        if self.in_reserved_range(addr) {
+            if !self.guest_reserved_access(addr, true) {
                 return Ok(());
             }
             self.access_flags.tvram_accessed = true;
@@ -1034,14 +1054,14 @@ impl Bus for X68kBus {
     }
 
     fn write_u16(&mut self, addr: u32, val: u16, supervisor: bool) -> Result<(), BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || self.in_reserved_range(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: true,
             });
         }
-        if is_ext_screen_addr(addr) {
-            if !self.guest_screen_access(addr, true) {
+        if self.in_reserved_range(addr) {
+            if !self.guest_reserved_access(addr, true) {
                 return Ok(());
             }
             self.access_flags.tvram_accessed = true;
