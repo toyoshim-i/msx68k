@@ -1,5 +1,6 @@
 * -----------------------------------------------------------------------------
-* SXMODE.X: Dynamic Screen Resolution Switcher & Interactive GUI for SX-Window
+* SXMODE.X: msx68k settings for SX-Window (screen resolution and mouse wheel),
+* run from the Filer, the control panel, or the command line (resolution only)
 * Assembled by rhas and linked by rhlk
 * -----------------------------------------------------------------------------
 
@@ -127,8 +128,8 @@ no_gui_cli_args:
 	lea	app_task_id(pc), a1
 	move.l	d0, (a1)
 
-	* Open SXMODE Window:
-	* bounds: left=180, top=120, right=400, bottom=396 (w=220, h=276)
+	* Open the settings window:
+	* bounds: left=180, top=120, right=620, bottom=396 (w=440, h=276)
 	* WMOpen arguments (pushed right-to-left, total 26 bytes):
 	move.l	app_task_id(pc), -(sp)	; 8: refCon (long, Task ID)
 	move.w	#-1, -(sp)		; 7: goAwayFlag (word, TRUE = -1)
@@ -250,7 +251,7 @@ win_is_active:
 	cmpi.w	#7, d0			; W_INCLOSE (7)
 	beq	quit_app
 	cmpi.w	#3, d0			; W_ININSIDE (3)
-	bne.s	post_mouse_event
+	bne	post_mouse_event
 
 	* Set Port to Window before converting coordinates
 	move.l	win_ptr(pc), -(sp)
@@ -268,15 +269,15 @@ win_is_active:
 
 	* Check horizontal bounds: left=20, right=200
 	cmpi.w	#20, d2
-	blt.s	post_mouse_event
+	blt	check_wheel_click
 	cmpi.w	#200, d2
-	bge.s	post_mouse_event
+	bge	check_wheel_click
 
 	* Check vertical bounds: top=40, bottom=258
 	cmpi.w	#40, d3
-	blt.s	post_mouse_event
+	blt	check_wheel_click
 	cmpi.w	#258, d3
-	bge.s	post_mouse_event
+	bge	check_wheel_click
 
 	* Determine which of the 8 buttons was clicked (height 22, spacing 6, stride 28)
 	sub.w	#40, d3
@@ -300,6 +301,36 @@ apply_gui_mode:
 	bsr	apply_mode_by_index
 	bsr	save_config_file
 	bsr	draw_window_contents
+	bra	event_loop
+
+check_wheel_click:
+	* d2, d3 = local click position; find the wheel setting button under it
+	lea	wheel_widgets(pc), a2
+	lea	wheel_widgets_end(pc), a3
+wheel_click_loop:
+	cmpa.l	a3, a2
+	bcc	post_mouse_event
+	cmp.w	(a2), d2
+	blt.s	wheel_click_next
+	cmp.w	4(a2), d2
+	bge.s	wheel_click_next
+	cmp.w	2(a2), d3
+	blt.s	wheel_click_next
+	cmp.w	6(a2), d3
+	bge.s	wheel_click_next
+	* Store the button's value in its setting, then apply and save the settings
+	move.w	10(a2), d0
+	subq.w	#1, d0
+	add.w	d0, d0
+	lea	wheel_reverse(pc), a0
+	move.w	12(a2), 0(a0, d0.w)
+	bsr	set_wheel_config
+	bsr	save_config_file
+	bsr	draw_window_contents
+	bra.s	post_mouse_event
+wheel_click_next:
+	lea	WIDGET_SIZE(a2), a2
+	bra.s	wheel_click_loop
 
 post_mouse_event:
 	bra	event_loop
@@ -332,6 +363,8 @@ draw_window_contents:
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
+
+	bsr	query_wheel_config
 
 	* Query current screen mode via IOCS _CRTMOD
 	moveq.l	#$10, d0
@@ -447,6 +480,155 @@ draw_btn_loop:
 	SXCALL	GMForeColor		; $A147
 	addq.l	#2, sp
 
+	bsr	draw_wheel_widgets
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: draw_wheel_widgets
+* Draws the wheel setting labels and buttons, inverting the selected ones
+* -----------------------------------------------------------------------------
+draw_wheel_widgets:
+	movem.l	d0-d3/a0-a4, -(sp)
+	move.l	#$00E60012, -(sp)	; x=230, y=18
+	SXCALL	GMMove			; $A16E
+	addq.l	#4, sp
+	pea	str_wheel_dir(pc)
+	SXCALL	GMDrawStrL		; $A190
+	addq.l	#4, sp
+	move.l	#$00E6005A, -(sp)	; x=230, y=90
+	SXCALL	GMMove			; $A16E
+	addq.l	#4, sp
+	pea	str_wheel_clicks(pc)
+	SXCALL	GMDrawStrL		; $A190
+	addq.l	#4, sp
+	move.l	#$00E6009A, -(sp)	; x=230, y=154
+	SXCALL	GMMove			; $A16E
+	addq.l	#4, sp
+	pea	str_wheel_trackpad(pc)
+	SXCALL	GMDrawStrL		; $A190
+	addq.l	#4, sp
+
+	lea	wheel_widgets(pc), a2
+	lea	wheel_widgets_end(pc), a3
+draw_widget_loop:
+	cmpa.l	a3, a2
+	bcc	draw_widgets_done
+
+	* Background and frame
+	move.w	#$0100, -(sp)		; GMPenMode(G_BACK << 8 | G_PSET)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	(a2)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+	clr.w	-(sp)			; GMPenMode(G_FORE << 8 | G_PSET)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	(a2)
+	SXCALL	GMFrameRect		; $A172
+	addq.l	#4, sp
+
+	* Caption, centered for the 6-dot-wide system font
+	lea	wheel_strings(pc), a4
+	adda.w	8(a2), a4
+	moveq.l	#0, d0
+	move.b	(a4), d0
+	mulu.w	#6, d0
+	move.w	4(a2), d1
+	sub.w	(a2), d1
+	sub.w	d0, d1
+	asr.w	#1, d1
+	add.w	(a2), d1
+	swap	d1
+	move.w	2(a2), d1
+	addq.w	#5, d1
+	move.l	d1, -(sp)
+	SXCALL	GMMove			; $A16E
+	addq.l	#4, sp
+	pea	(a4)
+	SXCALL	GMDrawStrL		; $A190
+	addq.l	#4, sp
+
+	* Invert the button whose value is the current setting
+	move.w	10(a2), d0
+	subq.w	#1, d0
+	add.w	d0, d0
+	lea	wheel_reverse(pc), a0
+	move.w	0(a0, d0.w), d0
+	cmp.w	12(a2), d0
+	bne.s	draw_widget_next
+	move.w	#2, -(sp)		; GMForeColor(2) (XOR mask)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+	move.w	#3, -(sp)		; GMPenMode(3) (G_XOR)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	(a2)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+	clr.w	-(sp)			; GMPenMode(0) (G_PSET)
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	move.w	#11, -(sp)		; GMForeColor(11) (G_BLACK)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+
+draw_widget_next:
+	lea	WIDGET_SIZE(a2), a2
+	bra	draw_widget_loop
+draw_widgets_done:
+	movem.l	(sp)+, d0-d3/a0-a4
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: query_wheel_config
+* Reads the host wheel settings into wheel_reverse, wheel_clicks, wheel_pixels
+* -----------------------------------------------------------------------------
+query_wheel_config:
+	movem.l	d0-d3/a0, -(sp)
+	moveq.l	#0, d0
+	HYPERCALL HYPER_SX_WHEEL_CONFIG	; $FE89
+	lea	wheel_reverse(pc), a0
+	move.w	d1, (a0)+
+	move.w	d2, (a0)+
+	move.w	d3, (a0)
+	movem.l	(sp)+, d0-d3/a0
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: set_wheel_config
+* Applies wheel_reverse, wheel_clicks, wheel_pixels on the host, keeping the
+* values it clamps them to
+* -----------------------------------------------------------------------------
+set_wheel_config:
+	movem.l	d0-d3/a0, -(sp)
+	lea	wheel_reverse(pc), a0
+	moveq.l	#0, d1
+	move.w	(a0)+, d1
+	moveq.l	#0, d2
+	move.w	(a0)+, d2
+	moveq.l	#0, d3
+	move.w	(a0), d3
+	moveq.l	#1, d0
+	HYPERCALL HYPER_SX_WHEEL_CONFIG	; $FE89
+	lea	wheel_reverse(pc), a0
+	move.w	d1, (a0)+
+	move.w	d2, (a0)+
+	move.w	d3, (a0)
+	movem.l	(sp)+, d0-d3/a0
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: append_cfg_line
+* Appends the key at (A1), the decimal value of D0.W, and CR LF at (A0)+
+* -----------------------------------------------------------------------------
+append_cfg_line:
+	move.b	(a1)+, (a0)+
+	bne.s	append_cfg_line
+	subq.l	#1, a0
+	bsr	format_dec_u16
+	move.b	#13, (a0)+
+	move.b	#10, (a0)+
 	rts
 
 * -----------------------------------------------------------------------------
@@ -529,6 +711,18 @@ copy_cfg_fs:
 	move.b	#13, (a0)+
 	move.b	#10, (a0)+
 
+	* 4. Wheel settings
+	bsr	query_wheel_config
+	lea	str_cfg_wheel_reverse(pc), a1
+	move.w	wheel_reverse(pc), d0
+	bsr	append_cfg_line
+	lea	str_cfg_wheel_clicks(pc), a1
+	move.w	wheel_clicks(pc), d0
+	bsr	append_cfg_line
+	lea	str_cfg_wheel_pixels(pc), a1
+	move.w	wheel_pixels(pc), d0
+	bsr	append_cfg_line
+
 	* Total length = a0 - cfg_buf
 	lea	cfg_buf(pc), a1
 	move.l	a0, d3
@@ -605,7 +799,7 @@ arg_not_7:
 	cmpi.b	#'f', (a1)
 	beq	arg_mode_7
 	cmpi.b	#'F', (a1)
-	beq	arg_mode_7
+	beq.w	arg_mode_7
 
 	cmpi.b	#'1', (a1)
 	bne	arg_check_2_to_6
@@ -677,11 +871,61 @@ arg_mode_7:
 * Data Section
 * -----------------------------------------------------------------------------
 win_title:
-	.dc.b	6, "SXMODE", 0		; Pascal string
+	.dc.b	11, "MSX68K ", $90, $DD, $92, $E8, 0	; Pascal string "MSX68K 設定" (Shift_JIS)
 	.even
 
 win_bounds:
-	.dc.w	180, 120, 400, 396	; left, top, right, bottom (w=220, h=276)
+	.dc.w	180, 120, 620, 396	; left, top, right, bottom (w=440, h=276)
+
+* Wheel setting buttons: rect, caption offset from wheel_strings, setting, value
+WG_DIRECTION	.equ	1		; wheel_reverse
+WG_CLICKS	.equ	2		; wheel_clicks
+WG_TRACKPAD	.equ	3		; wheel_pixels
+WIDGET_SIZE	.equ	16
+
+wheel_widgets:
+	.dc.w	230, 40, 320, 62, str_normal-wheel_strings, WG_DIRECTION, 0, 0
+	.dc.w	330, 40, 420, 62, str_reverse-wheel_strings, WG_DIRECTION, 1, 0
+	.dc.w	230, 104, 262, 126, str_one-wheel_strings, WG_CLICKS, 1, 0
+	.dc.w	268, 104, 300, 126, str_two-wheel_strings, WG_CLICKS, 2, 0
+	.dc.w	306, 104, 338, 126, str_three-wheel_strings, WG_CLICKS, 3, 0
+	.dc.w	344, 104, 376, 126, str_four-wheel_strings, WG_CLICKS, 4, 0
+	.dc.w	382, 104, 414, 126, str_five-wheel_strings, WG_CLICKS, 5, 0
+	.dc.w	230, 168, 290, 190, str_slow-wheel_strings, WG_TRACKPAD, 80, 0
+	.dc.w	296, 168, 356, 190, str_medium-wheel_strings, WG_TRACKPAD, 40, 0
+	.dc.w	362, 168, 422, 190, str_fast-wheel_strings, WG_TRACKPAD, 20, 0
+wheel_widgets_end:
+
+wheel_strings:
+str_normal:
+	.dc.b	6, "Normal", 0
+str_reverse:
+	.dc.b	7, "Reverse", 0
+str_one:
+	.dc.b	1, "1", 0
+str_two:
+	.dc.b	1, "2", 0
+str_three:
+	.dc.b	1, "3", 0
+str_four:
+	.dc.b	1, "4", 0
+str_five:
+	.dc.b	1, "5", 0
+str_slow:
+	.dc.b	4, "Slow", 0
+str_medium:
+	.dc.b	6, "Medium", 0
+str_fast:
+	.dc.b	4, "Fast", 0
+	.even
+
+str_wheel_dir:
+	.dc.b	16, "Wheel direction:", 0
+str_wheel_clicks:
+	.dc.b	17, "Lines per notch: ", 0
+str_wheel_trackpad:
+	.dc.b	15, "Trackpad speed:", 0
+	.even
 
 str_label:
 	.dc.b	18, "Screen Resolution:", 0
@@ -740,12 +984,18 @@ str_cfg_h:
 	.dc.b	"SCREEN_HEIGHT=", 0
 str_cfg_fs:
 	.dc.b	"FULLSCREEN=", 0
+str_cfg_wheel_reverse:
+	.dc.b	"WHEEL_REVERSE=", 0
+str_cfg_wheel_clicks:
+	.dc.b	"WHEEL_CLICKS=", 0
+str_cfg_wheel_pixels:
+	.dc.b	"WHEEL_TRACKPAD_PIXELS=", 0
 cfg_path:
-	.dc.b	"A:\\SYS\\MSX68K.CFG", 0
+	.dc.b	"A:\SYS\MSX68K.CFG", 0
 	.even
 
 cfg_buf:
-	.ds.b	128
+	.ds.b	256
 	.even
 
 win_ptr:
@@ -757,6 +1007,13 @@ active_mode:
 win_active:
 	.dc.b	0
 	.even
+* Host wheel settings, in this order (indexed by setting number - 1)
+wheel_reverse:
+	.dc.w	0
+wheel_clicks:
+	.dc.w	1
+wheel_pixels:
+	.dc.w	40
 
 event_rec:
 event_what:

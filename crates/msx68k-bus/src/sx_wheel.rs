@@ -7,6 +7,8 @@
 //! click takes effect without moving the cursor. Whatever the pointer is over, only the active
 //! window scrolls, since inactive tasks should not get to handle events.
 
+use msx68k_cpu::{CpuState, TrapResult};
+
 use crate::bus::X68kBus;
 
 /// `EMGet`: the guest is about to take an event, so the queue is consistent.
@@ -67,6 +69,46 @@ const CDEF: u32 = u32::from_be_bytes(*b"CDEF");
 const HORIZONTAL_SCROLL_BAR: i16 = 0x40;
 const VERTICAL_SCROLL_BAR: i16 = 0x41;
 
+/// User settings for the wheel, kept in `MSX68K.CFG` and set by the guest settings app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelConfig {
+    /// Scrolls the other way, as with "natural" scrolling.
+    pub reverse: bool,
+    /// Arrow clicks per notch.
+    pub clicks_per_notch: u8,
+    /// Trackpad scrolling, in host pixels, that makes one notch.
+    pub trackpad_pixels: u16,
+}
+
+impl WheelConfig {
+    pub const CLICKS_RANGE: std::ops::RangeInclusive<u8> = 1..=10;
+    pub const TRACKPAD_PIXELS_RANGE: std::ops::RangeInclusive<u16> = 5..=400;
+
+    /// Returns the setting with every value brought into its range.
+    pub fn clamped(self) -> Self {
+        Self {
+            reverse: self.reverse,
+            clicks_per_notch: self
+                .clicks_per_notch
+                .clamp(*Self::CLICKS_RANGE.start(), *Self::CLICKS_RANGE.end()),
+            trackpad_pixels: self.trackpad_pixels.clamp(
+                *Self::TRACKPAD_PIXELS_RANGE.start(),
+                *Self::TRACKPAD_PIXELS_RANGE.end(),
+            ),
+        }
+    }
+}
+
+impl Default for WheelConfig {
+    fn default() -> Self {
+        Self {
+            reverse: false,
+            clicks_per_notch: 1,
+            trackpad_pixels: 40,
+        }
+    }
+}
+
 /// Wheel notches waiting to be delivered.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PendingWheel {
@@ -78,8 +120,11 @@ pub(crate) struct PendingWheel {
 
 impl X68kBus {
     /// Queues wheel notches from the host: positive `notches` scroll down, or right when
-    /// `horizontal` (Shift held).
+    /// `horizontal` (Shift held), before the user's direction and speed settings apply.
     pub fn post_mouse_wheel(&mut self, notches: i32, horizontal: bool) {
+        let config = self.wheel_config;
+        let direction = if config.reverse { -1 } else { 1 };
+        let notches = notches.saturating_mul(config.clicks_per_notch as i32 * direction);
         let wheel = &mut self.pending_wheel;
         let axis = if horizontal {
             &mut wheel.horizontal
@@ -87,6 +132,33 @@ impl X68kBus {
             &mut wheel.vertical
         };
         *axis = axis.saturating_add(notches);
+    }
+
+    /// `SxWheelConfig` hypercall: `D0.W = 0` returns the wheel settings, `D0.W = 1` sets them,
+    /// in `D1.L` (1 to reverse), `D2.L` (arrow clicks per notch), and `D3.L` (trackpad pixels
+    /// per notch). Values out of range are clamped. `D0.L` returns 0, or -1 for another `D0.W`.
+    pub(crate) fn hypercall_wheel_config(&mut self, state: &mut CpuState) -> TrapResult {
+        match state.d[0] as u16 {
+            0 => {}
+            1 => {
+                self.wheel_config = WheelConfig {
+                    reverse: state.d[1] != 0,
+                    clicks_per_notch: state.d[2].min(u8::MAX as u32) as u8,
+                    trackpad_pixels: state.d[3].min(u16::MAX as u32) as u16,
+                }
+                .clamped();
+            }
+            _ => {
+                state.d[0] = u32::MAX;
+                return TrapResult::Handled { extra_cycles: 0 };
+            }
+        }
+        let config = self.wheel_config;
+        state.d[0] = 0;
+        state.d[1] = config.reverse as u32;
+        state.d[2] = config.clicks_per_notch as u32;
+        state.d[3] = config.trackpad_pixels as u32;
+        TrapResult::Handled { extra_cycles: 0 }
     }
 
     /// Delivers one queued wheel notch as an arrow click, when the guest is about to read
@@ -252,3 +324,46 @@ impl X68kBus {
         self.poke_u16(addr + 2, value as u16);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timing::CpuSpeedMode;
+
+    #[test]
+    fn settings_reverse_and_multiply_notches() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        bus.wheel_config = WheelConfig {
+            reverse: true,
+            clicks_per_notch: 3,
+            trackpad_pixels: 40,
+        };
+        bus.post_mouse_wheel(1, false);
+        bus.post_mouse_wheel(-2, true);
+        assert_eq!(
+            bus.pending_wheel,
+            PendingWheel {
+                vertical: -3,
+                horizontal: 6
+            }
+        );
+    }
+
+    #[test]
+    fn settings_stay_in_range() {
+        let wild = WheelConfig {
+            reverse: false,
+            clicks_per_notch: 0,
+            trackpad_pixels: 9999,
+        };
+        assert_eq!(
+            wild.clamped(),
+            WheelConfig {
+                reverse: false,
+                clicks_per_notch: 1,
+                trackpad_pixels: 400
+            }
+        );
+    }
+}
+

@@ -1102,7 +1102,8 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     inspect_rgn("SXMODE->outside", top_win + 0x48, &mut vm.bus);
     inspect_rgn("SXMODE->inside", top_win + 0x4C, &mut vm.bus);
 
-    // Drag SXMODE.X's window to (800, 550) across the 768x512 boundary
+    // Drag SXMODE.X's 440-dot-wide window by (300, 445), across the 768x512 boundary but
+    // within 1024x1024
     vm.bus.set_host_mouse_position(Some((250, 105)));
     vm.bus.scc.add_mouse_delta(1, 1);
     for _ in 0..50_000 {
@@ -1118,7 +1119,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         vm.step();
     }
 
-    vm.bus.set_host_mouse_position(Some((800, 550)));
+    vm.bus.set_host_mouse_position(Some((550, 550)));
     vm.bus.scc.add_mouse_delta(1, 1);
     for _ in 0..200_000 {
         vm.step();
@@ -1143,14 +1144,14 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let sx_inside_b = vm.bus.read_u16(sx_inside_ptr + 10, true).unwrap() as i16;
     assert!(sx_inside_r > 768, "Moved window inside.right must extend beyond 768, got {sx_inside_r}");
     assert!(sx_inside_b > 512, "Moved window inside.bottom must extend beyond 512, got {sx_inside_b}");
-    assert_eq!(sx_inside_r - sx_inside_l, 220, "Moved window inside width must be 220");
+    assert_eq!(sx_inside_r - sx_inside_l, 440, "Moved window inside width must be 440");
     assert_eq!(sx_inside_b - sx_inside_t, 276, "Moved window inside height must be 276");
 
     let sx_vis_h = vm.bus.read_u32(top_win + 0x10, true).unwrap();
     let sx_vis_ptr = vm.bus.read_u32(sx_vis_h, true).unwrap();
     let sx_vis_w = vm.bus.read_u16(sx_vis_ptr + 8, true).unwrap() as i16;
     let sx_vis_h_val = vm.bus.read_u16(sx_vis_ptr + 10, true).unwrap() as i16;
-    assert_eq!(sx_vis_w, 220, "SXMODE visible region width must not be clipped, expected 220, got {sx_vis_w}");
+    assert_eq!(sx_vis_w, 440, "SXMODE visible region width must not be clipped, expected 440, got {sx_vis_w}");
     assert_eq!(sx_vis_h_val, 276, "SXMODE visible region height must not be clipped, expected 276, got {sx_vis_h_val}");
 
     // Save screenshot after moving SXMODE across the 768x512 boundary in 1024x1024
@@ -1164,7 +1165,8 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
 
     // Verify A:\SYS\MSX68K.CFG was created on the SCSI disk by SXMODE.X
     let hdd_data = vm.bus.scsi.hdd_data(0).expect("SCSI HDD 0 must be present");
-    let has_cfg = hdd_data.windows(b"SCREEN_WIDTH=".len()).any(|w| w == b"SCREEN_WIDTH=");
+    // Match a written value, since SXMODE.X itself holds the bare key.
+    let has_cfg = hdd_data.windows(b"SCREEN_WIDTH=1024".len()).any(|w| w == b"SCREEN_WIDTH=1024");
     assert!(has_cfg, "A:\\SYS\\MSX68K.CFG must be persisted on SCSI HDD by SXMODE.X");
     assert_eq!(vm.bus.sram()[0x7E], 0x80 | 0x30, "SRAM crtmode must be $B0 (extended)");
 
@@ -1215,7 +1217,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let sx_vis_ptr2 = vm.bus.read_u32(sx_vis_h2, true).unwrap();
     let vis_w2 = vm.bus.read_u16(sx_vis_ptr2 + 8, true).unwrap() as i16;
     let vis_h_val2 = vm.bus.read_u16(sx_vis_ptr2 + 10, true).unwrap() as i16;
-    assert_eq!(vis_w2, 220, "SXMODE visible width must not be clipped, expected 220, got {vis_w2}");
+    assert_eq!(vis_w2, 440, "SXMODE visible width must not be clipped, expected 440, got {vis_w2}");
     assert_eq!(vis_h_val2, 276, "SXMODE visible height must not be clipped, expected 276, got {vis_h_val2}");
     assert!(sx_inside_l2 + vis_w2 > 1300, "Global visible right must extend beyond 1300");
     assert!(sx_inside_t2 + vis_h_val2 > 750, "Global visible bottom must extend beyond 750");
@@ -1317,7 +1319,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let sx_vis_ptr_restored = vm.bus.read_u32(sx_vis_h_restored, true).unwrap();
     let vis_w_restored = vm.bus.read_u16(sx_vis_ptr_restored + 8, true).unwrap() as i16;
     let vis_h_restored = vm.bus.read_u16(sx_vis_ptr_restored + 10, true).unwrap() as i16;
-    assert_eq!(vis_w_restored, 220, "SXMODE visible width must be 220 after resolution switch cycle");
+    assert_eq!(vis_w_restored, 440, "SXMODE visible width must be 440 after resolution switch cycle");
     assert_eq!(vis_h_restored, 276, "SXMODE visible height must be 276 after resolution switch cycle");
 
     // Verify SXMODE.X execution on the running SX-Window system:

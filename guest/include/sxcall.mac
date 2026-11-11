@@ -20,6 +20,7 @@ HYPER_SCSI_ROMDB_BUILD	.equ	$FE83	; SCSI romdb block device driver builder
 HYPER_SCSI_IOCS_INSTALL	.equ	$FE84	; SCSI IOCS $F5 vector installer
 HYPER_SCSI_IOCS_DISPATCH .equ	$FE85	; SCSI IOCS $F5 runtime dispatcher
 HYPER_SX_SET_SCREEN_MODE .equ	$FE88	; Dynamic resolution & screen mode switch
+HYPER_SX_WHEEL_CONFIG	.equ	$FE89	; Mouse wheel settings (D0.W = 0 get, 1 set; D1-D3)
 
 * -----------------------------------------------------------------------------
 * Memory Manager (MM) APIs ($A000..$A055)

@@ -927,6 +927,8 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A17E`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMScroll` | **`[x] Hooked`** | **Native Scroll**. Update regions that are not rectangles stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17A`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRgn` | **`[x] Hooked`** | **Native Region Frame**. A 0×0 pen on a shaped region stays on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A0A5`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Event Man: `EMGet` | **`[x] Hooked`** | **Mouse Wheel**: before the guest takes an event, one queued host wheel notch is posted as a click on an arrow of the active window's scroll bar. See Section 8. |
+| **`$FE89`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxWheelConfig` | **`[x] Hooked`** | **Wheel Settings**: `D0.W = 0` reads and `D0.W = 1` sets the direction (`D1`), arrow clicks per notch (`D2`), and trackpad pixels per notch (`D3`). Used by `SXMODE.X`. |
+| **`Patch-ControlPanel`** | `コントロール.LB` on the built HDD | None (resources added) | Control panel item `$F3B0` | **`[x] Added`** | **Settings in the Control Panel**: `CODE` (`SXMODE.X`), `PAT2` (icon), and `CPNM` (`MSX68K.X`) resources make the settings app the first control panel item. See Section 9. |
 | **`$A1A3`**, **`$A1A4`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMInvertRect`, unnamed marching frame | **`[x] Hooked`** | **Native Dashed Frames**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17F`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMCopy` | **`[x] Hooked`** | **Native Copy**. Scaled copies stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A1AF`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMGetPixel` | **`[x] Hooked`** | **Native Screen Read**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
@@ -938,7 +940,7 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 
 ---
 
-## 7. Clean-Room Toolchain & Guest Resolution Switcher (`SXMODE.X`)
+## 7. Clean-Room Toolchain & Guest Settings App (`SXMODE.X`)
 
 ### 7.1 Clean-Room Macro Headers (`guest/include/*.mac`)
 To ensure complete independence from copyrighted or proprietary SDK headers, clean-room assembly macros were designed from scratch in `HAS060` format:
@@ -956,7 +958,7 @@ Leverages `third_party/rhas` (HAS060-compatible MC68000 cross-assembler) and `th
 - **`build_guest_x_executable`**: Combines assembly and linking into a single build pipeline without external toolchain dependencies.
 
 ### 7.3 Guest Utility: `SXMODE.X` (`guest/sxmode/sxmode.s`)
-A hybrid CLI and interactive SX-Window GUI application for querying and switching SX-Window desktop resolutions, adhering strictly to the verified binary format of `SYS/FSX.X` and `カレンダ.X`:
+The msx68k settings app: a hybrid CLI and interactive SX-Window GUI application that switches SX-Window desktop resolutions and sets the mouse wheel (Section 8), adhering strictly to the verified binary format of `SYS/FSX.X` and `カレンダ.X`. It runs from the Filer, from the control panel (Section 9), or from the command line (resolution only):
 - **32-Byte 'OBJR' Header Structure & Dual Entry Points**:
   - `+0x00`: `'OBJR'` magic (`4F 42 4A 52`).
   - `+0x04`: `text_size` (32-bit big-endian).
@@ -1002,7 +1004,7 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
     - When launched by SX-Window Process Manager (`SYS/FSX.X`), `%a0` points to the Task Control Block, and `8(%a0)` contains the assigned Task ID.
     - If `8(%a0)` is not positive (or when invoked from CLI fallback), queries `TSGetID(-1)` (`$A360` with a negative word pushed on stack, matching `SYS/FSX.X`'s handler at `0x1481e` which requires `4(USP) < 0` to return the current task ID).
     - Stores the verified Task ID in `app_task_id`, then passes it to `TSInitApp` (`$A350`) alongside the 6 KB work buffer (`work_area: .ds.b 6144`, which `SYS/FSX.X` clears by writing 5,962 zeroes).
-  - Creates a standard document window titled `"SXMODE"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=396, right=400)` (`w=220, h=276`) with Pascal string title (`6, "SXMODE", 0`) and `refCon = app_task_id`.
+  - Creates a standard document window titled `"MSX68K 設定"` via `WMOpen` (`$A1F9`) at bounds `(top=120, left=180, bottom=396, right=620)` (`w=440, h=276`) with a Shift_JIS Pascal string title and `refCon = app_task_id`. The resolution buttons fill the left half and the wheel settings the right half.
   - Sets port (`GMSetGraph` `$A131`), selects 12×13 system font (`GMFontKind` `$A18B`, `GMFontSize` `$A18E`), and renders eight framed buttons using Pascal strings with `GMDrawStrL` (`$A190`) with height 22, vertical stride 28, and spacing 6:
     - Button 0 (`y=16..38, x=20..200`): `" 768 x 512 "`
     - Button 1 (`y=44..66, x=20..200`): `"1024 x 768 "`
@@ -1023,6 +1025,12 @@ A hybrid CLI and interactive SX-Window GUI application for querying and switchin
     - `mouseDown` (1): brings window to front (`WMSelect` `$A1FE`), sets port (`GMSetGraph` `$A131`), and delegates window drag, close box, and content testing to `SXCallWindM` (`$A3A2`):
       - Close box confirmed (`D0 == 7`): calls `WMDispose` (`$A1FC`), `TSExit` (`$A352`), and exits cleanly via `DOS _EXIT2`.
       - Content click (`D0 == 3`): converts global click coordinates to window-local coordinates via `GMGlobalToLocal` (`$A13F`, which takes Point by value and returns local Point `[y:word, x:word]` in `D0`), detects button hit (looping across 8 button bounds), invokes `IOCS _CRTMOD` (`$10, $0150`) to dynamically resize the desktop in real time, persists to `A:\SYS\MSX68K.CFG`, redraws buttons with updated active mode highlighting, and yields cooperatively via `TSGetEvent` (`$A358`).
+- **Wheel Settings (right half)**: buttons from the `wheel_widgets` table (rectangle, caption offset, setting, value), so the code stays position independent:
+  - `Wheel direction:` `Normal` / `Reverse`.
+  - `Lines per notch:` `1` to `5` arrow clicks per wheel notch.
+  - `Trackpad speed:` `Slow` (80 host pixels per notch), `Medium` (40), `Fast` (20).
+  - The current values come from `HYPER_SX_WHEEL_CONFIG` (`$FE89`, `D0.W = 0`) and are inverted with the same XOR fill; a click sets them with `D0.W = 1` and saves the file.
+- **Configuration File**: `A:\SYS\MSX68K.CFG` holds `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `FULLSCREEN`, `WHEEL_REVERSE` (0 or 1), `WHEEL_CLICKS` (1 to 10), and `WHEEL_TRACKPAD_PIXELS` (5 to 400), one `KEY=value` per line. The host reads it at boot (`load_disk_config_if_present`). HAS-format strings take no escapes, so the path is written with single backslashes.
 - **Console Fallback Mode (Launched without arguments outside SX-Window)**:
   - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> ... -> 0`) and exits cleanly.
 - **SCSI HDD Installation & File Layout**:
@@ -1216,5 +1224,31 @@ A notch clicks 12 or 13 dots from the middle, 9 dots into the bar. `CMCheck` (`$
 - Globals (`text_base +`): active window `0x543CA` (`WMActive`), Event Manager work area `0x543E2` (queue head `+2`, tail `+6`, event mask `+1546`, free list `+1548`), system time `0x549F2`, mouse position `0x549F6`, keyboard state pointer `0x54AA6`, last modifiers `0x54A00`.
 - Entries are taken from the free list like `EMSet` (`$A0A4`) does: `+0` next, `+4` kind `3`, `+6` what, `+8` whom, `+12` when, `+16` where (global `x`, `y`), `+20` modifiers. A left-down and a left-up go in at the arrow.
 - The click is skipped when the bar is hidden or inactive, when the window is hidden, or when another window covers the arrow (outside the window's visible region), so it can never reach another window.
-- The host gives notches from wheel lines, or from every 40 pixels of trackpad scrolling (`msx68k-app`).
+- The host gives notches from wheel lines, or from every `WHEEL_TRACKPAD_PIXELS` (40 by default) of trackpad scrolling (`msx68k-app`). Each notch becomes `WHEEL_CLICKS` arrow clicks, the other way with `WHEEL_REVERSE` (`WheelConfig`), set in the settings app (Section 7.3).
+
+---
+
+## 9. Control Panel Items (`crates/msx68k-bus/src/sx_control_panel.rs`)
+
+### 9.1 How the Control Panel Finds Its Items
+`コントロール.X` (in `\X68` on the built HDD) opens `コントロール.LB` with `TSResOpen` (`$A4A1`), lists the IDs of its `'CODE'` resources with `TSResIDList` (`$A4BF`), and sorts them. Every ID that also has a `'PAT2'` icon and a `'CPNM'` name, both fetched with `TSRscGet` (`$A4AB`), becomes an item, eight to a row. Clicking an item runs its `'CODE'` as a new task with `TSFock` (`$A351`, mode `$0001`).
+
+| Resource | Content |
+| :--- | :--- |
+| `'CODE'` | An ordinary executable, `HU` or `OBJR`, as a file would hold it. Sharp's items use IDs `$F3A0`..`$F3AD`. |
+| `'PAT2'` | The 30×30 icon: rectangle `(0, 0, 30, 30)`, then two planes of 30 rows of 32 bits (248 bytes). Plane 0 only is the button face, neither plane black, and plane 1 only white. |
+| `'CPNM'` | The module name, NUL-padded to an even length (`CTRLPNL1.r`, `背景設定.X`, ...). |
+
+Add-ons of the time put themselves on the control panel this way through `インストーラ.X`. msx68k adds the settings app as ID `$F3B0` when it builds the HDD (`build_bootable_sxwin_scsi_hdd`), which sorts it first. The library is changed only on the disk being built, never distributed changed.
+
+### 9.2 Resource Library Format (`.LB`, `crates/msx68k-bus/src/sx_resource.rs`)
+
+| Part | Layout |
+| :--- | :--- |
+| Header | Size of the rest (`16 + 8 × types`), type count, two runtime long words, 0, then per type its four-character code and a runtime long word. |
+| Section, one per type | Size of the rest (`16 + 16 × resources`), resource count, type code, runtime long word, `$$$$`, then the resources. |
+| Resource | ID (word), attributes (word), data size, runtime long word, data offset in the file. Sharp's libraries list IDs in descending order. |
+| Data | Follows the last section. |
+
+Runtime long words hold handles while a library is loaded and are kept as found. `ResourceLibrary` parses a library, adds or replaces resources, and writes it with each resource's data at an even offset. Sharp's `コントロール.LB` reads back unchanged after a rewrite (`crates/msx68k-bus/tests/control_panel.rs`).
 

@@ -27,6 +27,8 @@ pub enum HypercallId {
     ScsiDriverInterrupt = 0xFE87,
     /// Dynamic resolution & screen mode switch (Step 1: up to 1024x1024 full display).
     SxSetScreenMode = 0xFE88,
+    /// Mouse wheel settings, read and written by the guest settings app.
+    SxWheelConfig = 0xFE89,
     /// Native replacement of the `SYS/FSX.X` text span routine, patched over its first
     /// instruction.
     GmTextSpan = 0xFE8B,
@@ -53,6 +55,7 @@ impl HypercallId {
             0xFE86 => Some(Self::ScsiDriverStrategy),
             0xFE87 => Some(Self::ScsiDriverInterrupt),
             0xFE88 => Some(Self::SxSetScreenMode),
+            0xFE89 => Some(Self::SxWheelConfig),
             0xFE8B => Some(Self::GmTextSpan),
             0xFE8C => Some(Self::GmPenSpan),
             0xFE8D => Some(Self::AlertRowCopy),
@@ -84,6 +87,7 @@ impl X68kBus {
             HypercallId::ScsiDriverStrategy => self.hypercall_scsi_driver_strategy(state),
             HypercallId::ScsiDriverInterrupt => self.hypercall_scsi_driver_interrupt(state),
             HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
+            HypercallId::SxWheelConfig => self.hypercall_wheel_config(state),
             HypercallId::GmTextSpan => self.hypercall_text_span(state),
             HypercallId::GmPenSpan => self.hypercall_pen_span(state),
             HypercallId::AlertRowCopy => self.hypercall_alert_row_copy(state),
@@ -423,6 +427,7 @@ impl X68kBus {
         let mut cfg_w: Option<u32> = None;
         let mut cfg_h: Option<u32> = None;
         let mut cfg_fullscreen: Option<bool> = None;
+        let mut wheel = self.wheel_config;
 
         if let Ok(text) = std::str::from_utf8(cfg_data) {
             for line in text.lines() {
@@ -435,6 +440,16 @@ impl X68kBus {
                     if let Ok(val) = rest.trim().parse::<u32>() {
                         cfg_h = Some(val);
                     }
+                } else if let Some(rest) = line.strip_prefix("WHEEL_REVERSE=") {
+                    wheel.reverse = rest.trim() == "1" || rest.trim().eq_ignore_ascii_case("true");
+                } else if let Some(rest) = line.strip_prefix("WHEEL_CLICKS=") {
+                    if let Ok(val) = rest.trim().parse::<u8>() {
+                        wheel.clicks_per_notch = val;
+                    }
+                } else if let Some(rest) = line.strip_prefix("WHEEL_TRACKPAD_PIXELS=") {
+                    if let Ok(val) = rest.trim().parse::<u16>() {
+                        wheel.trackpad_pixels = val;
+                    }
                 } else if let Some(rest) = line.strip_prefix("FULLSCREEN=") {
                     let val = rest.trim();
                     if val == "1" || val.eq_ignore_ascii_case("true") {
@@ -445,6 +460,8 @@ impl X68kBus {
                 }
             }
         }
+
+        self.wheel_config = wheel.clamped();
 
         if cfg_fullscreen == Some(true) {
             self.fullscreen_mode = true;

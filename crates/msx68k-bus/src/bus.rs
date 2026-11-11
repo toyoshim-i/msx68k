@@ -141,6 +141,8 @@ pub struct X68kBus {
     pub host_mouse_pos: Option<(i16, i16)>,
     /// Host wheel notches waiting to be delivered to SX-Window.
     pub(crate) pending_wheel: crate::sx_wheel::PendingWheel,
+    /// Wheel direction and speed settings.
+    pub wheel_config: crate::sx_wheel::WheelConfig,
     /// Configured display target resolution `(width, height)` across reboots and mode switches.
     pub target_resolution: Option<(u32, u32)>,
     /// Screen buffer for resolutions beyond 1024×1024, whose screen `Bitmap` records hold
@@ -238,6 +240,7 @@ impl X68kBus {
             scsi: crate::scsi::ScsiController::new(),
             host_mouse_pos: None,
             pending_wheel: Default::default(),
+            wheel_config: Default::default(),
             target_resolution: None,
             ext_tvram: None,
             native_gm_text_base: None,

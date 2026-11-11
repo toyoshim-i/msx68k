@@ -1171,9 +1171,28 @@ pub fn build_bootable_sxwin_scsi_hdd(
                 attr: 0x20,
                 time: 0x6000,
                 date: 0x5821,
-                data: sxmode_bytes,
+                data: sxmode_bytes.clone(),
             };
             merged_map.insert(make_file_key(&f_root), f_root);
+
+            // And add it to the control panel library as the msx68k settings item.
+            const CONTROL_PANEL_LB: &[u8] = b"\x83\x52\x83\x93\x83\x67\x83\x8D\x81\x5B\x83\x8B"; // コントロール
+            for f in merged_map.values_mut() {
+                let mut name = [0u8; 18];
+                name[..8].copy_from_slice(&f.raw_name);
+                name[8..].copy_from_slice(&f.raw_name2);
+                let name = normalize_sjis(&name);
+                let length = name.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
+                if &name[..length] == CONTROL_PANEL_LB
+                    && normalize_sjis(&f.raw_ext).starts_with(b"LB")
+                {
+                    if let Some(library) =
+                        crate::sx_control_panel::add_settings_panel(&f.data, &sxmode_bytes)
+                    {
+                        f.data = library;
+                    }
+                }
+            }
         }
     }
 

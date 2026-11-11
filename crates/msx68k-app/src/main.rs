@@ -106,9 +106,6 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(sc)
 }
 
-/// Trackpad scrolling, in host pixels, that makes one wheel notch.
-const WHEEL_PIXELS_PER_NOTCH: f64 = 40.0;
-
 /// Host time left free each frame for rendering while Burst runs flat out.
 const BURST_RENDER_RESERVE: Duration = Duration::from_millis(3);
 
@@ -845,12 +842,12 @@ impl ApplicationHandler for Msx68kApp {
                 self.shift_held = modifiers.state().shift_key();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let pixels_per_notch = self.vm.bus.wheel_config.trackpad_pixels as f64;
                 let (x, y) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(pos) => (
-                        pos.x / WHEEL_PIXELS_PER_NOTCH,
-                        pos.y / WHEEL_PIXELS_PER_NOTCH,
-                    ),
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        (pos.x / pixels_per_notch, pos.y / pixels_per_notch)
+                    }
                 };
                 // Shift turns the wheel sideways.
                 let (x, y) = if self.shift_held { (x + y, 0.0) } else { (x, y) };

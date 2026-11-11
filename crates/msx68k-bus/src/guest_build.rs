@@ -562,8 +562,10 @@ mod tests {
 
         assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
 
+        // The window draws the resolution and wheel settings once per event.
+        const MAX_STEPS: usize = 10_000;
         let mut steps = 0;
-        while steps < 1000 {
+        while steps < MAX_STEPS {
             let cur_pc = vm.cpu_state.pc;
             let opcode = vm.bus.read_u16(cur_pc, true).unwrap();
             if opcode == 0xFF4C {
@@ -575,8 +577,8 @@ mod tests {
         }
 
         assert!(
-            steps < 1000,
-            "Direct SX-Window GUI launch must process events and reach DOS _EXIT2 within 1000 steps (steps={steps})"
+            steps < MAX_STEPS,
+            "Direct SX-Window GUI launch must process events and reach DOS _EXIT2 within {MAX_STEPS} steps (steps={steps})"
         );
         assert_eq!(
             vm.bus.crtc.active_resolution(),
