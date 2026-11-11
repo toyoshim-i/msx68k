@@ -9,7 +9,7 @@ This document collects how msx68k replaces the drawing of `SYS/FSX.X` (Graph Man
 - **Now**: draw screens larger than 1024×1024, which do not fit in TVRAM (`$E00000`), without the guest ever addressing the screen memory. Speed is a side benefit, not the aim.
 - **End state**: the whole SX-Window layer runs natively, drawing into a host TrueColor buffer uploaded with `wgpu`.
 
-Today, screens above 1024×1024 live in a transitional extended planar framebuffer that the guest can address at `EXT_TVRAM_BASE = $1000_0000` (described in Section 5.6 of [SX_WINDOW_API_AND_HOOK_STATUS.md](SX_WINDOW_API_AND_HOOK_STATUS.md)). The guest routines can still draw into it, so every API they would use is being replaced until nothing in the guest touches it. Then the guest mapping is removed. Screens up to 1024×1024 keep using TVRAM and the guest routines.
+Screens above 1024×1024 live in a host buffer that screen `Bitmap` records name with the base `EXT_TVRAM_BASE = $F000_0000` (Section 2.5). Guest code cannot reach it, so guest drawing that has not been replaced yet draws nothing there and is reported. Every API the guest would use is therefore being replaced. Screens up to 1024×1024 keep using TVRAM and the guest routines.
 
 ---
 
@@ -49,11 +49,18 @@ Internal callers do not always go through A-Line APIs. `GMPlotImg` calls the `GM
 - **Logical operations**: copy, AND, OR, and XOR, each optionally with the source inverted.
 - **Host cursor**: the host draws the mouse cursor (Section 3), so native drawing never needs the guest's cursor shielding (`MSShieldCsr` / `MSShowCsr`). The native code still leaves spans near the cursor to the guest when the guest cursor is in use.
 
+### 2.5 The screen address and illegal access detection
+
+- Screen `Bitmap` records hold `EXT_TVRAM_BASE` (`$F000_0000`). Its 16 MB block avoids every high memory that real machines map (X68030 and Xellent30 at `$0100_0000`, 060turbo at `$1000_0000`) and the `$FFxx_xxxx` block that sign-extended absolute short addresses reach. Other addresses above 24 bits mirror the 24-bit space as on the 68000.
+- Only native drawing writes the screen. A guest access to the block is counted in `X68kBus::illegal_screen_accesses`, writes are dropped, and reads return 0. The first access during each A-Line API is reported on standard error with the API and its call site, which `on_a_line` records on every A-Line call.
+- `X68kBus::guest_screen_mapped` maps the block for guest code again. Verification against the guest routines (Section 4) and tests that write the screen through the bus set it.
+- User-mode access to the block raises a bus error, like VRAM and I/O.
+
 ---
 
 ## 3. Status by API
 
-All of the following are verified against the guest (Section 4) on screens above 1024×1024.
+All of the following are verified against the guest (Section 4) on screens above 1024×1024. Cases in the "Left to the guest" column run the guest routine, which draws nothing on an extended screen and is reported as an illegal access (Section 2.5).
 
 | API | Native behaviour and guest quirks reproduced | Left to the guest |
 | :--- | :--- | :--- |
@@ -98,10 +105,10 @@ Current result: in the scripted session, no guest code reads or writes the exten
 In order:
 
 1. **Handle the routines that assume TVRAM.** The fast screen clear and the panic alert box (Section 6.2) draw into TVRAM in extended modes.
-2. **Find writers outside the session.** Add a strict mode in which a guest access to the extended framebuffer is reported (or faults) instead of served, and use it during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
-3. **Close the remaining guest cases.** Every case in the "Left to the guest" column still draws into the extended framebuffer. Guest bugs (Section 6.1) are fixed rather than copied.
+2. **Find writers outside the session.** Use the illegal access reports (Section 2.5) during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
+3. **Close the remaining guest cases.** Every case in the "Left to the guest" column draws nothing on an extended screen. Guest bugs (Section 6.1) are fixed rather than copied.
 4. **Call guest services from native code.** `GMScroll` update regions that are not rectangles need the guest memory manager to resize a handle, and later APIs will need allocations too. This needs a way for a native handler to run a guest routine and resume afterwards.
-5. **Remove the guest mapping.** The screen bitmap's base stays as an identity token that native code recognises, but the guest can no longer address it. `GMNewBits` and `GMUnlockBits` immediates (Section 5.6 of the SX-Window reference) are revisited at this point.
+5. **Remove the guest mapping.** Done: the screen base moved to `$F000_0000` and guest accesses are detected (Section 2.5). The mapping remains only for verification.
 6. **Host TrueColor buffer.** Draw into a host buffer uploaded with `wgpu`, keeping the 16-color planar semantics where applications depend on them. Optimise only if performance requires it.
 7. **Partial VM for supervisor tasks.** SX applications run in user mode, and user-mode access to I/O and VRAM raises a bus error, so only `SYS/FSX.X` touches the screen. Tasks that switch to supervisor mode (DOS `_SUPER`, IOCS `_B_SUPER` `$81`) are to run with virtualized TVRAM and GVRAM.
 

@@ -27,8 +27,9 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
         state: &mut CpuState,
         bus: &mut X68kBus,
         opcode: u16,
-        _pc: u32,
+        pc: u32,
     ) -> msx68k_cpu::TrapResult {
+        bus.last_a_line = (opcode, pc);
         bus.apply_pending_resolution(state, opcode);
         bus.handle_native_gm(state, opcode)
     }

@@ -18,12 +18,25 @@ pub const MAX_MAIN_RAM_BYTES: usize = 12 * 1024 * 1024;
 pub const GVRAM_BYTES: usize = 512 * 1024;
 /// TVRAM physical capacity (`512 KB`).
 pub const TVRAM_BYTES: usize = 512 * 1024;
-/// Extended Planar Framebuffer Base Address (`$1000_0000`) for Beyond 1K×1K modes.
 /// Main RAM protected from user mode until the guest writes the area set register.
 const RESET_SUPERVISOR_AREA: u32 = 0x2000;
 /// Everything from here up (VRAM, I/O, SRAM, and ROM) is reachable only in supervisor mode.
 const SUPERVISOR_ONLY_BASE: u32 = 0x00C0_0000;
-pub const EXT_TVRAM_BASE: u32 = 0x1000_0000;
+/// Base address that screen `Bitmap` records hold for resolutions beyond 1024×1024.
+///
+/// It lies in a 16 MB block that real machines leave to motherboard mirrors: above the
+/// X68030 and Xellent30 high memory at `$0100_0000` and the 060turbo high memory at
+/// `$1000_0000`, and below the `$FFxx_xxxx` block that sign-extended absolute short addresses
+/// reach. Other addresses above 24 bits mirror the 24-bit space as on the 68000.
+pub const EXT_TVRAM_BASE: u32 = 0xF000_0000;
+/// Size of the block at [`EXT_TVRAM_BASE`] that belongs to the extended screen.
+pub const EXT_TVRAM_WINDOW: u32 = 0x0100_0000;
+
+/// Whether `addr` falls in the extended screen block at [`EXT_TVRAM_BASE`].
+#[inline]
+pub fn is_ext_screen_addr(addr: u32) -> bool {
+    addr.wrapping_sub(EXT_TVRAM_BASE) < EXT_TVRAM_WINDOW
+}
 /// Sprite / PCG / BG window capacity (`64 KB`, `$EB0000`–`$EBFFFF`).
 pub const SPRITE_WINDOW_BYTES: usize = 64 * 1024;
 /// Core I/O window capacity (`128 KB`, `$E80000`–`$E9FFFF`).
@@ -117,7 +130,9 @@ pub struct X68kBus {
     pub host_mouse_pos: Option<(i16, i16)>,
     /// Configured display target resolution `(width, height)` across reboots and mode switches.
     pub target_resolution: Option<(u32, u32)>,
-    /// Extended planar framebuffer at `0x1000_0000` (Approach B: Beyond 1K×1K).
+    /// Screen buffer for resolutions beyond 1024×1024, whose screen `Bitmap` records hold
+    /// [`EXT_TVRAM_BASE`] as their base. Only native drawing reaches it unless
+    /// [`Self::guest_screen_mapped`] is set.
     pub(crate) ext_tvram: Option<Vec<u8>>,
     /// `SYS/FSX.X` load address once its Graph Manager APIs may be replaced natively.
     pub(crate) native_gm_text_base: Option<u32>,
@@ -131,6 +146,15 @@ pub struct X68kBus {
     pub native_gm_enabled: bool,
     /// Number of Graph Manager calls completed natively.
     pub native_gm_calls: u64,
+    /// Lets guest code read and write the extended screen, as verification against the guest
+    /// drawing routines needs. Otherwise such accesses are dropped and counted as illegal.
+    pub guest_screen_mapped: bool,
+    /// Number of guest accesses to the extended screen while it is not mapped.
+    pub illegal_screen_accesses: u64,
+    /// The last A-Line opcode and its address, for reporting illegal screen accesses.
+    pub(crate) last_a_line: (u16, u32),
+    /// A-Line opcodes already reported for illegal screen accesses.
+    reported_screen_accesses: std::collections::HashSet<u16>,
     pub(crate) ext_tvram_row_bytes: usize,
     pub(crate) ext_tvram_plane_bytes: usize,
     /// Cached extended planar TVRAM preserved across downscaling to standard resolutions.
@@ -201,6 +225,10 @@ impl X68kBus {
             pending_resolution: None,
             native_gm_enabled: true,
             native_gm_calls: 0,
+            guest_screen_mapped: false,
+            illegal_screen_accesses: 0,
+            last_a_line: (0, 0),
+            reported_screen_accesses: std::collections::HashSet::new(),
             ext_tvram_row_bytes: 0,
             ext_tvram_plane_bytes: 0,
             saved_ext_tvram: None,
@@ -438,11 +466,31 @@ impl X68kBus {
         self.write_rom_u8(addr.wrapping_add(1), val as u8);
     }
 
+    /// Notes a guest access to the extended screen and returns whether the guest may reach it.
+    ///
+    /// The screen's base lies above the 68000's 24-bit address bus, so only code that took it
+    /// from a screen `Bitmap` record gets here: guest drawing that native code has not replaced.
+    #[cold]
+    fn guest_screen_access(&mut self, addr: u32, is_write: bool) -> bool {
+        if self.guest_screen_mapped {
+            return true;
+        }
+        self.illegal_screen_accesses += 1;
+        let (opcode, pc) = self.last_a_line;
+        if self.reported_screen_accesses.insert(opcode) {
+            eprintln!(
+                "Illegal screen {} at ${addr:08X} during A-Line ${opcode:04X} called at ${pc:06X}",
+                if is_write { "write" } else { "read" }
+            );
+        }
+        false
+    }
+
     /// Reads a memory byte for a debugger without touching any bus or peripheral state.
     ///
     /// Returns `None` for I/O regions, whose reads may have side effects, and for unmapped memory.
     pub fn peek_u8(&self, addr: u32) -> Option<u8> {
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
             let off = (addr - EXT_TVRAM_BASE) as usize;
             return self.ext_tvram.as_ref().and_then(|b| b.get(off).copied());
         }
@@ -470,7 +518,7 @@ impl X68kBus {
 
     /// Writes a Main RAM or ROM byte for a debugger, returning `false` for any other address.
     pub fn poke_u8(&mut self, addr: u32, val: u8) -> bool {
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
             return false;
         }
         match MemoryRegion::from_addr(addr & 0x00FF_FFFF) {
@@ -585,13 +633,16 @@ impl Bus for X68kBus {
     }
 
     fn read_u8(&mut self, addr: u32, supervisor: bool) -> Result<u8, BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: false,
             });
         }
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
+            if !self.guest_screen_access(addr, false) {
+                return Ok(0);
+            }
             let off = (addr - EXT_TVRAM_BASE) as usize;
             return Ok(self.ext_tvram.as_ref().and_then(|b| b.get(off).copied()).unwrap_or(0));
         }
@@ -718,13 +769,16 @@ impl Bus for X68kBus {
     }
 
     fn read_u16(&mut self, addr: u32, supervisor: bool) -> Result<u16, BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: false,
             });
         }
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
+            if !self.guest_screen_access(addr, false) {
+                return Ok(0);
+            }
             let off = (addr - EXT_TVRAM_BASE) as usize;
             if let Some(ref b) = self.ext_tvram {
                 if off + 1 < b.len() {
@@ -765,13 +819,16 @@ impl Bus for X68kBus {
     }
 
     fn write_u8(&mut self, addr: u32, val: u8, supervisor: bool) -> Result<(), BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: true,
             });
         }
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
+            if !self.guest_screen_access(addr, true) {
+                return Ok(());
+            }
             self.access_flags.tvram_accessed = true;
             let off = (addr - EXT_TVRAM_BASE) as usize;
             let plane_bytes = self.ext_tvram_plane_bytes;
@@ -972,13 +1029,16 @@ impl Bus for X68kBus {
     }
 
     fn write_u16(&mut self, addr: u32, val: u16, supervisor: bool) -> Result<(), BusFault> {
-        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || addr >= EXT_TVRAM_BASE) {
+        if !supervisor && (addr & 0x00FF_FFFF >= SUPERVISOR_ONLY_BASE || is_ext_screen_addr(addr)) {
             return Err(BusFault::BusError {
                 addr: addr & 0x00FF_FFFF,
                 is_write: true,
             });
         }
-        if addr >= EXT_TVRAM_BASE {
+        if is_ext_screen_addr(addr) {
+            if !self.guest_screen_access(addr, true) {
+                return Ok(());
+            }
             self.access_flags.tvram_accessed = true;
             let off = (addr - EXT_TVRAM_BASE) as usize;
             let plane_bytes = self.ext_tvram_plane_bytes;

@@ -81,6 +81,12 @@ fn test_iocs_crtmod_mode_50_queries_and_mode_switches() {
     assert_eq!(vm.bus.active_tvram_plane_bytes(), 320 * 1440); // 460,800 bytes per plane
 
     // 6. Test Planar Memory Access at EXT_TVRAM_BASE ($1000_0000)
+    // Guest code cannot reach the extended screen unless it is mapped for verification.
+    vm.bus.write_u8(EXT_TVRAM_BASE, 0xAA, true).unwrap();
+    assert_eq!(vm.bus.read_u8(EXT_TVRAM_BASE, true).unwrap(), 0, "unmapped writes are dropped");
+    assert_eq!(vm.bus.illegal_screen_accesses, 2);
+    vm.bus.guest_screen_mapped = true;
+
     // Enable CRTC simultaneous write across all 4 planes (R21 bit 8 + plane mask 0x0F)
     vm.bus.crtc.regs[21] = 0x01F0; // simultaneous write to planes 0, 1, 2, 3
     vm.bus.write_u8(EXT_TVRAM_BASE, 0xAA, true).unwrap();

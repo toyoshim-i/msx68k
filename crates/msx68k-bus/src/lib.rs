@@ -17,7 +17,7 @@ pub mod vm;
 
 pub use msx68k_cpu::{Bus, BusFault, NoopTrapHandler, TrapHandler};
 pub use bus::{
-    HardwareAccessFlags, X68kBus, EXT_TVRAM_BASE, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
+    is_ext_screen_addr, HardwareAccessFlags, X68kBus, EXT_TVRAM_BASE, EXT_TVRAM_WINDOW, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
     ROM_WINDOW_BYTES, SPRITE_WINDOW_BYTES, TVRAM_BYTES,
 };
 pub use crtc::{Crtc, CrtcSyncEvents, RASTER_BLOCK_BYTES, TVRAM_PLANE_BYTES};
@@ -73,6 +73,25 @@ mod tests {
         bus.write_u8(0x00E8_6001, 1, true).unwrap();
         assert!(bus.read_u16(0x3FFE, false).is_err());
         assert!(bus.read_u16(0x4000, false).is_ok());
+    }
+
+    #[test]
+    fn test_only_the_extended_screen_block_leaves_the_24_bit_mirror() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        bus.write_u16(0x0400, 0x1234, true).unwrap();
+        // Tagged pointers and the 060turbo high memory range mirror Main RAM, as on the 68000.
+        for tagged in [0x1200_0400u32, 0x1000_0400, 0xEF00_0400, 0xF100_0400] {
+            assert_eq!(bus.read_u16(tagged, true).unwrap(), 0x1234, "{tagged:08X}");
+        }
+        // Sign-extended absolute short addresses reach the IPL ROM at $FF8000 and above.
+        bus.write_rom_u16(0x00FF_8000, 0xBEEF);
+        assert_eq!(bus.read_u16(0xFFFF_8000, true).unwrap(), 0xBEEF);
+
+        assert!(is_ext_screen_addr(EXT_TVRAM_BASE));
+        assert!(is_ext_screen_addr(EXT_TVRAM_BASE + EXT_TVRAM_WINDOW - 1));
+        assert!(!is_ext_screen_addr(EXT_TVRAM_BASE + EXT_TVRAM_WINDOW));
+        assert_eq!(bus.read_u16(EXT_TVRAM_BASE, true).unwrap(), 0);
+        assert_eq!(bus.illegal_screen_accesses, 1, "guest access to the screen block is detected");
     }
 
     #[test]

@@ -827,21 +827,22 @@ An earlier plan replaced the twelve entries of the procedure table (Section 5.3)
 
 ---
 
-### 5.6 Beyond 1K×1K Architecture: Extended Planar Framebuffer (`EXT_TVRAM_BASE = $1000_0000`) & Configuration Persistence
+### 5.6 Beyond 1K×1K Architecture: Extended Planar Framebuffer (`EXT_TVRAM_BASE = $F000_0000`) & Configuration Persistence
 
 > [!NOTE]
-> The extended framebuffer below is transitional. Its guest mapping is removed once no guest code draws into it ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 5). It was once labelled "Approach B", which does not match the option chosen when this work was planned.
+> The guest no longer reaches this framebuffer: only native drawing writes it, and guest accesses are detected as illegal unless `X68kBus::guest_screen_mapped` is set for verification ([NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5). It was once labelled "Approach B", which does not match the option chosen when this work was planned.
 
 While 1024×768 and 1024×1024 fit within the standard 512 KB TVRAM memory space (`$00E0_0000..$00E7_FFFF`, 128 bytes/line * 1024 lines * 4 planes), display resolutions beyond 1024×1024 (e.g. 1280×720, 1280×960, 1600×1200, 1920×1080 Full HD, up to 3840×2160 4K UHD) exceed the physical capacity and 128-byte stride of standard TVRAM.
 
 To support arbitrary modern high resolutions while maintaining **100% binary compatibility** with Graph Man's native 4-plane planar drawing routines without requiring hypercall translation of every single drawing primitive, **msx68k** implements **Approach B: Extended Planar Framebuffer**:
 
-#### 1. 32-Bit Linear Memory Mapping (`$1000_0000`):
-- In Motorola 68020/68030 32-bit linear address space, `msx68k-bus` maps an extended planar framebuffer at:
+#### 1. Screen Address Block (`$F000_0000`):
+- Screen `Bitmap` records hold a base in a 16 MB block that real machines leave to motherboard mirrors:
   ```text
-  EXT_TVRAM_BASE = $1000_0000 (256 MB mark, safely above the 24-bit $0000_0000..$00FF_FFFF X68000 space)
+  EXT_TVRAM_BASE = $F000_0000, EXT_TVRAM_WINDOW = 16 MB
   ```
-- Any 68000/68030 memory access at `addr >= EXT_TVRAM_BASE` is redirected by `X68kBus` to `ext_tvram: Option<Vec<u8>>`:
+  It avoids the X68030 and Xellent30 high memory (`$0100_0000` and up) and the 060turbo high memory (`$1000_0000` and up), which XEiJ also maps there, and the `$FFxx_xxxx` block that sign-extended absolute short addresses (`$8000`..`$FFFF`) reach. Every other address above 24 bits mirrors the 24-bit space as on the 68000, so tagged pointers keep working.
+- The block is backed by `ext_tvram: Option<Vec<u8>>`:
   - When resolution is `w <= 1024 && h <= 1024`, standard TVRAM at `$00E0_0000` is active (`ext_tvram = None`).
   - When resolution exceeds 1024×1024 (e.g. 1920×1080), `apply_screen_resolution` allocates `ext_tvram` with exact dimensions, sets `ext_tvram_row_bytes`, `ext_tvram_plane_bytes`, and migrates existing TVRAM contents.
 
@@ -851,11 +852,11 @@ Because Graph Man primitives dynamically load `BitMap.rowBytes` (`+0x0E`) and `B
   - For `1920×1080`: `(1920 / 16) * 2 = 240` bytes per scanline per plane (compared to 128 bytes in standard TVRAM).
 - **`planeSize`**: 32-bit byte offset between planes = `rowBytes * height`.
   - For `1920×1080`: `240 * 1080 = 259,200` bytes per plane ($0003_F480). Total 4-plane size = `1,036,800` bytes ($000F_D200).
-- Plane starting addresses at `$1000_0000`:
-  - Plane 0: `$1000_0000`
-  - Plane 1: `$1000_0000 + planeSize` (`$1003_F480`)
-  - Plane 2: `$1000_0000 + 2 * planeSize` (`$1007_E900`)
-  - Plane 3: `$1000_0000 + 3 * planeSize` (`$100B_DD80`)
+- Plane starting addresses at `$F000_0000`:
+  - Plane 0: `$F000_0000`
+  - Plane 1: `$F000_0000 + planeSize` (`$F003_F480`)
+  - Plane 2: `$F000_0000 + 2 * planeSize` (`$F007_E900`)
+  - Plane 3: `$F000_0000 + 3 * planeSize` (`$F00B_DD80`)
 
 #### 3. Immediate Instruction Patches in `SYS/FSX.X`:
 While Graph Man's drawing loops dynamically read `BitMap` fields, two functions in `SYS/FSX.X` contain immediate 32-bit constants initializing newly allocated screen bitmaps to `$00E0_0000`:
@@ -863,7 +864,7 @@ While Graph Man's drawing loops dynamically read `BitMap` fields, two functions 
 - **`GMUnlockBits` (`text_base + 0x02F32E`)**: `move.l #$00E00000, 10(A1)` (`21 7C 00 E0 00 00 00 0A` or `20 3C ...`).
 
 When `apply_screen_resolution` switches between standard TVRAM and Extended TVRAM, it dynamically updates these immediate constants in guest RAM:
-- If `use_ext`: Patches immediates at `0x02F23A` and `0x02F32E` to `$1000_0000`.
+- If `use_ext`: Patches immediates at `0x02F23A` and `0x02F32E` to `$F000_0000`.
 - If standard: Restores immediates to `$00E0_0000`.
 
 #### 4. Hardware CRTC & Host Vicon GPU Pipeline:

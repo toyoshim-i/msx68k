@@ -6,7 +6,7 @@
 
 use msx68k_cpu::{CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
 
-use crate::bus::{X68kBus, EXT_TVRAM_BASE};
+use crate::bus::{is_ext_screen_addr, X68kBus, EXT_TVRAM_BASE};
 
 const SX_GET_DISP_RECT: u16 = 0xA432;
 const GM_FRAME_RECT: u16 = 0xA172;
@@ -1136,7 +1136,7 @@ impl X68kBus {
     }
 
     fn store_plane_byte(&mut self, addr: u32, value: u8) {
-        let (slice, offset) = if addr >= EXT_TVRAM_BASE {
+        let (slice, offset) = if is_ext_screen_addr(addr) {
             let Some(buffer) = self.ext_tvram.as_mut() else {
                 return;
             };

@@ -225,7 +225,8 @@ fn test_vicon_high_res_ext_tvram_rendering() {
     // Enable Text display: R2 bit 5 -> 0x0020
     vm.bus.write_u16(0x00E8_2600, 0x0020, true).unwrap();
 
-    // Write a pixel pattern at (x=100, y=100) using EXT_TVRAM_BASE
+    // Write a pixel pattern at (x=100, y=100) using EXT_TVRAM_BASE, mapped as for verification
+    vm.bus.guest_screen_mapped = true;
     // row_bytes = ((1920 + 15) / 16) * 2 = 240
     // in_plane = 100 * 240 + (100 / 8) = 24012
     let row_bytes = vm.bus.active_tvram_row_bytes();
