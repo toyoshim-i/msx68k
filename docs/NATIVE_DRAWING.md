@@ -98,8 +98,39 @@ Current result: in the scripted session, no guest code reads or writes the exten
 In order:
 
 1. **Find writers outside the session.** Add a strict mode in which a guest access to the extended framebuffer is reported (or faults) instead of served, and use it during ordinary use and with more applications. APIs not yet seen include `GMLine` / `GMLineRel` (`$A170`, `$A171`), `GMFrameOval` / `GMFillOval` (`$A174`, `$A175`), `GMFrameRRect` / `GMFillRRect` (`$A176`, `$A177`), `GMFrameArc` / `GMFillArc` (`$A178`, `$A179`), `GMFramePoly` / `GMFillPoly` (`$A17C`, `$A17D`), `GMFrameNPoly` / `GMFillNPoly` (`$A1EB`, `$A1EC`), and scaled `GMCopy`.
-2. **Close the remaining guest cases.** Every case in the "Left to the guest" column still draws into the extended framebuffer. Guest bugs (`GMCopyMask` with a narrow source, `GMFrameRgn` with a 0×0 pen on a shaped region) get a sensible native result rather than a copy of the bug.
+2. **Close the remaining guest cases.** Every case in the "Left to the guest" column still draws into the extended framebuffer. Guest bugs (Section 6.1) get a sensible native result rather than a copy of the bug.
 3. **Call guest services from native code.** `GMScroll` update regions that are not rectangles need the guest memory manager to resize a handle, and later APIs will need allocations too. This needs a way for a native handler to run a guest routine and resume afterwards.
 4. **Remove the guest mapping.** The screen bitmap's base stays as an identity token that native code recognises, but the guest can no longer address it. `GMNewBits` and `GMUnlockBits` immediates (Section 5.6 of the SX-Window reference) are revisited at this point.
 5. **Host TrueColor buffer.** Draw into a host buffer uploaded with `wgpu`, keeping the 16-color planar semantics where applications depend on them. Optimise only if performance requires it.
 6. **Partial VM for supervisor tasks.** SX applications run in user mode, and user-mode access to I/O and VRAM raises a bus error, so only `SYS/FSX.X` touches the screen. Tasks that switch to supervisor mode (DOS `_SUPER`, IOCS `_B_SUPER` `$81`) are to run with virtualized TVRAM and GVRAM.
+
+---
+
+## 6. Guest Bugs and Quirks
+
+Findings about `SYS/FSX.X` itself, gathered while comparing native and guest drawing. Offsets are from `text_base`.
+
+### 6.1 Bugs
+
+Behaviour that gives a wrong result or crashes. The native versions do not copy these: each case either stays on the guest routine for now or gets a sensible native result (Section 5, step 2).
+
+| API | Condition | Guest behaviour | Native handling |
+| :--- | :--- | :--- | :--- |
+| `SXGetDispRect` `$A432` (`+0x15196`) | An extended screen mode (`_CRTMOD` `$50`) | Indexes its fixed CRT table with the low 5 bits of the mode, so `$50` reads as mode `$10`, 768×512. Popup menus use this rect as their bounds and were confined to it. | Returns the actual display size. |
+| `GMCopyMask` `$A180` (`+0x24AF2`) | The source rect is narrower than the mask rect, or reaches past the left or right side of the source bitmap | Counts the words to copy from the clipped source, but takes the pixels within those words from the destination clip alone. It copies pixels past the source's edge up to the end of the word, and when the difference is large enough it overruns its row mask buffer on the stack and corrupts the return address, ending in a system error. | Left to the guest. To be replaced with a native result clipped to the source. |
+| `GMFrameRgn` `$A17A` (`+0x2283E`) | A 0×0 pen on a region that is not a rectangle | Draws stray dots outside the region, for example past the inner corner of an L-shaped region. | Left to the guest. To be replaced with a native result. |
+
+### 6.2 Quirks
+
+Odd but deterministic behaviour that callers can observe. The native versions reproduce all of these.
+
+| API | Behaviour |
+| :--- | :--- |
+| `GMScroll` `$A17E` | On the screen bitmap it returns the `MSShowCsr` handler address in `D0` instead of 0, because its last call, `MSShowCsr`, leaves the address that the A-Line dispatcher loaded into `D0`. |
+| `GMCopyMask` `$A180` | The mask rect is not clipped to the mask bitmap. A hidden graph returns 1 if the source rect meets the source bitmap and 0 otherwise, with N set. A call that draws, or whose source clipping leaves nothing, returns 0 with X, N, and C set, from the `subq` that counts down its cursor shielding. |
+| `GMPlotImg` `$A182` | A page count of 4 or more or a style of 10 or more returns −1. A bitmap with no active planes returns the page count. An empty rect returns its left edge, sign-extended. Planes beyond the image's are filled clear, except the fourth, which is filled set. |
+| `GMFrameRgn` `$A17A` | A 0×0 pen on a rectangle fills the whole rectangle, although insetting by nothing would leave nothing to frame. |
+| `GMDupHRImg` `$A188` | Writes planes 0 and 1 only, and phases the repeated pattern by the bitmap's left edge rather than by the drawing position. |
+| `GMDupVRImg` `$A189` | Picks each source row from the destination row's unsigned 16-bit coordinate modulo the image height, not from the offset from the drawing position. |
+| `GMInvertRect` `$A1A3`, `$A1A4` | The dash rotation comes from the low word of the bitmap record's address. The sides also cover the top and bottom rows unless the frame touches the bitmap edge, so corners are inverted twice and come back unchanged under `GMInvertRect`. |
+| `GMScroll` `$A17E`, `GMFrameRgn` `$A17A` | Allocate and free a temporary region, and `GMScroll` may move the update region's block, so heap contents change even though no caller-visible result depends on it. The native versions do not allocate (Section 3). |
