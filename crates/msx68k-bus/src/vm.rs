@@ -14,9 +14,9 @@ use crate::timing::{BusTimingConfig, CpuSpeedMode, VmRole};
 
 /// Default mixed-mode hypercall trap handler for the X68000 virtual machine.
 ///
-/// Intercepts reserved F-Line hypercall opcodes `$FE80..=$FE8F` and dispatches them to
-/// [`X68kBus::handle_hypercall`], while passing all other F-Line and A-Line instructions
-/// through standard 68000 exception vectors.
+/// Hands F-Line instructions to [`X68kBus::handle_hypercall`], which carries out the
+/// hypercalls installed at their addresses and passes every other F-Line and A-Line
+/// instruction through the standard 68000 exception vectors.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BusTrapHandler;
 
@@ -298,6 +298,9 @@ impl X68kVm {
         // flags, so other VMs keep the 68000's mirroring for compatibility.
         bus.extensions_reserved = config.role == VmRole::MasterSx;
         bus.cpu_model = config.cpu_model;
+        if config.role == VmRole::MasterSx {
+            bus.install_app_entry();
+        }
         Self {
             config,
             cpu_state: CpuState::with_model(config.cpu_model),

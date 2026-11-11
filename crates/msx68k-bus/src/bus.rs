@@ -94,6 +94,10 @@ pub struct X68kBus {
     pub(crate) gvram: Option<Box<[u8]>>,
     /// Lazily allocated TVRAM (`512 KB`, `$E00000`–`$E7FFFF`).
     pub(crate) tvram: Option<Box<[u8]>>,
+    /// Addresses where a hypercall has been installed (see [`crate::hypercall`]).
+    pub(crate) hypercall_sites: std::collections::HashMap<u32, crate::hypercall::HypercallId>,
+    /// Whether the application entry is mapped at the end of the SCSI ROM window.
+    pub(crate) app_entry_installed: bool,
     /// TVRAM and GVRAM pages written since the last [`Self::take_written_vram_pages`].
     vram_written: DirtyVramPages,
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
@@ -221,6 +225,8 @@ impl X68kBus {
             gvram: None,
             tvram: None,
             vram_written: DirtyVramPages::default(),
+            hypercall_sites: Default::default(),
+            app_entry_installed: false,
             sprite_bg: None,
             sram,
             sram_write_enabled: false,
@@ -437,6 +443,7 @@ impl X68kBus {
         }
         self.supervisor_area_limit = RESET_SUPERVISOR_AREA;
         self.sram_write_enabled = false;
+        self.forget_ram_hypercalls();
 
         self.crtc = Crtc::new();
         self.vicon = Vicon::new();
@@ -562,7 +569,7 @@ impl X68kBus {
             }
             MemoryRegion::Sram => self.sram.get((a - 0x00ED_0000) as usize).copied(),
             MemoryRegion::Rom => {
-                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
+                if self.in_absent_scsi_rom_window(a) {
                     return None;
                 }
                 self.rom.get((a - 0x00F0_0000) as usize).copied()
@@ -821,7 +828,7 @@ impl Bus for X68kBus {
             }
             MemoryRegion::Rom => {
                 let offset = (a - 0x00F0_0000) as usize;
-                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
+                if self.in_absent_scsi_rom_window(a) {
                     // Unpopulated SCSI ROM window ($FC0000-$FDFFFF) raises Bus Error on standard EXPERT
                     return Err(BusFault::BusError {
                         addr: a,
@@ -1084,7 +1091,7 @@ impl Bus for X68kBus {
                 Ok(())
             }
             MemoryRegion::Rom => {
-                if (0x00FC_0000..0x00FE_0000).contains(&a) && !self.scsi.scsi_rom_enabled {
+                if self.in_absent_scsi_rom_window(a) {
                     return Err(BusFault::BusError {
                         addr: a,
                         is_write: true,

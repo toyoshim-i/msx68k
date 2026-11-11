@@ -135,24 +135,18 @@ impl X68kBus {
         *axis = axis.saturating_add(notches);
     }
 
-    /// `SxWheelConfig` hypercall: `D0.W = 0` returns the wheel settings, `D0.W = 1` sets them,
-    /// in `D1.L` (1 to reverse), `D2.L` (arrow clicks per notch), and `D3.L` (trackpad pixels
-    /// per notch). Values out of range are clamped. `D0.L` returns 0, or -1 for another `D0.W`.
-    pub(crate) fn hypercall_wheel_config(&mut self, state: &mut CpuState) -> TrapResult {
-        match state.d[0] as u16 {
-            0 => {}
-            1 => {
-                self.wheel_config = WheelConfig {
-                    reverse: state.d[1] != 0,
-                    clicks_per_notch: state.d[2].min(u8::MAX as u32) as u8,
-                    trackpad_pixels: state.d[3].min(u16::MAX as u32) as u16,
-                }
-                .clamped();
+    /// `GetWheelConfig` and `SetWheelConfig` application functions: return, after setting them
+    /// when `set`, the wheel settings in `D1.L` (1 to reverse), `D2.L` (arrow clicks per
+    /// notch), and `D3.L` (trackpad pixels per notch). Values out of range are clamped. `D0.L`
+    /// returns 0.
+    pub(crate) fn hypercall_wheel_config(&mut self, state: &mut CpuState, set: bool) -> TrapResult {
+        if set {
+            self.wheel_config = WheelConfig {
+                reverse: state.d[1] != 0,
+                clicks_per_notch: state.d[2].min(u8::MAX as u32) as u8,
+                trackpad_pixels: state.d[3].min(u16::MAX as u32) as u16,
             }
-            _ => {
-                state.d[0] = u32::MAX;
-                return TrapResult::Handled { extra_cycles: 0 };
-            }
+            .clamped();
         }
         let config = self.wheel_config;
         state.d[0] = 0;

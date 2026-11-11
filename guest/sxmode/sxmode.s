@@ -7,6 +7,7 @@
 	.include "doscall.mac"
 	.include "iocscall.mac"
 	.include "sxcall.mac"
+	.include "msx68k.mac"
 
 	.text
 	.globl	_start
@@ -587,12 +588,15 @@ draw_widgets_done:
 * -----------------------------------------------------------------------------
 query_wheel_config:
 	movem.l	d0-d3/a0, -(sp)
-	moveq.l	#0, d0
-	HYPERCALL HYPER_SX_WHEEL_CONFIG	; $FE89
+	moveq.l	#MSX68K_FN_GET_WHEEL, d0
+	bsr	msx68k_call
+	tst.l	d0
+	bmi.s	query_wheel_done	; Not on msx68k: keep the defaults
 	lea	wheel_reverse(pc), a0
 	move.w	d1, (a0)+
 	move.w	d2, (a0)+
 	move.w	d3, (a0)
+query_wheel_done:
 	movem.l	(sp)+, d0-d3/a0
 	rts
 
@@ -610,14 +614,22 @@ set_wheel_config:
 	move.w	(a0)+, d2
 	moveq.l	#0, d3
 	move.w	(a0), d3
-	moveq.l	#1, d0
-	HYPERCALL HYPER_SX_WHEEL_CONFIG	; $FE89
+	moveq.l	#MSX68K_FN_SET_WHEEL, d0
+	bsr	msx68k_call
+	tst.l	d0
+	bmi.s	set_wheel_done
 	lea	wheel_reverse(pc), a0
 	move.w	d1, (a0)+
 	move.w	d2, (a0)+
 	move.w	d3, (a0)
+set_wheel_done:
 	movem.l	(sp)+, d0-d3/a0
 	rts
+
+* -----------------------------------------------------------------------------
+* Helper: msx68k_call (see msx68k.mac)
+* -----------------------------------------------------------------------------
+	MSX68K_CALL_ROUTINE
 
 * -----------------------------------------------------------------------------
 * Helper: apply_mode_by_index

@@ -31,7 +31,7 @@ _TEXTPUT	.equ	$1B
 _CLIPPUT	.equ	$1C
 _SP_INIT	.equ	$20
 _B_INTVEC	.equ	$2C
-_B_SUPER	.equ	$2E
+_B_SUPER	.equ	$81
 _B_BPEEK	.equ	$82
 _B_BREAD	.equ	$83
 _B_BPOKE	.equ	$85

@@ -1,26 +1,11 @@
 * -----------------------------------------------------------------------------
-* SX-Window v3.1 A-Line ($Axxx) API & Native Hypercall ($FExx) Equates
+* SX-Window v3.1 A-Line ($Axxx) API Equates
 * Clean-room specification aligned with official Sharp SX-Window Workroom SDK
 * -----------------------------------------------------------------------------
 
 SXCALL	.macro	trap
 	.dc.w	&trap
 	.endm
-
-HYPERCALL .macro id
-	.dc.w	&id
-	.endm
-
-* -----------------------------------------------------------------------------
-* Native Mixed Mode Hypercall Opcodes ($FE80..$FE8F)
-* -----------------------------------------------------------------------------
-HYPER_SX_MOUSE_SYNC	.equ	$FE81	; Synchronize SX-Window mouse coordinates
-HYPER_SCSI_ROM_BOOT	.equ	$FE82	; SCSI HDD boot loader invocation
-HYPER_SCSI_ROMDB_BUILD	.equ	$FE83	; SCSI romdb block device driver builder
-HYPER_SCSI_IOCS_INSTALL	.equ	$FE84	; SCSI IOCS $F5 vector installer
-HYPER_SCSI_IOCS_DISPATCH .equ	$FE85	; SCSI IOCS $F5 runtime dispatcher
-HYPER_SX_SET_SCREEN_MODE .equ	$FE88	; Dynamic resolution & screen mode switch
-HYPER_SX_WHEEL_CONFIG	.equ	$FE89	; Mouse wheel settings (D0.W = 0 get, 1 set; D1-D3)
 
 * -----------------------------------------------------------------------------
 * Memory Manager (MM) APIs ($A000..$A055)

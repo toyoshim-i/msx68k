@@ -85,9 +85,10 @@ fn settings_item_sets_the_wheel_and_saves_it() {
     vm.run_steps(30_000_000);
     assert_eq!(vm.bus.wheel_config, WheelConfig::default());
 
-    // Open the drive window, then the control panel, whose first item is the settings app.
+    // Open the drive window, then the control panel (コントロール.X, third row, second icon),
+    // whose first item is the settings app.
     click(&mut vm, (22, 340), 2, 3_000_000);
-    click(&mut vm, (263, 250), 2, 6_000_000);
+    click(&mut vm, (183, 250), 2, 6_000_000);
     click(&mut vm, (113, 107), 1, 6_000_000);
 
     // The window opens at (180, 120): "Reverse", "3" lines per notch, and "Fast" trackpad.

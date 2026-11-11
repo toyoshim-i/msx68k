@@ -31,7 +31,7 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 
 - **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
 
-- **Mixed Mode (`68k` ⇄ `ARM`)**: Reserved A-Line (`$Axxx`) and F-Line (`$FFxx` / `$FExx`) opcodes trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 4-byte native stubs (`[$FE80 | id, $4E75]`), relocation-aware module patching (`SYS/FSX.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification, and [docs/SX_WINDOW_API_AND_HOOK_STATUS.md](docs/SX_WINDOW_API_AND_HOOK_STATUS.md) for the complete SX-Window v3.1 A-Line API catalog (1,050 calls) and Master Hook Tracking Reference.
+- **Mixed Mode (`68k` ⇄ `ARM`)**: A-Line (`$Axxx`) APIs and one F-Line hypercall opcode (`$FBFF`, recognized by the address it runs at) trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 4-byte native stubs (`[$FBFF, $4E75]`), relocation-aware module patching (`SYS/FSX.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification, and [docs/SX_WINDOW_API_AND_HOOK_STATUS.md](docs/SX_WINDOW_API_AND_HOOK_STATUS.md) for the complete SX-Window v3.1 A-Line API catalog (1,050 calls) and Master Hook Tracking Reference.
 
 ### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
 For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
@@ -77,7 +77,7 @@ gdb-multiarch -ex 'set endian big' -ex 'set architecture m68k:68000' -ex 'target
 `set endian big` is required because GDB has no executable to learn the byte order from. Memory reads cover RAM, VRAM, SRAM, and ROM. I/O registers are not readable, so inspecting them cannot disturb peripherals.
 
 ### Runtime Window Controls (`msx68k-app`)
-- **Mouse**: 1:1 pixel-exact synchronization between the host OS cursor and the SX-Window cursor via the `SYS/FSX.X` `SxMouseSync` (`$FE81`) Mixed Mode hook (with automatic fallback to relative `Z8530 SCC` Channel B movement for non-SX-Window software). Hold the Right mouse button in SX-Window to display the top menu bar.
+- **Mouse**: 1:1 pixel-exact synchronization between the host OS cursor and the SX-Window cursor via the `SYS/FSX.X` `SxMouseSync` Mixed Mode hook (with automatic fallback to relative `Z8530 SCC` Channel B movement for non-SX-Window software). Hold the Right mouse button in SX-Window to display the top menu bar.
 - **Keyboard**: Forwarded as X68000 hardware scan codes via `MC68901 MFP` USART.
 - **Hotkeys**:
   - `F1`: Switch to `10MHz` mode (`CPU 10MHz / Bus 10MHz`)

@@ -86,7 +86,8 @@ pub fn synthesize_partition_boot_sector(
     sector
 }
 
-pub use crate::sxwin::HypercallId;
+pub use crate::hypercall::HypercallId;
+use crate::hypercall::HYPERCALL_OPCODE;
 
 /// Parsed X68000 SCSI partition table entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,29 +339,22 @@ impl X68kBus {
         // $FC004C (P - 4): "n68k"
         self.rom[SCSI_ROM_OFFSET + 0x4C..SCSI_ROM_OFFSET + 0x50].copy_from_slice(b"n68k");
 
-        // $FC0050 (P, SCSI Cold Boot entry): [0xFE, 0x82, 0x4E, 0x75] (ScsiRomBoot + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x50..SCSI_ROM_OFFSET + 0x54]
-            .copy_from_slice(&[0xFE, 0x82, 0x4E, 0x75]);
-
-        // $FC0060 (romdb builder): [0xFE, 0x83, 0x4E, 0x75] (ScsiRomdbBuild + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x60..SCSI_ROM_OFFSET + 0x64]
-            .copy_from_slice(&[0xFE, 0x83, 0x4E, 0x75]);
-
-        // $FC0064 (IOCS $F5 installer): [0xFE, 0x84, 0x4E, 0x75] (ScsiIocsInstall + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x64..SCSI_ROM_OFFSET + 0x68]
-            .copy_from_slice(&[0xFE, 0x84, 0x4E, 0x75]);
-
-        // $FC0068 (IOCS $F5 handler): [0xFE, 0x85, 0x4E, 0x75] (ScsiIocsDispatch + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x68..SCSI_ROM_OFFSET + 0x6C]
-            .copy_from_slice(&[0xFE, 0x85, 0x4E, 0x75]);
-
-        // $FC006C (romdb Strategy): [0xFE, 0x86, 0x4E, 0x75] (ScsiDriverStrategy + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x6C..SCSI_ROM_OFFSET + 0x70]
-            .copy_from_slice(&[0xFE, 0x86, 0x4E, 0x75]);
-
-        // $FC0070 (romdb Interrupt): [0xFE, 0x87, 0x4E, 0x75] (ScsiDriverInterrupt + RTS)
-        self.rom[SCSI_ROM_OFFSET + 0x70..SCSI_ROM_OFFSET + 0x74]
-            .copy_from_slice(&[0xFE, 0x87, 0x4E, 0x75]);
+        // Hypercall + RTS stubs: $FC0050 is P, the cold boot entry; $FC0060 and $FC0064 are
+        // reached through P - 16 and P - 12; $FC0068 is the IOCS $F5 handler; $FC006C and
+        // $FC0070 are the romdb Strategy and Interrupt routines.
+        let [hi, lo] = HYPERCALL_OPCODE.to_be_bytes();
+        for (offset, id) in [
+            (0x50, HypercallId::ScsiRomBoot),
+            (0x60, HypercallId::ScsiRomdbBuild),
+            (0x64, HypercallId::ScsiIocsInstall),
+            (0x68, HypercallId::ScsiIocsDispatch),
+            (0x6C, HypercallId::ScsiDriverStrategy),
+            (0x70, HypercallId::ScsiDriverInterrupt),
+        ] {
+            self.rom[SCSI_ROM_OFFSET + offset..SCSI_ROM_OFFSET + offset + 4]
+                .copy_from_slice(&[hi, lo, 0x4E, 0x75]);
+            self.register_hypercall(0x00F0_0000 + (SCSI_ROM_OFFSET + offset) as u32, id);
+        }
 
         // Pre-install vector $F5 into RAM vector table at $0007D4 ($400 + $F5 * 4)
         if self.main_ram.len() >= 0x07D8 {
@@ -368,7 +362,7 @@ impl X68kBus {
         }
     }
 
-    /// Handles `0xFE82` (`ScsiRomBoot`): boots attached SCSI HDD into Main RAM `$002000`.
+    /// Handles `ScsiRomBoot`: boots attached SCSI HDD into Main RAM `$002000`.
     pub(crate) fn hypercall_scsi_rom_boot(&mut self, state: &mut CpuState) -> TrapResult {
         // Ensure vector $F5 is installed
         if self.main_ram.len() >= 0x07D8 {
@@ -404,7 +398,7 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE83` (`ScsiRomdbBuild`): constructs the Human68k block driver header at `A4`.
+    /// Handles `ScsiRomdbBuild`: constructs the Human68k block driver header at `A4`.
     pub(crate) fn hypercall_scsi_romdb_build(&mut self, state: &mut CpuState) -> TrapResult {
         // Ensure vector $F5 is installed
         if self.main_ram.len() >= 0x07D8 {
@@ -456,7 +450,7 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE84` (`ScsiIocsInstall`): writes `$00FC_0068` into `$0007D4`.
+    /// Handles `ScsiIocsInstall`: writes `$00FC_0068` into `$0007D4`.
     pub(crate) fn hypercall_scsi_iocs_install(&mut self, state: &mut CpuState) -> TrapResult {
         if self.main_ram.len() >= 0x07D8 {
             self.main_ram[0x07D4..0x07D8].copy_from_slice(&0x00FC_0068u32.to_be_bytes());
@@ -465,7 +459,7 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE85` (`ScsiIocsDispatch`): high-level SCSI IOCS subfunction dispatcher.
+    /// Handles `ScsiIocsDispatch`: high-level SCSI IOCS subfunction dispatcher.
     pub(crate) fn hypercall_scsi_iocs_dispatch(&mut self, state: &mut CpuState) -> TrapResult {
         // Ensure vector $F5 is intact
         if self.main_ram.len() >= 0x07D8 {
@@ -632,13 +626,13 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE86` (`ScsiDriverStrategy`): latches `req_ptr = state.a[5]`.
+    /// Handles `ScsiDriverStrategy`: latches `req_ptr = state.a[5]`.
     pub(crate) fn hypercall_scsi_driver_strategy(&mut self, state: &mut CpuState) -> TrapResult {
         self.scsi.req_ptr = state.a[5] & 0x00FF_FFFF;
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE87` (`ScsiDriverInterrupt`): processes the Human68k driver request packet.
+    /// Handles `ScsiDriverInterrupt`: processes the Human68k driver request packet.
     pub(crate) fn hypercall_scsi_driver_interrupt(&mut self, _state: &mut CpuState) -> TrapResult {
         let req_ptr = self.scsi.req_ptr as usize;
         if req_ptr + 26 > self.main_ram.len() {
@@ -945,6 +939,17 @@ pub fn build_bootable_sxwin_scsi_hdd(
     sxwin_xdfs: &[(&str, &[u8])],
     size_mb: usize,
 ) -> Vec<u8> {
+    build_bootable_sxwin_scsi_hdd_with_files(human_xdf, sxwin_xdfs, size_mb, Vec::new())
+}
+
+/// Same as [`build_bootable_sxwin_scsi_hdd`], with `extra_files` added last, so they replace
+/// files at the same paths; for tests that need files the disk does not ship.
+pub fn build_bootable_sxwin_scsi_hdd_with_files(
+    human_xdf: &[u8],
+    sxwin_xdfs: &[(&str, &[u8])],
+    size_mb: usize,
+    extra_files: Vec<ExtractedFile>,
+) -> Vec<u8> {
     const RECORD_SIZE: usize = 1024;
     let actual_size_mb = size_mb.max(8);
     let total_bytes = actual_size_mb * 1024 * 1024;
@@ -1119,7 +1124,8 @@ pub fn build_bootable_sxwin_scsi_hdd(
         }
     }
 
-    // 4b. Inject SXMODE.X built from guest/sxmode/sxmode.s into \BIN\SXMODE.X, \X68\SXMODE.X, and root A:\SXMODE.X
+    // 4b. Build SXMODE.X from guest/sxmode/sxmode.s into the control panel library as the
+    // msx68k settings item, the only place it is launched from.
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sxmode_src = workspace_root.join("guest/sxmode/sxmode.s");
     let inc_dir = workspace_root.join("guest/include");
@@ -1127,55 +1133,6 @@ pub fn build_bootable_sxwin_scsi_hdd(
         if let Ok(sxmode_bytes) =
             crate::guest_build::build_guest_x_executable(&sxmode_src, &[&inc_dir])
         {
-            let mut raw_name = [b' '; 8];
-            raw_name[..6].copy_from_slice(b"SXMODE");
-            let mut raw_ext = [b' '; 3];
-            raw_ext[..1].copy_from_slice(b"X");
-
-            // Place in A:\X68\SXMODE.X
-            let mut x68_dir = [b' '; 8];
-            x68_dir[..3].copy_from_slice(b"X68");
-            let f_x68 = ExtractedFile {
-                path_dirs: vec![(x68_dir, [b' '; 3], [0u8; 10])],
-                raw_name,
-                raw_ext,
-                raw_name2: [0u8; 10],
-                attr: 0x20,
-                time: 0x6000,
-                date: 0x5821,
-                data: sxmode_bytes.clone(),
-            };
-            merged_map.insert(make_file_key(&f_x68), f_x68);
-
-            // Place in A:\BIN\SXMODE.X
-            let mut bin_dir = [b' '; 8];
-            bin_dir[..3].copy_from_slice(b"BIN");
-            let f_bin = ExtractedFile {
-                path_dirs: vec![(bin_dir, [b' '; 3], [0u8; 10])],
-                raw_name,
-                raw_ext,
-                raw_name2: [0u8; 10],
-                attr: 0x20,
-                time: 0x6000,
-                date: 0x5821,
-                data: sxmode_bytes.clone(),
-            };
-            merged_map.insert(make_file_key(&f_bin), f_bin);
-
-            // Also place in root A:\SXMODE.X for convenient 1-click access
-            let f_root = ExtractedFile {
-                path_dirs: Vec::new(),
-                raw_name,
-                raw_ext,
-                raw_name2: [0u8; 10],
-                attr: 0x20,
-                time: 0x6000,
-                date: 0x5821,
-                data: sxmode_bytes.clone(),
-            };
-            merged_map.insert(make_file_key(&f_root), f_root);
-
-            // And add it to the control panel library as the msx68k settings item.
             const CONTROL_PANEL_LB: &[u8] = b"\x83\x52\x83\x93\x83\x67\x83\x8D\x81\x5B\x83\x8B"; // コントロール
             for f in merged_map.values_mut() {
                 let mut name = [0u8; 18];
@@ -1194,6 +1151,10 @@ pub fn build_bootable_sxwin_scsi_hdd(
                 }
             }
         }
+    }
+
+    for f in extra_files {
+        merged_map.insert(make_file_key(&f), f);
     }
 
     // 4c. Inject SX.BAT into root A:\ matching official SX31_HD.INS installer

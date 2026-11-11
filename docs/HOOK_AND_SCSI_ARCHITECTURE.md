@@ -39,23 +39,71 @@ flowchart LR
     Stub ===>|"0-cycle direct trap"| Dispatcher
 ```
 
-### 2.1 Layer 1: Native Hypercall Opcode Gateway
-- We reserve a dedicated range of unallocated F-Line opcodes (`$FE80`–`$FE8F`, declared in [`HypercallId`](../crates/msx68k-bus/src/sxwin.rs) and dispatched by `X68kBus::handle_hypercall`) as **Native Hypercalls**.
-- When the monomorphized MC68000 core fetches an F-Line opcode in `$FE80`–`$FE8F`, `BusTrapHandler::on_f_line` delegates to `X68kBus::handle_hypercall`, which traps directly into the Rust hypercall handlers in **0 emulated CPU cycles**, without pushing a 68000 exception frame or traversing RAM vectors.
-  - SX-Window integration and host display/mouse synchronization hypercalls (`$FE81` `SxMouseSync`, `$FE88` `SxSetScreenMode`) are routed to [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs).
-  - `$FE89` `SxWheelConfig` reads and sets the mouse wheel settings for the settings app, in [`crates/msx68k-bus/src/sx_wheel.rs`](../crates/msx68k-bus/src/sx_wheel.rs).
-  - `$FE8B` `GmTextSpan`, `$FE8C` `GmPenSpan`, and `$FE8D`..`$FE8F` (system error alert box) replace instructions of `SYS/FSX.X` and are handled in [`crates/msx68k-bus/src/native_gm.rs`](../crates/msx68k-bus/src/native_gm.rs) (Section 2.3, pattern 3).
-  - Virtual SCSI subsystem hypercalls (`$FE82` `ScsiRomBoot`, `$FE83` `ScsiRomdbBuild`, `$FE84` `ScsiIocsInstall`, `$FE85` `ScsiIocsDispatch`, `$FE86` `ScsiDriverStrategy`, `$FE87` `ScsiDriverInterrupt`) are routed to [`crates/msx68k-bus/src/scsi.rs`](../crates/msx68k-bus/src/scsi.rs).
-  - All other F-Line opcodes (`$FFxx` Human68k DOS calls, `$FE00`–`$FE7F` `FLOAT2.X`) return `TrapResult::Unhandled` and fall through transparently to the standard 68000 Line 1111 Emulator vector (`#11`).
-- In addition to F-Line hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
+### 2.1 Layer 1: Native Hypercall Gateway
+The F-Line space is not ours to spend: Human68k gives `$FFxx` to DOS calls and `$FExx` to FE
+function calls, and programs can take over any of them (`_INTVCS`, `__FEVECS`). So msx68k takes
+one opcode only, and the address it runs at decides which hypercall it is.
+
+- **One opcode, `$FBFF`**, defined once as `HYPERCALL_OPCODE` in
+  [`hypercall.rs`](../crates/msx68k-bus/src/hypercall.rs); changing it there changes every
+  hypercall. It was chosen because no MC68000–68060 instruction uses `$F801`–`$FDFF` (HAS060.X
+  `M68K.DOC`), while FLOAT leaves `$FE80`–`$FEDF` unassigned but open to `__FEVECS`.
+- **The calling address decides.** Whoever installs a hypercall, as a patch over guest code or a
+  stub in a ROM msx68k provides, registers its exact address and the `HypercallId` it stands for
+  (`X68kBus::register_hypercall`). `BusTrapHandler::on_f_line` hands every F-Line instruction to
+  `X68kBus::handle_hypercall`, which carries out a registered hypercall in **0 emulated CPU
+  cycles**, without a 68000 exception frame. The opcode at any other address, and every other
+  F-Line opcode, goes to the guest's Line 1111 Emulator vector (`#11`) as on the real machine.
+- **Lifetime.** Addresses in RAM are forgotten at a reset, when the code they patched is gone;
+  addresses in ROM stay.
+- **Function calls where there is room.** One registered address can serve several functions,
+  with a register carrying the function number, so the registry stays small. A call is carried
+  out only when it comes to a registered address and its function number is valid; nothing more
+  is checked. An unknown function number is an ordinary F-Line exception.
+- **Registered addresses:**
+  | Hypercall | Address | Installed by |
+  | :--- | :--- | :--- |
+  | `SxMouseSync` | `SYS/FSX.X` `text_base + 0x04F768` | Patch (Section 2.2) |
+  | `GmTextSpan`, `GmPenSpan` | `SYS/FSX.X` `text_base + 0x381FE`, `+ 0x37212` | Patch (Section 2.3, pattern 3) |
+  | `AlertRowCopy`, `AlertIconCopy`, `AlertGlyphOr` | `SYS/FSX.X` `text_base + 0x4C41E`, `+ 0x4C3CC`, `+ 0x4C2CA` | Patch (Section 2.3, pattern 3) |
+  | `ScsiRomBoot`, `ScsiRomdbBuild`, `ScsiIocsInstall`, `ScsiIocsDispatch`, `ScsiDriverStrategy`, `ScsiDriverInterrupt` | `$FC0050`, `$FC0060`, `$FC0064`, `$FC0068`, `$FC006C`, `$FC0070` | Virtual SCSI ROM (Section 4) |
+  | `AppEntry` | `$FDFFF8` | Application entry, below |
+- **Application entry.** msx68k's own applications (`SXMODE.X`, VMX68K.SX) reach the host
+  through one entry, which only the master SX-Window VM has. It sits at the end of the internal
+  SCSI ROM window (`$FC0000`–`$FDFFFF`), outside the SCSI ROM itself:
+  ```text
+  $FDFFF0  'MSX68K', version.w (1)   ; signature
+  $FDFFF8  $FBFF                     ; the hypercall, registered as AppEntry
+  $FDFFFA  $4E75                     ; RTS
+  $FDFFFC  reserved
+  ```
+  These 16 bytes can always be read in supervisor mode. The rest of the window raises a bus
+  error unless the SCSI ROM is emulated, so msx68k is never taken for a machine with an internal
+  SCSI ROM (`SCSIIN` at `$FC0024`) when it has none. Like the rest of the ROM, the entry cannot be
+  reached in user mode.
+- **Calling the entry.** [`guest/include/msx68k.mac`](../guest/include/msx68k.mac) holds the
+  equates and `MSX68K_CALL_ROUTINE`, which expands `msx68k_call`: it reads the signature with DOS
+  `_BUS_ERR`, so a machine without the entry reports a bus error instead of taking one, enters
+  supervisor mode with IOCS `_B_SUPER`, calls `JSR $FDFFF8` with the function in `D0.L` and
+  arguments in `D1`–`D3`, and returns to user mode. It returns `D0.L = -1` when the entry is not
+  there. A test checks the equates against the host's constants.
+  | `D0.L` | Function | Arguments and results |
+  | :---: | :--- | :--- |
+  | 0 | `Version` | Returns the version in `D0.L`. |
+  | 1 | `GetWheelConfig` | Returns `D1` reverse (1), `D2` arrow clicks per notch, `D3` trackpad pixels per notch. |
+  | 2 | `SetWheelConfig` | Sets `D1`–`D3` and returns them as clamped. |
+  | 3 | `ScreenMode` | `D1.L = -1` returns the mode, width, and height in `D0`–`D2`; otherwise switches to mode `D1` (0, 1, 2) or to the size in `D1`, `D2`. Superseded by `IOCS _CRTMOD` `$50`. |
+- Still open: whether a full X68030 ROM image would occupy the end of the window.
+- In addition to hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
   - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).
   - `D1.W == $0150, D2.L == 0`: Host Native Fullscreen 1:1 mode.
   - `D1.W == $0150, D2.L > 0`: Windowed 1:1 mode (`w = D2.L >> 16, h = D2.L & $FFFF`).
   - The mode is kept in battery-backed SRAM `$ED007E` (`0x80 | 0x30 = 0xB0`), and `SXMODE.X` saves the resolution in msx68k's resource library `A:\SYS\MSX68K.LB`.
 - On MC68030 VMs, `BusTrapHandler::on_trap` also answers **`IOCS _SYS_STAT` (`D0.B == $AC`)**, which only the X68030 IPL ROM provides, while its IOCS table entry is the ROM's handler for undefined calls. See [CPU_AND_BUS.md](CPU_AND_BUS.md) Section 7.3.
-- A native replacement stub in 68k memory or ROM requires only **4 bytes (2 words)**:
+- A native replacement stub in ROM requires only **4 bytes (2 words)**, and a patch over a
+  routine's first instruction only the first word:
   ```text
-  +0: $FE80 | hypercall_id   ; Traps into Rust Hypercall Dispatcher
+  +0: $FBFF                  ; The hypercall registered at this address
   +2: $4E75                  ; RTS (returns cleanly to 68k caller)
   ```
 
@@ -63,31 +111,10 @@ flowchart LR
 
 - Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions in the master SX-Window VM, and the extended screen uses the first 16 MB block. Partial and full VMs mirror the range to the 24-bit space as on the 68000 (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5).
 
-### 2.1.1 Planned: One Opcode, Recognized by Address
-The range above takes 15 opcodes, one per hypercall, from the F-Line space, which is not ours to
-spend: Human68k gives `$FFxx` to DOS calls and `$FExx` to FE function calls, and both can be
-taken over by programs (`_INTVCS`, `__FEVECS`). The gateway is to be rebuilt as follows.
-
-- **One F-Line opcode** for every hypercall, chosen from those the X68000 community has not used.
-- **The calling PC decides the hypercall.** Whoever installs a hypercall (a patch over
-  `SYS/FSX.X`, a stub in a ROM msx68k provides) registers its exact address and the function it
-  stands for. The opcode at any other address is an ordinary F-Line exception, as on the real
-  machine.
-- **Function calls where there is room.** Where space and registers allow, one registered
-  address serves several functions, and a register carries the function number, so the registry
-  stays small. A call is carried out only when it comes to a registered address and its function
-  number is valid; nothing more is checked.
-- **The entry for msx68k's own applications** (`SXMODE.X`, VMX68K.SX) sits in the internal SCSI
-  ROM window (`$FC0000`–`$FDFFFF`), outside the SCSI ROM itself. It must never make msx68k look
-  like it has an internal SCSI ROM when none is emulated.
-
-Still open: which opcode; the exact address of the application entry and how an application
-finds it; whether a full X68030 ROM image would occupy the end of the window.
-
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
 - While physical RAM addresses shift depending on preceding device drivers (`text_base = $05817C` on floppy boot vs. `$0581E4` on SCSI HDD boot), **offsets relative to `text_base` (`text_base + offset`) and non-relocated instruction opcodes are 100% invariant**.
-- When `SYS/FSX.X` initializes, it writes its mouse packet handler address (`text_base + 0x04F82A`) into the IOCS mouse receiver vector at `$0000_0938`. [`X68kBus::check_fsx_mouse_hook_patch`](../crates/msx68k-bus/src/sxwin.rs) intercepts that write, derives `text_base = handler_addr - 0x04F82A`, verifies the expected 4-byte instruction signature at `text_base + 0x04F768` (`MOVEM.L D0-D2/A5, -(SP)` = `[0x48, 0xE7, 0xE0, 0x04]`), and patches `[0xFE, 0x81, 0x4E, 0x75]` (`HypercallId::SxMouseSync` + `RTS`).
+- When `SYS/FSX.X` initializes, it writes its mouse packet handler address (`text_base + 0x04F82A`) into the IOCS mouse receiver vector at `$0000_0938`. [`X68kBus::check_fsx_mouse_hook_patch`](../crates/msx68k-bus/src/sxwin.rs) intercepts that write, derives `text_base = handler_addr - 0x04F82A`, verifies the expected 4-byte instruction signature at `text_base + 0x04F768` (`MOVEM.L D0-D2/A5, -(SP)` = `[0x48, 0xE7, 0xE0, 0x04]`), and patches the hypercall and `RTS`, registered as `HypercallId::SxMouseSync`.
 - Dynamic screen resolution management and desktop region updates are handled entirely by `X68kBus::apply_screen_resolution` in [`crates/msx68k-bus/src/sxwin.rs`](../crates/msx68k-bus/src/sxwin.rs), completely separating SX-Window desktop virtualization from the SCSI disk subsystem.
 
 ### 2.3 Layer 3: Two Unified Hook Injection Patterns
@@ -101,7 +128,7 @@ finds it; whether a full X68030 ROM image would occupy the end of the window.
 3. **Replaced First Instruction with Guest Fallback (`SYS/FSX.X` Internal Level)**:
    - Used when a routine is called directly, with no A-Line API in front of it, and the native version must be able to decline some calls. Only the first word of the routine is overwritten with the hypercall, so no guest memory is consumed.
    - When the native version handles the call, the hypercall performs the routine's `RTS` itself. Otherwise it performs the replaced instruction on the CPU state and continues at the instruction after it, so the original routine runs unchanged.
-   - `$FE8B` `GmTextSpan` replaces `MOVEM.L D3-D7/A1-A4,-(SP)` at `text_base + 0x381FE` this way, and `$FE8C` `GmPenSpan` replaces `MOVEM.L D2-D7/A1/A3/A6,-(SP)` at `text_base + 0x37212`. `$FE8D`..`$FE8F` replace single two-byte instructions of the system error alert box, so their fallback performs exactly that instruction. The cursor routines at `text_base + 0x521BA` and `+ 0x521DC` are patched to a bare `RTS` because the host draws the cursor.
+   - `GmTextSpan` replaces `MOVEM.L D3-D7/A1-A4,-(SP)` at `text_base + 0x381FE` this way, and `GmPenSpan` replaces `MOVEM.L D2-D7/A1/A3/A6,-(SP)` at `text_base + 0x37212`. `AlertRowCopy`, `AlertIconCopy`, and `AlertGlyphOr` replace single two-byte instructions of the system error alert box, so their fallback performs exactly that instruction. The cursor routines at `text_base + 0x521BA` and `+ 0x521DC` are patched to a bare `RTS` because the host draws the cursor.
 
 ---
 
@@ -124,10 +151,10 @@ Subsequently, on every **V-Blank interrupt** (`text_base + 0x04F852` → `text_b
 2. It compares `$14(A4)`/`$15(A4)` against previous button states **`$22(A4)`/`$23(A4)`** and invokes `_PostEvent` (A-Line **`$A0A4`**) to enqueue `MouseDown` (`1` / `3`) or `MouseUp` (`2` / `4`) events.
 3. If `$10(A4)` (`X, Y`) differs from the last drawn cursor position **`$1E(A4)`**, it restores the background bitmap under the old cursor and draws the arrow cursor at the new position on TVRAM.
 
-### 3.2 Why Relative Deltas Drift & How `SxMouseSync` (`$FE81`) Solves It
+### 3.2 Why Relative Deltas Drift & How `SxMouseSync` Solves It
 Because Subroutine 3 (`+0x04F736`) applies **quadratic acceleration (`|delta| * (|delta| >> 3) * 1.25`)** and relative packets cannot know where the host OS cursor entered the window, feeding relative `(dx, dy)` through SCC inevitably causes cursor drift.
 
-By patching Subroutine 4 (`text_base + 0x04F768`) with **`[$FE81, $4E75]` (`HypercallId::SxMouseSync` + `RTS`)**:
+By patching Subroutine 4 (`text_base + 0x04F768`) with **`[$FBFF, $4E75]` (the hypercall registered as `HypercallId::SxMouseSync`, + `RTS`)**:
 - Whenever the host cursor is inside the window at `(host_x, host_y)`, `SxMouseSync` clamps `(host_x, host_y)` directly against the guest's own clipping rectangle (`min_x = $34(A4)`, `min_y = $36(A4)`, `max_x = $38(A4) - 1`, `max_y = $3A(A4) - 1`), writes the exact `(X, Y)` to **`$0A(A4)`** and **`$0C(A4)`**, and zeroes the fractional remainders at `$1A(A4)`/`$1C(A4)`.
 - If no host cursor position is active (`host_mouse_pos == None`), `SxMouseSync` executes the exact original 68000 delta-addition and clamping logic as a fallback.
 - The V-Blank routine (`+0x04F852`) and `_PostEvent` (`$A0A4`) continue to run unmodified, drawing the SX-Window cursor and dispatching clicks at the **exact pixel `(host_x, host_y)`** with zero lag or drift.
@@ -141,14 +168,14 @@ Disassembly of `IPLROM.DAT` (`$FF0000`) and `HUMAN.SYS` v3.02 (`$00AC9C`) reveal
 1. **Virtual SCSI ROM Header (`$FC0000`) & `romdb` Protocol**:
    - `IPLROM` and `HUMAN.SYS` check **`$FC0024` for the 6-byte ASCII signature `"SCSIIN"`**.
    - At `$FC0000`, the longword pointer `P = $00FC_0050` serves both as the ROM boot entry point and as the anchor for `HUMAN.SYS`'s `romdb` block device handshake:
-     - `P` (`$FC0050`): the cold boot stub (`$FE82` `ScsiRomBoot` + `RTS`).
-     - `P - 16` (`$FC0040`): Pointer (`$00FC_0060`) to the `romdb` builder stub (`$FE83` `ScsiRomdbBuild` + `RTS`).
-     - `P - 12` (`$FC0044`): Pointer (`$00FC_0064`) to the `IOCS $F5` installer stub (`$FE84` `ScsiIocsInstall` + `RTS`), which points vector `$F5` (`$0007D4`) at the handler stub at `$FC0068` (`$FE85` `ScsiIocsDispatch` + `RTS`).
+     - `P` (`$FC0050`): the cold boot stub (`ScsiRomBoot` + `RTS`).
+     - `P - 16` (`$FC0040`): Pointer (`$00FC_0060`) to the `romdb` builder stub (`ScsiRomdbBuild` + `RTS`).
+     - `P - 12` (`$FC0044`): Pointer (`$00FC_0064`) to the `IOCS $F5` installer stub (`ScsiIocsInstall` + `RTS`), which points vector `$F5` (`$0007D4`) at the handler stub at `$FC0068` (`ScsiIocsDispatch` + `RTS`).
      - `P - 8 .. P` (`$FC0048..$FC004F`): 8-byte ASCII magic **`"Human68k"`**.
-2. **`romdb` Block Device Driver Construction (`$FE83`, `$FE86`, and `$FE87`)**:
+2. **`romdb` Block Device Driver Construction (`ScsiRomdbBuild`, `ScsiDriverStrategy`, and `ScsiDriverInterrupt`)**:
    - During kernel startup, `HUMAN.SYS` verifies `"Human68k"` at `P - 8` and calls `*(P - 16)` (`ScsiRomdbBuild`) with `A4` pointing to free kernel driver memory.
-   - `ScsiRomdbBuild` writes a 22-byte Human68k block device header at `(A4)` whose strategy and interrupt entries point at the ROM stubs `$FC006C` (`$FE86` `ScsiDriverStrategy`) and `$FC0070` (`$FE87` `ScsiDriverInterrupt`), followed by a BPB pointer at `A4 + 22` and the BPB of the `Human68k` partition (`A:`) at `A4 + 26`.
-   - `ScsiDriverStrategy` latches the request packet in `A5`, and `ScsiDriverInterrupt` (`$FE87`) handles Human68k block driver commands `0` (`INIT`), `1`/`2` (`CHECK MEDIA` / `BUILD BPB`), `4` (`READ`), `5` (`MEDIA SENSE / _DRVCTRL`, returning `req[13] = 0x02` media ready), and `8`/`9` (`WRITE`).
+   - `ScsiRomdbBuild` writes a 22-byte Human68k block device header at `(A4)` whose strategy and interrupt entries point at the ROM stubs `$FC006C` (`ScsiDriverStrategy`) and `$FC0070` (`ScsiDriverInterrupt`), followed by a BPB pointer at `A4 + 22` and the BPB of the `Human68k` partition (`A:`) at `A4 + 26`.
+   - `ScsiDriverStrategy` latches the request packet in `A5`, and `ScsiDriverInterrupt` handles Human68k block driver commands `0` (`INIT`), `1`/`2` (`CHECK MEDIA` / `BUILD BPB`), `4` (`READ`), `5` (`MEDIA SENSE / _DRVCTRL`, returning `req[13] = 0x02` media ready), and `8`/`9` (`WRITE`).
 3. **Supported `IOCS $F5` (`_SCSIDRV`) Sub-functions (`D1.B`)**:
    - `$00` (`_S_RESET`), `$01`..`$09` (low-level bus phase stubs), `$20` (`_S_INQUIRY`), `$21` (`_S_READ`), `$22` (`_S_WRITE`), `$23` (`_S_FORMAT`), `$24` (`_S_TESTUNIT`), `$25` (`_S_READCAP`), `$26` (`_S_READEXT`), `$27` (`_S_WRITEEXT`), `$2F` (`_S_REZERO`), and `$30` (`_S_REQUEST`).
 

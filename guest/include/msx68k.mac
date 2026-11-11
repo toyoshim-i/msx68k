@@ -1,0 +1,71 @@
+* -----------------------------------------------------------------------------
+* msx68k Application Entry Interface & Equates
+* The entry sits at the end of the internal SCSI ROM window; its values must match
+* crates/msx68k-bus/src/hypercall.rs, which a test checks
+* -----------------------------------------------------------------------------
+
+MSX68K_ENTRY_BASE	.equ	$FDFFF0	; 'MSX68K' + version.w
+MSX68K_ENTRY		.equ	$FDFFF8	; JSR here with the function in D0.L
+MSX68K_VERSION		.equ	1	; Lowest version this interface needs
+
+* Application functions (D0.L)
+MSX68K_FN_VERSION	.equ	0	; Returns the version in D0.L
+MSX68K_FN_GET_WHEEL	.equ	1	; Returns D1 reverse, D2 clicks, D3 trackpad pixels
+MSX68K_FN_SET_WHEEL	.equ	2	; Sets D1-D3 and returns them as clamped
+MSX68K_FN_SCREEN_MODE	.equ	3	; D1.L = -1 queries, otherwise switches the resolution
+
+* Expands msx68k_call (needs doscall.mac and iocscall.mac): calls function D0.L of the
+* msx68k entry with D1-D3 in supervisor mode and returns its D0-D3, or D0.L = -1 when the entry is not there. The entry is
+* looked for with _BUS_ERR, so it is safe on machines without one.
+MSX68K_CALL_ROUTINE .macro
+msx68k_call:
+	movem.l	d4/a0-a1, -(sp)
+	movem.l	d0-d3, -(sp)		; Arguments
+	subq.l	#8, sp			; Signature buffer
+	movea.l	sp, a1
+	move.w	#4, -(sp)
+	pea	(a1)
+	pea	MSX68K_ENTRY_BASE
+	DOS	_BUS_ERR
+	lea	10(sp), sp
+	tst.l	d0
+	bne.s	msx68k_call_absent
+	move.w	#4, -(sp)
+	pea	4(a1)
+	pea	MSX68K_ENTRY_BASE+4
+	DOS	_BUS_ERR
+	lea	10(sp), sp
+	tst.l	d0
+	bne.s	msx68k_call_absent
+	cmpi.l	#'MSX6', (a1)
+	bne.s	msx68k_call_absent
+	cmpi.w	#'8K', 4(a1)
+	bne.s	msx68k_call_absent
+	cmpi.w	#MSX68K_VERSION, 6(a1)
+	bcs.s	msx68k_call_absent
+	addq.l	#8, sp
+
+	* The ROM window is reachable only in supervisor mode
+	suba.l	a1, a1
+	move.l	#_B_SUPER, d0
+	trap	#15
+	move.l	d0, d4			; Previous SSP, or negative if already supervisor
+	movem.l	(sp)+, d0-d3
+	jsr	MSX68K_ENTRY
+	tst.l	d4
+	bmi.s	msx68k_call_done
+	movea.l	d0, a0
+	movea.l	d4, a1
+	move.l	#_B_SUPER, d0
+	trap	#15
+	move.l	a0, d0
+	bra.s	msx68k_call_done
+
+msx68k_call_absent:
+	addq.l	#8, sp
+	movem.l	(sp)+, d0-d3
+	moveq.l	#-1, d0
+msx68k_call_done:
+	movem.l	(sp)+, d4/a0-a1
+	rts
+	.endm

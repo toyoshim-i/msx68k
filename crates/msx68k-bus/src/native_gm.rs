@@ -7,6 +7,7 @@
 use msx68k_cpu::{Bus, CpuState, TrapResult, SR_C, SR_N, SR_V, SR_X, SR_Z};
 
 use crate::bus::{is_ext_screen_addr, X68kBus, EXT_TVRAM_BASE};
+use crate::hypercall::{HypercallId, HYPERCALL_OPCODE};
 
 const SX_GET_DISP_RECT: u16 = 0xA432;
 /// Task Manager: `TSTiniCrtM`, which clears the screen and returns it to text mode 16.
@@ -46,7 +47,6 @@ const TEXT_SPAN: u32 = 0x381FE;
 /// Its first instruction, `MOVEM.L D3-D7/A1-A4,-(SP)`, and the `TST.B 40(A0)` after it.
 const TEXT_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x1F, 0x78, 0x4A, 0x28, 0x00, 0x28];
 /// Hypercall that replaces the first instruction of the text span routine.
-const TEXT_SPAN_HYPERCALL: [u8; 2] = [0xFE, 0x8B];
 
 // Text span context offsets, as the text drawing setup at `text_base + 0x39D36` fills them.
 const SPAN_ROUTINES: u32 = 4;
@@ -73,7 +73,6 @@ const PEN_SPAN: u32 = 0x37212;
 /// Its first instruction, `MOVEM.L D2-D7/A1/A3/A6,-(SP)`, and the instructions after it.
 const PEN_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x3F, 0x52, 0x2C, 0x55, 0x90, 0x6E];
 /// Hypercall that replaces the first instruction of the pen span routine.
-const PEN_SPAN_HYPERCALL: [u8; 2] = [0xFE, 0x8C];
 
 // The system error alert box draws a 384×70 box into plane 0 of TVRAM at `$E00000`, with a
 // row step of 128 bytes fixed in its code. On an extended screen, the instructions that touch
@@ -96,9 +95,6 @@ const ALERT_ICON_COPY_CODE: [u8; 8] = [0x22, 0xD8, 0x32, 0xD8, 0xD5, 0xC0, 0x51,
 const ALERT_GLYPH_OR: u32 = 0x4C2CA;
 const ALERT_GLYPH_OR_CODE: [u8; 8] = [0x89, 0x18, 0x51, 0xC8, 0xFF, 0xF4, 0xD6, 0xBC];
 /// Hypercalls that replace those instructions.
-const ALERT_ROW_COPY_HYPERCALL: [u8; 2] = [0xFE, 0x8D];
-const ALERT_ICON_COPY_HYPERCALL: [u8; 2] = [0xFE, 0x8E];
-const ALERT_GLYPH_OR_HYPERCALL: [u8; 2] = [0xFE, 0x8F];
 
 // Pen span context offsets, as the pen setup at `text_base + 0x369A6` fills them.
 const PEN_ROUTINES: u32 = 4;
@@ -321,23 +317,30 @@ impl X68kBus {
         // called directly rather than through an A-Line API.
         let span = (text_base + TEXT_SPAN) as usize;
         if self.main_ram.get(span..span + TEXT_SPAN_PROLOGUE.len()) == Some(&TEXT_SPAN_PROLOGUE[..]) {
-            self.main_ram[span..span + 2].copy_from_slice(&TEXT_SPAN_HYPERCALL);
+            self.install_patch_hypercall(span as u32, HypercallId::GmTextSpan);
         }
         for (offset, code, hypercall) in [
-            (ALERT_ROW_COPY, ALERT_ROW_COPY_CODE, ALERT_ROW_COPY_HYPERCALL),
-            (ALERT_ICON_COPY, ALERT_ICON_COPY_CODE, ALERT_ICON_COPY_HYPERCALL),
-            (ALERT_GLYPH_OR, ALERT_GLYPH_OR_CODE, ALERT_GLYPH_OR_HYPERCALL),
+            (ALERT_ROW_COPY, ALERT_ROW_COPY_CODE, HypercallId::AlertRowCopy),
+            (ALERT_ICON_COPY, ALERT_ICON_COPY_CODE, HypercallId::AlertIconCopy),
+            (ALERT_GLYPH_OR, ALERT_GLYPH_OR_CODE, HypercallId::AlertGlyphOr),
         ] {
             let addr = (text_base + offset) as usize;
             if self.main_ram.get(addr..addr + code.len()) == Some(&code[..]) {
-                self.main_ram[addr..addr + 2].copy_from_slice(&hypercall);
+                self.install_patch_hypercall(addr as u32, hypercall);
             }
         }
         // Likewise, every guest shape fill reaches planar bitmaps one row at a time.
         let span = (text_base + PEN_SPAN) as usize;
         if self.main_ram.get(span..span + PEN_SPAN_PROLOGUE.len()) == Some(&PEN_SPAN_PROLOGUE[..]) {
-            self.main_ram[span..span + 2].copy_from_slice(&PEN_SPAN_HYPERCALL);
+            self.install_patch_hypercall(span as u32, HypercallId::GmPenSpan);
         }
+    }
+
+    /// Replaces the instruction word at `addr` in RAM with hypercall `id`.
+    fn install_patch_hypercall(&mut self, addr: u32, id: HypercallId) {
+        let addr_usize = addr as usize;
+        self.main_ram[addr_usize..addr_usize + 2].copy_from_slice(&HYPERCALL_OPCODE.to_be_bytes());
+        self.register_hypercall(addr, id);
     }
 
     /// Returns whether the host draws SX-Window's mouse cursor now, so the host OS pointer can be

@@ -728,7 +728,7 @@ Addresses `$00E20000` (Plane 1), `$00E40000` (Plane 2), and `$00E60000` (Plane 3
   text+0x521C6:  4A68 0000            TST.W   0(A0)          ; Test portBits.type (+0x00)
   text+0x521CA:  6600 06D0            BNE     cursor_stub_rts; If type != 0, branch to RTS at 0x5289C!
   ```
-  The mouse cursor blitter only natively supports Type 0 (planar), making host cursor synchronization (`$FE81` `SxMouseSync`) and native cursor overlay essential for chunky/high-color display modes.
+  The mouse cursor blitter only natively supports Type 0 (planar), making host cursor synchronization (`SxMouseSync`) and native cursor overlay essential for chunky/high-color display modes.
 
 #### 3. Complete Inventory of `$00E00000` & CRTC R21 (`$00E8002A`) in `SYS/FSX.X`:
 There are **exactly 13 occurrences of `$00E00000`** and **3 occurrences of `$00E8002A`** in the entire `SYS/FSX.X` kernel:
@@ -815,7 +815,7 @@ Screens above 1024×1024 do not fit in TVRAM, and the 24-bit address space and D
 - [NATIVE_DRAWING.md](NATIVE_DRAWING.md) holds the hook points, the per-API status, the verification method, and the plan.
 - [NATIVE_FONTS.md](NATIVE_FONTS.md) holds the text pipeline, `IFM.X`, and the font plan.
 
-An earlier plan replaced the twelve entries of the procedure table (Section 5.3) with hypercalls `$FE89`..`$FE93`. It was dropped: the A-Line APIs are a documented boundary that needs no guest patching, and `$FE8B` is now used for the text span routine.
+An earlier plan replaced the twelve entries of the procedure table (Section 5.3) with twelve hypercalls. It was dropped: the A-Line APIs are a documented boundary that needs no guest patching.
 
 ---
 
@@ -897,13 +897,13 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 
 | Hook ID / Opcode | Target Module & Invariant Location | Original Signature Bytes | Subsystem / API Name | Status | Description & Functional Role |
 | :---: | :--- | :--- | :--- | :---: | :--- |
-| **`$FE81`** | `SYS/FSX.X`<br/>`text_base + 0x04F768` | `48 E7 E0 04`<br/>(`MOVEM.L D0-D2/A5, -(SP)`) | `FSX.X` Mouse Subroutine 3 | **`[x] Hooked`** | **1:1 Host Mouse Sync**: Injects `[$FE81, $4E75]`, synchronizes host `(X, Y)` into `MouseWorkArea` (`$0A`, `$0C`, `$10`, `$12`), clears sub-pixel remainders, updates global vectors (`+0x549F6`, `+0x549F8`). |
-| **`$FE82`** | Virtual SCSI ROM<br/>`$FC0050` | ROM Stub | `ScsiRomBoot` | **`[x] Hooked`** | **SCSI IPL Boot**: Synthesizes 1024B IPL and partition boot sector, initializes SCSI controller state, loads `HUMAN.SYS` HU header to `$0067C0` and code to `$006800`. |
-| **`$FE83`** | Virtual SCSI ROM<br/>`$FC0060` | ROM Stub | `ScsiRomdbBuild` | **`[x] Hooked`** | **`HUMAN.SYS` `romdb` Builder**: Constructs Human68k block device driver structure at `*(P-16)` with strategy and interrupt hypercall stubs. |
-| **`$FE84`** | Virtual SCSI ROM<br/>`$FC0064` | ROM Stub | `ScsiIocsInstall` | **`[x] Hooked`** | **`IOCS $F5` Installer**: Installs `IOCS $F5` vector handler at `*(P-12)` pointing to `$FC0060`. |
-| **`$FE85`** | Virtual SCSI ROM<br/>`$FC0068` | ROM Stub | `ScsiIocsDispatch` | **`[x] Hooked`** | **`IOCS $F5` (`_SCSIDRV`) Bridge**: Handles SCSI command packets (read, write, inquiry, capacity, ready) directly from guest space. |
-| **`$FE86`** | Virtual SCSI ROM<br/>`$FC006C` | ROM Stub | `ScsiDriverStrategy` | **`[x] Hooked`** | **Block Driver Strategy**: the `romdb` driver header points its strategy entry here. Latches the request packet pointer (`A5`). |
-| **`$FE87`** | Virtual SCSI ROM<br/>`$FC0070` | ROM Stub | `ScsiDriverInterrupt` | **`[x] Hooked`** | **Block Driver Interrupt**: Executes Human68k commands: 0 (INIT), 1 (MEDIA CHECK), 2 (BUILD BPB), 4 (READ), 5 (MEDIA SENSE), 8/9 (WRITE). |
+| **`$FBFF`** `SxMouseSync` | `SYS/FSX.X`<br/>`text_base + 0x04F768` | `48 E7 E0 04`<br/>(`MOVEM.L D0-D2/A5, -(SP)`) | `FSX.X` Mouse Subroutine 3 | **`[x] Hooked`** | **1:1 Host Mouse Sync**: Injects `[$FBFF, $4E75]`, synchronizes host `(X, Y)` into `MouseWorkArea` (`$0A`, `$0C`, `$10`, `$12`), clears sub-pixel remainders, updates global vectors (`+0x549F6`, `+0x549F8`). |
+| **`$FBFF`** `ScsiRomBoot` | Virtual SCSI ROM<br/>`$FC0050` | ROM Stub | `ScsiRomBoot` | **`[x] Hooked`** | **SCSI IPL Boot**: Synthesizes 1024B IPL and partition boot sector, initializes SCSI controller state, loads `HUMAN.SYS` HU header to `$0067C0` and code to `$006800`. |
+| **`$FBFF`** `ScsiRomdbBuild` | Virtual SCSI ROM<br/>`$FC0060` | ROM Stub | `ScsiRomdbBuild` | **`[x] Hooked`** | **`HUMAN.SYS` `romdb` Builder**: Constructs Human68k block device driver structure at `*(P-16)` with strategy and interrupt hypercall stubs. |
+| **`$FBFF`** `ScsiIocsInstall` | Virtual SCSI ROM<br/>`$FC0064` | ROM Stub | `ScsiIocsInstall` | **`[x] Hooked`** | **`IOCS $F5` Installer**: Installs `IOCS $F5` vector handler at `*(P-12)` pointing to `$FC0060`. |
+| **`$FBFF`** `ScsiIocsDispatch` | Virtual SCSI ROM<br/>`$FC0068` | ROM Stub | `ScsiIocsDispatch` | **`[x] Hooked`** | **`IOCS $F5` (`_SCSIDRV`) Bridge**: Handles SCSI command packets (read, write, inquiry, capacity, ready) directly from guest space. |
+| **`$FBFF`** `ScsiDriverStrategy` | Virtual SCSI ROM<br/>`$FC006C` | ROM Stub | `ScsiDriverStrategy` | **`[x] Hooked`** | **Block Driver Strategy**: the `romdb` driver header points its strategy entry here. Latches the request packet pointer (`A5`). |
+| **`$FBFF`** `ScsiDriverInterrupt` | Virtual SCSI ROM<br/>`$FC0070` | ROM Stub | `ScsiDriverInterrupt` | **`[x] Hooked`** | **Block Driver Interrupt**: Executes Human68k commands: 0 (INIT), 1 (MEDIA CHECK), 2 (BUILD BPB), 4 (READ), 5 (MEDIA SENSE), 8/9 (WRITE). |
 | **`IOCS $10` (`_CRTMOD` `$50`)** | Trap #15 Handler<br/>`D0 = $10, D1 = $0150` | IOCS Vector $10 | `IOCS _CRTMOD Mode $50` | **`[x] Hooked`** | **Dynamic Display Resolution Query & Mode Switch**: Standardized high-level resolution interface. Query (`D2 = -1`): returns current mode (`$50` or 16) in `D0`, `(W << 16) \| H` in `D1`, fullscreen flag in `D2`, host native `(W << 16) \| H` in `D3`. Apply (`D2 = 0` for host fullscreen, `D2 = (W << 16) \| H` for windowed): applies resolution (up to 3840×2160), updates SRAM `$ED007E = $B0`, and updates `_CRT_MODE` (`$093C`). `SXMODE.X` saves the resolution in `A:\SYS\MSX68K.LB`. |
 | **`Patch-ModeTable`** | `SYS/FSX.X`<br/>`text_base + 0x55338` | `03 00 02 00 00 E0 00 00 00 80` | Screen Mode Table (Mode 3) | **`[ ] Planned (Phase 2A)`** | **Hi-Res Viewport Patch**: Overwrites Mode 3 width (`768`) and height (`512`) with host display dimensions (e.g. `1280×720`). |
 | **`$A077`** | `SYS/FSX.X`<br/>`text_base + 0x04FEB6` | `2F 10 61 92` | Mouse Manager: `MSBoundSet` | **`[ ] Planned (Phase 2A)`** | **Mouse Bounding Box Hook**: Intercepts guest desktop boundary configuration to maintain host aspect ratio and screen boundaries. |
@@ -912,24 +912,24 @@ This living status table tracks all active and planned Mixed Mode hypercalls, mo
 | **`$A227`** | `SYS/FSX.X`<br/>`text_base + 0x047DCE` | `4E 56 00 00` | Sub-Window Manager: `WSOpen` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Allocator**: Intercepts sub-window opening, allocates host `VirtualGvramSurface`, and binds to `WSRecord`. |
 | **`$A229`** | `SYS/FSX.X`<br/>`text_base + 0x047FFC` | `4E 56 00 00` | Sub-Window Manager: `WSDispose` | **`[ ] Planned (Phase 2B)`** | **Virtualized GVRAM Deallocator**: Releases host `VirtualGvramSurface` on sub-window closure. |
 | **`$A13C`** | `SYS/FSX.X`<br/>`text_base + 0x01ECBC` | `48 E7 00 60` | Graph Man: `GMInitBitmap` | **`[ ] Planned (Phase 2B)`** | **Decoupled BitMap Init**: Initializes `BitMap` record with host framebuffer base pointer and arbitrary scanline stride. |
-| **`$FE88`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxSetScreenMode` | **`[x] Hooked`** | **Low-Level Screen Mode Switch Hypercall**: Fallback hypercall superseded by `IOCS _CRTMOD $50`. Directly invokes `apply_screen_resolution` to update CRTC, SRAM, TVRAM/EXT_TVRAM, and resident `SYS/FSX.X` kernel structures. |
+| **App entry `3`** | Application entry<br/>`$FDFFF8` | Hypercall stub | `ScreenMode` | **`[x] Hooked`** | **Low-Level Screen Mode Switch Hypercall**: Fallback hypercall superseded by `IOCS _CRTMOD $50`. Directly invokes `apply_screen_resolution` to update CRTC, SRAM, TVRAM/EXT_TVRAM, and resident `SYS/FSX.X` kernel structures. |
 | **`Cursor-Draw`** | `SYS/FSX.X`<br/>`text_base + 0x521BA`, `+ 0x521DC` | `48 E7 00 0C 28 68 00 00` | Mouse cursor draw and erase | **`[x] Hooked`** | **Host Cursor**: both entry points return at once and the presenter draws the cursor from the `Mouse` and `MsCsr` records. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A183`**, **`$A188`**, **`$A189`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMPutRImg`, `GMDupHRImg`, `GMDupVRImg` | **`[x] Hooked`** | **Native Images**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A180`**, **`$A182`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMCopyMask`, `GMPlotImg` | **`[x] Hooked`** | **Native Masked Copy**, including the guest bug fix for sources narrower than the mask. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
-| **`$FE8B`** | `SYS/FSX.X`<br/>`text_base + 0x381FE` | `48 E7 1F 78 4A 28 00 28` | Text span routine (no A-Line API) | **`[x] Hooked`** | **Native Text Span**: every text row, including `IFM.X` output, is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_FONTS.md](NATIVE_FONTS.md). |
-| **`$FE8C`** | `SYS/FSX.X`<br/>`text_base + 0x37212` | `48 E7 3F 52 2C 55 90 6E` | Pen span routine (no A-Line API) | **`[x] Hooked`** | **Native Pen Span**: every row of a guest shape fill (lines, ovals, rounded rects, arcs, polygons, regions) is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
-| **`$FE8D`**..**`$FE8F`** | `SYS/FSX.X`<br/>`text_base + 0x4C41E`, `+ 0x4C3CC`, `+ 0x4C2CA` | `22 D8 22 D8`, `22 D8 32 D8`, `89 18 51 C8` | System error alert box (TRAP #14) | **`[x] Hooked`** | **Alert Box on Extended Screens**: the three instructions that touch the box are mapped onto plane 0 of the extended screen. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
+| **`$FBFF`** `GmTextSpan` | `SYS/FSX.X`<br/>`text_base + 0x381FE` | `48 E7 1F 78 4A 28 00 28` | Text span routine (no A-Line API) | **`[x] Hooked`** | **Native Text Span**: every text row, including `IFM.X` output, is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_FONTS.md](NATIVE_FONTS.md). |
+| **`$FBFF`** `GmPenSpan` | `SYS/FSX.X`<br/>`text_base + 0x37212` | `48 E7 3F 52 2C 55 90 6E` | Pen span routine (no A-Line API) | **`[x] Hooked`** | **Native Pen Span**: every row of a guest shape fill (lines, ovals, rounded rects, arcs, polygons, regions) is drawn natively. Unknown span routines fall back by performing the replaced `MOVEM`. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
+| **`$FBFF`** `AlertRowCopy`, `AlertIconCopy`, `AlertGlyphOr` | `SYS/FSX.X`<br/>`text_base + 0x4C41E`, `+ 0x4C3CC`, `+ 0x4C2CA` | `22 D8 22 D8`, `22 D8 32 D8`, `89 18 51 C8` | System error alert box (TRAP #14) | **`[x] Hooked`** | **Alert Box on Extended Screens**: the three instructions that touch the box are mapped onto plane 0 of the extended screen. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17E`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMScroll` | **`[x] Hooked`** | **Native Scroll**. Update regions that are not rectangles stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17A`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRgn` | **`[x] Hooked`** | **Native Region Frame**. A 0×0 pen on a shaped region stays on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A0A5`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Event Man: `EMGet` | **`[x] Hooked`** | **Mouse Wheel**: before the guest takes an event, one queued host wheel notch is posted as a click on an arrow of the active window's scroll bar. See Section 8. |
-| **`$FE89`** | Mixed Mode Hypercall<br/>Host Bus Handler | Hypercall Opcode | `SxWheelConfig` | **`[x] Hooked`** | **Wheel Settings**: `D0.W = 0` reads and `D0.W = 1` sets the direction (`D1`), arrow clicks per notch (`D2`), and trackpad pixels per notch (`D3`). Used by `SXMODE.X`. |
+| **App entry `1`, `2`** | Application entry<br/>`$FDFFF8` | Hypercall stub | `GetWheelConfig`, `SetWheelConfig` | **`[x] Hooked`** | **Wheel Settings**: function 1 reads and function 2 sets the direction (`D1`), arrow clicks per notch (`D2`), and trackpad pixels per notch (`D3`). Used by `SXMODE.X`. |
 | **`Patch-ControlPanel`** | `コントロール.LB` on the built HDD | None (resources added) | Control panel item `$F3B0` | **`[x] Added`** | **Settings in the Control Panel**: `CODE` (`SXMODE.X`), `PAT2` (icon), and `CPNM` (`MSX68K.X`) resources make the settings app the first control panel item. See Section 9. |
 | **`$A1A3`**, **`$A1A4`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMInvertRect`, unnamed marching frame | **`[x] Hooked`** | **Native Dashed Frames**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A17F`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMCopy` | **`[x] Hooked`** | **Native Copy**. Scaled copies stay on the guest. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A1AF`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMGetPixel` | **`[x] Hooked`** | **Native Screen Read**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A432`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | System: `SXGetDispRect` | **`[x] Hooked`** | **Actual Display Rect**: the guest reads extended mode `$50` as 768×512, which confined popup menus. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
 | **`$A172`**, **`$A173`**, **`$A17B`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: `GMFrameRect`, `GMFillRect`, `GMFillRgn` | **`[x] Hooked`** | **Native Fill**. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md). |
-| **`Native-Shapes`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: lines, ovals, rounded rects, arcs, polygons, scaled `GMCopy` | **`[ ] Planned`** | **Remaining Drawing APIs**: shape fills already reach the screen natively through `$FE8C`; scaled copies do not yet, and A-Line level replacements would make each shape one native call. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 5. |
+| **`Native-Shapes`** | A-Line API<br/>`BusTrapHandler::on_a_line` | None (no guest patch) | Graph Man: lines, ovals, rounded rects, arcs, polygons, scaled `GMCopy` | **`[ ] Planned`** | **Remaining Drawing APIs**: shape fills already reach the screen natively through `GmPenSpan`; scaled copies do not yet, and A-Line level replacements would make each shape one native call. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 5. |
 | **`Native-Fonts`** | A-Line API and procedure tables | None planned | Text procedure, `IFM.X` (`$A500`..`$A516`, `$A198`) | **`[ ] Planned`** | **Native Text and Font Manager**. See [NATIVE_FONTS.md](NATIVE_FONTS.md) Section 5. |
 | **`WM-Rootless`** | `SYS/FSX.X`<br/>`text_base + 0x0476D8` | Various | Window Manager Rootless Hook | **`[ ] Planned (Phase 2C)`** | **Host OS Window Decoupling**: Maps SX-Window windows directly to host OS desktop windows (`winit`). |
 
@@ -943,8 +943,8 @@ To ensure complete independence from copyrighted or proprietary SDK headers, cle
 - **`guest/include/iocscall.mac`**: Clean-room X68000 IOCS trap macro (`IOCS macro call / moveq.l #&call, d0 / trap #15 / endm`) and call numbers (`_B_KEYINP`, `_CRTMOD`, `_B_PUTC`, `_B_PRINT`, `_SCROLL`, `_SCSIDRV`, etc.).
 - **`guest/include/sxcall.mac`**: Clean-room SX-Window macros:
   - `SXCALL macro call`: Injects `$A000 | (&call & $0FFF)`.
-  - `HYPERCALL macro call`: Injects `&call` (F-Line hypercall opcode `$FE80..$FE8F`).
-  - Full constants for all Manager trap ranges (`$A000..$A61F`), hypercall IDs (`HYPER_SX_MOUSE_SYNC`, `HYPER_SX_SET_SCREEN_MODE`), and kernel data structure offsets (`rect_*`, `gp_*`, `bm_*`, `mwa_*`).
+  - Full constants for all Manager trap ranges (`$A000..$A61F`) and kernel data structure offsets (`rect_*`, `gp_*`, `bm_*`, `mwa_*`).
+- **`guest/include/msx68k.mac`**: the msx68k application entry, its function numbers, and `MSX68K_CALL_ROUTINE` (see [HOOK_AND_SCSI_ARCHITECTURE.md](HOOK_AND_SCSI_ARCHITECTURE.md) Section 2.1).
 
 ### 7.2 In-Process Guest Assembler & Linker (`crates/msx68k-bus/src/guest_build.rs`)
 Leverages `third_party/rhas` (HAS060-compatible MC68000 cross-assembler) and `third_party/rhlk` (Human68k object linker) as path dependencies within Rust:
@@ -1023,14 +1023,14 @@ The msx68k settings app: a hybrid CLI and interactive SX-Window GUI application 
   - `Wheel direction:` `Normal` / `Reverse`.
   - `Lines per notch:` `1` to `5` arrow clicks per wheel notch.
   - `Trackpad speed:` `Slow` (80 host pixels per notch), `Medium` (40), `Fast` (20).
-  - The current values come from `HYPER_SX_WHEEL_CONFIG` (`$FE89`, `D0.W = 0`) and are inverted with the same XOR fill; a click sets them with `D0.W = 1` and saves the file.
+  - The current values come from the application entry's `GetWheelConfig` (function 1) and are inverted with the same XOR fill; a click sets them with `SetWheelConfig` (function 2) and saves the file.
 - **Settings**: kept in msx68k's own resource library `A:\SYS\MSX68K.LB` as resource `'MX68'` ID 0 (Section 5.6, item 5), which the host reads at boot (`load_disk_config_if_present`). HAS-format strings take no escapes, so the path is written with single backslashes.
 - **Console Fallback Mode (Launched without arguments outside SX-Window)**:
   - If Vector #10 is 0 or points to IPLROM (`>= $00E0_0000`), automatically queries and cycles resolution (`0 -> 1 -> 2 -> ... -> 0`) and exits cleanly.
 - **SCSI HDD Installation & File Layout**:
   - `build_bootable_sxwin_scsi_hdd` organizes files into the official Sharp `SX31_HD.INS` HDD hierarchy:
-    - Root `A:\`: contains standard system files (`HUMAN.SYS`, `COMMAND.X`, `CONFIG.SYS`, `AUTOEXEC.BAT`, `STARTUP.ENV`, `KEY.SYS`, `USKCG.SYS`, `BEEP.SYS`), `SXMODE.X` (for 1-click access), and official subdirectories.
-    - `\X68`: contains all 32 desktop applications and tools from `SXWIN312.XDF` (`カレンダ.X`, `電卓.X`, `時計.X`, `コントロ.X`, etc.), `HDフォーマット.X`, and `SXMODE.X`.
+    - Root `A:\`: contains standard system files (`HUMAN.SYS`, `COMMAND.X`, `CONFIG.SYS`, `AUTOEXEC.BAT`, `STARTUP.ENV`, `KEY.SYS`, `USKCG.SYS`, `BEEP.SYS`), and official subdirectories. `SXMODE.X` is not on the disk: it runs from the control panel library.
+    - `\X68`: contains all 32 desktop applications and tools from `SXWIN312.XDF` (`カレンダ.X`, `電卓.X`, `時計.X`, `コントロ.X`, etc.), and `HDフォーマット.X`.
     - `\DIC`: contains Japanese dictionary files `X68K.DIC` and `POST.DIC` from `SXWIN315.XDF`.
     - `\SHELL`: contains shell components including recovered `SHELL\SXCON.X` (39,558 bytes), which initializes `Trap $A44E` and `Trap $A44F` (`__SXSetVector`) during `SXWIN.X` boot, enabling console execution for `ｼｬｰﾍﾟﾝ\EXCOM\CONW.EX`.
     - `\FONT`: contains outline fonts (`*.IFM`, etc.) from `SXWIN313.XDF`.

@@ -6,6 +6,7 @@ pub mod dmac;
 pub mod fdc;
 pub mod gdb;
 pub mod guest_build;
+pub mod hypercall;
 pub mod mfp;
 pub mod native_gm;
 pub mod peripherals;
@@ -38,7 +39,7 @@ pub use scsi::{
     synthesize_partition_boot_sector, synthesize_scsi_ipl_sector, ExtractedFile,
     ScsiController, ScsiPartition,
 };
-pub use sxwin::HypercallId;
+pub use hypercall::{AppFunction, HypercallId, APP_ENTRY, APP_ENTRY_BASE, HYPERCALL_OPCODE};
 pub use timing::{
     BusTimingConfig, CpuSpeedMode, MemoryRegion, RegionTimingSpec, VmRole, WaitStateTable,
     PAGE_COUNT_4K, PAGE_SHIFT_4K,

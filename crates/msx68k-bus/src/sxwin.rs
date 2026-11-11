@@ -1,101 +1,14 @@
-//! SX-Window OS integration, Mixed Mode hypercall dispatcher, and dynamic display/mouse synchronization (`msx68k-bus`).
+//! SX-Window OS integration and dynamic display/mouse synchronization (`msx68k-bus`).
 
 use msx68k_cpu::{CpuState, TrapResult};
 use crate::bus::X68kBus;
+use crate::hypercall::{HypercallId, HYPERCALL_OPCODE};
 
 /// Task Manager APIs through which a task gives up its turn in the cooperative scheduler.
 const TS_EVENT_AVAIL: u16 = 0xA357;
 const TS_GET_EVENT: u16 = 0xA358;
 
-/// Reserved F-Line Mixed Mode hypercall IDs (`$FE80`..=`$FE8F`).
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(u16)]
-pub enum HypercallId {
-    /// Synchronize SX-Window mouse coordinates (`A4` = `MouseWorkArea` pointer) with host mouse position.
-    SxMouseSync = 0xFE81,
-    /// Boot from attached SCSI HDD (`$FC0000`).
-    ScsiRomBoot = 0xFE82,
-    /// `HUMAN.SYS` `romdb` block driver builder (`JSR (A3)` at `*(P-16)`).
-    ScsiRomdbBuild = 0xFE83,
-    /// `IOCS $F5` vector installer (`JSR (A0)` at `*(P-12)`).
-    ScsiIocsInstall = 0xFE84,
-    /// `IOCS $F5` (`_SCSIDRV`) subfunction dispatcher.
-    ScsiIocsDispatch = 0xFE85,
-    /// `romdb` block driver Strategy routine (`A5` = request packet).
-    ScsiDriverStrategy = 0xFE86,
-    /// `romdb` block driver Interrupt routine (`A5` = request packet).
-    ScsiDriverInterrupt = 0xFE87,
-    /// Dynamic resolution & screen mode switch (Step 1: up to 1024x1024 full display).
-    SxSetScreenMode = 0xFE88,
-    /// Mouse wheel settings, read and written by the guest settings app.
-    SxWheelConfig = 0xFE89,
-    /// Native replacement of the `SYS/FSX.X` text span routine, patched over its first
-    /// instruction.
-    GmTextSpan = 0xFE8B,
-    /// Native replacement of the `SYS/FSX.X` pen span routine, patched over its first
-    /// instruction.
-    GmPenSpan = 0xFE8C,
-    /// The 48-byte row copy of the `SYS/FSX.X` system error alert box.
-    AlertRowCopy = 0xFE8D,
-    /// The 6-byte icon row copy of the alert box.
-    AlertIconCopy = 0xFE8E,
-    /// The glyph store of the alert box.
-    AlertGlyphOr = 0xFE8F,
-}
-
-impl HypercallId {
-    /// Decodes an opcode word into a [`HypercallId`] if in range `$FE80`..=`$FE8F`.
-    pub fn from_opcode(opcode: u16) -> Option<Self> {
-        match opcode {
-            0xFE81 => Some(Self::SxMouseSync),
-            0xFE82 => Some(Self::ScsiRomBoot),
-            0xFE83 => Some(Self::ScsiRomdbBuild),
-            0xFE84 => Some(Self::ScsiIocsInstall),
-            0xFE85 => Some(Self::ScsiIocsDispatch),
-            0xFE86 => Some(Self::ScsiDriverStrategy),
-            0xFE87 => Some(Self::ScsiDriverInterrupt),
-            0xFE88 => Some(Self::SxSetScreenMode),
-            0xFE89 => Some(Self::SxWheelConfig),
-            0xFE8B => Some(Self::GmTextSpan),
-            0xFE8C => Some(Self::GmPenSpan),
-            0xFE8D => Some(Self::AlertRowCopy),
-            0xFE8E => Some(Self::AlertIconCopy),
-            0xFE8F => Some(Self::AlertGlyphOr),
-            _ => None,
-        }
-    }
-}
-
 impl X68kBus {
-    /// Primary Mixed Mode Hypercall Dispatcher for F-Line opcodes `$FE80`..=`$FE8F`.
-    pub fn handle_hypercall(
-        &mut self,
-        state: &mut CpuState,
-        opcode: u16,
-        _pc: u32,
-    ) -> TrapResult {
-        let Some(hypercall) = HypercallId::from_opcode(opcode) else {
-            return TrapResult::Unhandled;
-        };
-
-        match hypercall {
-            HypercallId::SxMouseSync => self.hypercall_sx_mouse_sync(state),
-            HypercallId::ScsiRomBoot => self.hypercall_scsi_rom_boot(state),
-            HypercallId::ScsiRomdbBuild => self.hypercall_scsi_romdb_build(state),
-            HypercallId::ScsiIocsInstall => self.hypercall_scsi_iocs_install(state),
-            HypercallId::ScsiIocsDispatch => self.hypercall_scsi_iocs_dispatch(state),
-            HypercallId::ScsiDriverStrategy => self.hypercall_scsi_driver_strategy(state),
-            HypercallId::ScsiDriverInterrupt => self.hypercall_scsi_driver_interrupt(state),
-            HypercallId::SxSetScreenMode => self.hypercall_sx_set_screen_mode(state),
-            HypercallId::SxWheelConfig => self.hypercall_wheel_config(state),
-            HypercallId::GmTextSpan => self.hypercall_text_span(state),
-            HypercallId::GmPenSpan => self.hypercall_pen_span(state),
-            HypercallId::AlertRowCopy => self.hypercall_alert_row_copy(state),
-            HypercallId::AlertIconCopy => self.hypercall_alert_icon_copy(state),
-            HypercallId::AlertGlyphOr => self.hypercall_alert_glyph_or(state),
-        }
-    }
-
     /// Sets the current host OS mouse position in emulator display coordinates.
     pub fn set_host_mouse_position(&mut self, pos: Option<(i16, i16)>) {
         self.host_mouse_pos = pos;
@@ -124,9 +37,10 @@ impl X68kBus {
             if patch_addr + 4 <= self.main_ram.len()
                 && self.main_ram[patch_addr..patch_addr + 4] == [0x48, 0xE7, 0xE0, 0x04]
             {
-                // Patch MOVEM.L D0-D2/A5, -(SP) with Hypercall 0xFE81 (SxMouseSync) + RTS (0x4E75)
-                self.main_ram[patch_addr..patch_addr + 4]
-                    .copy_from_slice(&[0xFE, 0x81, 0x4E, 0x75]);
+                // Patch MOVEM.L D0-D2/A5, -(SP) with the SxMouseSync hypercall + RTS (0x4E75)
+                let [hi, lo] = HYPERCALL_OPCODE.to_be_bytes();
+                self.main_ram[patch_addr..patch_addr + 4].copy_from_slice(&[hi, lo, 0x4E, 0x75]);
+                self.register_hypercall(patch_addr as u32, HypercallId::SxMouseSync);
                 self.enable_native_gm(text_base);
 
                 if self.target_resolution.is_none()
@@ -143,7 +57,7 @@ impl X68kBus {
         }
     }
 
-    /// Handles `0xFE81` (`SxMouseSync`): updates SX-Window mouse coordinates in `MouseWorkArea` (`A4`).
+    /// Handles `SxMouseSync`: updates SX-Window mouse coordinates in `MouseWorkArea` (`A4`).
     pub(crate) fn hypercall_sx_mouse_sync(&mut self, state: &mut CpuState) -> TrapResult {
         let a4 = (state.a[4] & 0x00FF_FFFF) as usize;
         if a4 + 0x3C <= self.main_ram.len() {
@@ -177,7 +91,7 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Handles `0xFE88` (`SxSetScreenMode`): queries or switches SX-Window display resolution
+    /// Handles the `ScreenMode` application function: queries or switches SX-Window display resolution
     /// (Mode 0: 768x512, Mode 1: 1024x768, Mode 2: 1024x1024).
     pub(crate) fn hypercall_sx_set_screen_mode(&mut self, state: &mut CpuState) -> TrapResult {
         let (cur_w, cur_h) = self.crtc.active_resolution();

@@ -3,8 +3,14 @@
 
 use std::path::Path;
 
-use msx68k_bus::scsi::{build_bootable_sxwin_scsi_hdd, parse_scsi_partitions};
-use msx68k_bus::{CpuSpeedMode, VmConfig, X68kVm};
+use msx68k_bus::guest_build::build_guest_x_executable;
+use msx68k_bus::scsi::{
+    build_bootable_sxwin_scsi_hdd, build_bootable_sxwin_scsi_hdd_with_files, parse_scsi_partitions,
+    ExtractedFile,
+};
+use msx68k_bus::{
+    AppFunction, CpuSpeedMode, HypercallId, VmConfig, X68kVm, APP_ENTRY, HYPERCALL_OPCODE,
+};
 use msx68k_cpu::Bus;
 
 fn render_bus_tvram_rgba(bus: &msx68k_bus::X68kBus) -> (u32, u32, Vec<u8>) {
@@ -181,7 +187,7 @@ fn test_scsi_hdd_generation_and_partition_table() {
                 }
             }
         }
-        assert!(found_root_sxmode, "SXMODE.X must be present in root A:\\ for 1-click access");
+        assert!(!found_root_sxmode, "SXMODE.X is launched from the control panel, not from A:\\");
         assert!(found_root_sx_bat, "SX.BAT must be present in root A:\\ to match official installer");
 
         // Verify SHELL/SXWIN.ENV contains official search path with A:\BIN and A:\X68
@@ -215,7 +221,7 @@ fn test_scsi_hdd_generation_and_partition_table() {
             }
         }
         assert!(x68_file_count >= 20, "X68 directory must contain applications and tools (found={})", x68_file_count);
-        assert!(found_sxmode, "SXMODE.X must be in X68 directory");
+        assert!(!found_sxmode, "SXMODE.X is launched from the control panel, not from X68");
         assert!(found_hdformat, "HDFORMAT must be in X68 directory");
 
         // Verify dictionaries in DIC directory
@@ -330,7 +336,7 @@ fn test_virtual_scsi_rom_and_iocs_dispatch() {
     assert_eq!(vm.bus.read_u32(0x00FC_0048, true).unwrap(), 0x4875_6D61); // "Huma"
     assert_eq!(vm.bus.read_u32(0x00FC_004C, true).unwrap(), 0x6E36_386B); // "n68k"
 
-    // Install IOCS $F5 vector via hypercall 0xFE84 (or direct install)
+    // Install IOCS $F5 vector via the ScsiIocsInstall hypercall (or direct install)
     vm.cpu_state.pc = 0x00FC_0064;
     vm.step();
     let iocs_vec = vm.bus.read_u32(0x0007D4, true).unwrap();
@@ -482,9 +488,10 @@ fn test_fsx_mouse_hook_patch_and_sx_mouse_sync() {
         .write_u32(0x0000_0938, handler_addr, true)
         .unwrap();
 
-    // Verify patch_addr now contains [0xFE, 0x81, 0x4E, 0x75] (Hypercall 0xFE81 + RTS)
+    // Verify patch_addr now holds the hypercall + RTS, registered as SxMouseSync
     let patched_code = vm.bus.read_u32(patch_addr, true).unwrap();
-    assert_eq!(patched_code, 0xFE81_4E75);
+    assert_eq!(patched_code, (HYPERCALL_OPCODE as u32) << 16 | 0x4E75);
+    assert_eq!(vm.bus.hypercall_at(patch_addr), Some(HypercallId::SxMouseSync));
 
     // Setup MouseWorkArea at A4 = 0x0003_0000
     let mwa = 0x0003_0000;
@@ -640,7 +647,27 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
 
-    let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
+    // The disk launches SXMODE.X only from the control panel; this test runs it from a file.
+    let mut bin_dir = [b' '; 8];
+    bin_dir[..3].copy_from_slice(b"BIN");
+    let mut raw_name = [b' '; 8];
+    raw_name[..6].copy_from_slice(b"SXMODE");
+    let sxmode = ExtractedFile {
+        path_dirs: vec![(bin_dir, [b' '; 3], [0u8; 10])],
+        raw_name,
+        raw_ext: *b"X  ",
+        raw_name2: [0u8; 10],
+        attr: 0x20,
+        time: 0x6000,
+        date: 0x5821,
+        data: build_guest_x_executable(
+            &workspace_root.join("guest/sxmode/sxmode.s"),
+            &[&workspace_root.join("guest/include")],
+        )
+        .expect("SXMODE.X must build"),
+    };
+    let hdd_image =
+        build_bootable_sxwin_scsi_hdd_with_files(&human_data, &sx_refs, 32, vec![sxmode]);
 
     let hds_path = workspace_root.join("disks/SXWIN31.HDS");
     let _ = std::fs::write(&hds_path, &hdd_image);
@@ -695,8 +722,8 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     let patch_addr = text_base + 0x04F768;
     assert_eq!(
         vm.bus.read_u32(patch_addr, true).unwrap(),
-        0xFE81_4E75,
-        "FSX.X must be patched with Hypercall 0xFE81 (SxMouseSync) + RTS"
+        (HYPERCALL_OPCODE as u32) << 16 | 0x4E75,
+        "FSX.X must be patched with the SxMouseSync hypercall + RTS"
     );
 
     // Test 1:1 host mouse synchronization
@@ -982,7 +1009,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         if (opcode & 0xF000) == 0xA000 && !click_alines.contains(&opcode) {
             click_alines.push(opcode);
         }
-        if (opcode & 0xFFF0) == 0xFE80 && !click_hypers.contains(&opcode) {
+        if opcode == HYPERCALL_OPCODE && !click_hypers.contains(&opcode) {
             click_hypers.push(opcode);
         }
         vm.step();
@@ -998,7 +1025,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         if (opcode & 0xF000) == 0xA000 && !click_alines.contains(&opcode) {
             click_alines.push(opcode);
         }
-        if (opcode & 0xFFF0) == 0xFE80 && !click_hypers.contains(&opcode) {
+        if opcode == HYPERCALL_OPCODE && !click_hypers.contains(&opcode) {
             click_hypers.push(opcode);
         }
         vm.step();
@@ -1502,15 +1529,10 @@ fn test_burst_frame_peripheral_timing_pacing() {
 
 #[test]
 fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
-    let mut vm = X68kVm::new_app_vm();
+    let mut vm = X68kVm::new_master_sx();
 
     // 1. Initial resolution is 768x512
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
-
-    // Place Hypercall 0xFE88 + RTS at $0001_0000
-    let code_addr = 0x0001_0000;
-    vm.bus.write_u16(code_addr, 0xFE88, true).unwrap();
-    vm.bus.write_u16(code_addr + 2, 0x4E75, true).unwrap();
 
     // Mock resident SYS/FSX.X kernel structures in Main RAM
     let text_base: u32 = 0x0003_0000;
@@ -1552,7 +1574,8 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
 
     // Test A: Query Mode (D1 = -1)
     vm.cpu_state.d[1] = 0xFFFF_FFFF;
-    vm.cpu_state.pc = code_addr;
+    vm.cpu_state.d[0] = AppFunction::ScreenMode as u32;
+    vm.cpu_state.pc = APP_ENTRY;
     vm.step();
     assert_eq!(vm.cpu_state.d[0], 0, "Initial query should return mode 0");
     assert_eq!(vm.cpu_state.d[1], 768);
@@ -1560,7 +1583,8 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
 
     // Test B: Switch to Mode 1 (1024x768)
     vm.cpu_state.d[1] = 1;
-    vm.cpu_state.pc = code_addr;
+    vm.cpu_state.d[0] = AppFunction::ScreenMode as u32;
+    vm.cpu_state.pc = APP_ENTRY;
     vm.step();
     assert_eq!(vm.cpu_state.d[0], 1, "Should return mode 1");
     assert_eq!(vm.cpu_state.d[1], 1024);
@@ -1595,7 +1619,8 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
 
     // Test C: Switch to Mode 2 (1024x1024)
     vm.cpu_state.d[1] = 2;
-    vm.cpu_state.pc = code_addr;
+    vm.cpu_state.d[0] = AppFunction::ScreenMode as u32;
+    vm.cpu_state.pc = APP_ENTRY;
     vm.step();
     assert_eq!(vm.cpu_state.d[0], 2, "Should return mode 2");
     assert_eq!(vm.cpu_state.d[1], 1024);
@@ -1612,7 +1637,8 @@ fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
     vm.bus.write_u16(a4 + 0x0A, 900, true).unwrap();
     vm.bus.write_u16(a4 + 0x0C, 800, true).unwrap();
     vm.cpu_state.d[1] = 0;
-    vm.cpu_state.pc = code_addr;
+    vm.cpu_state.d[0] = AppFunction::ScreenMode as u32;
+    vm.cpu_state.pc = APP_ENTRY;
     vm.step();
     assert_eq!(vm.cpu_state.d[0], 0, "Should return mode 0");
     assert_eq!(vm.cpu_state.d[1], 768);
