@@ -45,6 +45,9 @@ run in a VM of their own from the start.
   whose file operations VMX68K.SX carries out through the master VM's Human68k. Sector access
   to the master's disks is not given, since two Human68ks caching one file system would break
   it.
+- **Floppy image mode.** VMs can still get floppy images on their own FDD, for software that
+  drives the FDD directly, as a mode the VM's settings switch to. The FDD's drives then come
+  after the remote drives.
 - **Booting from a remote drive.** A boot routine loads `HUMAN.SYS` through the bridge
   and makes the bridged drive A: the boot drive, without sector access.
 - **A VM's own CONFIG.SYS.** A VM must not start SX-Window, which the master's `CONFIG.SYS`
