@@ -95,9 +95,10 @@ one opcode only, and the address it runs at decides which hypercall it is.
   | 1 | `GetWheelConfig` | Returns `D1` reverse (1), `D2` arrow clicks per notch, `D3` trackpad pixels per notch. |
   | 2 | `SetWheelConfig` | Sets `D1`–`D3` and returns them as clamped. |
   | 3 | `ScreenMode` | `D1.L = -1` returns the mode, width, and height in `D0`–`D2`; otherwise switches to mode `D1` (0, 1, 2) or to the size in `D1`, `D2`. Superseded by `IOCS _CRTMOD` `$50`. |
-  | 4 | `VmOpen` | Starts a VM for the window `D1.L` (`WindowPtr`); returns its ID (1 or more) in `D0.L`. See [VMX68K.md](VMX68K.md) Section 3.5. |
-  | 5 | `VmPoll` | Called by VMX68K.SX on every pass of its event loop for VM `D1.L`; carries out the VM's pending requests. Returns 0, or -1 for an unknown VM. |
+  | 4 | `VmOpen` | Starts a VM for the window `D1.L` (`WindowPtr`), with a drive 0 image of `D2.L` bytes that VMX68K.SX serves (0 for none); returns its ID (1 or more) in `D0.L`. See [VMX68K.md](VMX68K.md) Section 3.5. |
+  | 5 | `VmPoll` | Called by VMX68K.SX on every pass of its event loop for VM `D1.L`, with its buffer at `D2.L` of `D3.L` bytes. Returns 0 for nothing to do, 1 to read `D2.L` bytes at offset `D1.L` of the image into the buffer, 2 to write `D2.L` bytes the host put in the buffer there, or -1 for an unknown VM. One request is handed out at a time. |
   | 6 | `VmClose` | Stops VM `D1.L`. Returns 0, or -1 for an unknown VM. |
+  | 7 | `VmReply` | Answers the request `VmPoll` handed out for VM `D1.L`: `D2.L` is 0 when it succeeded, and a read's bytes are in the buffer. Returns 0, or -1 when no request was handed out. |
 - Still open: whether a full X68030 ROM image would occupy the end of the window.
 - In addition to hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
   - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).

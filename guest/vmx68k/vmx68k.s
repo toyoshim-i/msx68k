@@ -1,8 +1,10 @@
 * -----------------------------------------------------------------------------
 * VMX68K.X: shows a virtual X68000 in an SX-Window window (docs/VMX68K.md)
 * The host runs the VM on a thread of its own and lays its screen over the
-* window's content, so this task only opens the window, polls the host for the
-* VM's requests on every pass of its event loop, and closes the VM at the end.
+* window's content, so this task only opens the window, carries out the VM's
+* disk requests on every pass of its event loop, and closes the VM at the end.
+* Drive 0 of the VM is the image at DRIVE0_PATH, read and written through
+* Human68k here, so the VM's disks live on the master VM's drives.
 * Assembled by rhas and linked by rhlk
 * -----------------------------------------------------------------------------
 
@@ -54,9 +56,30 @@ gui_start:
 	move.l	a0, d0
 	beq	do_ts_exit
 
+	* Open drive 0's image, and find its size; without it the drive stays empty
+	move.w	#2, -(sp)		; read and write
+	pea	drive0_path(pc)
+	DOS	_OPEN
+	addq.l	#6, sp
+	tst.l	d0
+	bmi.s	no_drive0
+	lea	drive0_fd(pc), a1
+	move.w	d0, (a1)
+	move.w	#2, -(sp)		; from the end
+	clr.l	-(sp)
+	move.w	d0, -(sp)
+	DOS	_SEEK
+	addq.l	#8, sp
+	tst.l	d0
+	bmi.s	no_drive0
+	lea	drive0_size(pc), a1
+	move.l	d0, (a1)
+no_drive0:
+
 	* Ask the host for a VM; without msx68k there is none, and the task ends
 	moveq.l	#MSX68K_FN_VM_OPEN, d0
 	move.l	win_ptr(pc), d1
+	move.l	drive0_size(pc), d2
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
@@ -70,12 +93,11 @@ gui_start:
 	st	(a1)
 
 event_loop:
-	moveq.l	#MSX68K_FN_VM_POLL, d0
-	move.l	vm_id(pc), d1
-	bsr	msx68k_call
+	bsr	serve_disk
 
 	pea	event_rec(pc)
-	move.w	#$3282, -(sp)		; EM_MSLDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
+	* EM_NULL makes it return on every turn, so the VM's disk requests are served while idle
+	move.w	#$3283, -(sp)		; EM_NULL | EM_MSLDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
 	SXCALL	TSEventAvail		; $A357
 	addq.l	#6, sp
 
@@ -150,6 +172,11 @@ quit_app:
 	moveq.l	#MSX68K_FN_VM_CLOSE, d0
 	move.l	vm_id(pc), d1
 	bsr	msx68k_call
+	move.w	drive0_fd(pc), d0
+	bmi.s	dispose_window
+	move.w	d0, -(sp)
+	DOS	_CLOSE
+	addq.l	#2, sp
 dispose_window:
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	WMDispose		; $A1FC
@@ -159,6 +186,63 @@ do_ts_exit:
 	SXCALL	TSExit			; $A352
 	clr.w	-(sp)
 	DOS	_EXIT2
+
+* -----------------------------------------------------------------------------
+* Helper: serve_disk
+* Carries out the VM's disk requests on drive 0's image until there are none
+* -----------------------------------------------------------------------------
+serve_disk:
+	movem.l	d0-d3/a0-a1, -(sp)
+serve_next:
+	moveq.l	#MSX68K_FN_VM_POLL, d0
+	move.l	vm_id(pc), d1
+	lea	disk_buffer(pc), a0
+	move.l	a0, d2
+	move.l	#DISK_BUFFER_SIZE, d3
+	bsr	msx68k_call
+	tst.l	d0
+	ble.s	serve_done		; 0: nothing to do, -1: no such VM
+	lea	request(pc), a1
+	move.l	d0, (a1)+		; kind: 1 read, 2 write
+	move.l	d1, (a1)+		; offset in the image
+	move.l	d2, (a1)		; length
+	moveq.l	#-1, d3			; failed unless the transfer completes
+	move.w	drive0_fd(pc), d0
+	bmi.s	serve_reply
+
+	clr.w	-(sp)			; from the start
+	move.l	request_offset(pc), -(sp)
+	move.w	d0, -(sp)
+	DOS	_SEEK
+	addq.l	#8, sp
+	tst.l	d0
+	bmi.s	serve_reply
+
+	move.l	request_length(pc), -(sp)
+	pea	disk_buffer(pc)
+	move.w	drive0_fd(pc), -(sp)
+	move.l	request_kind(pc), d0
+	cmpi.l	#1, d0
+	bne.s	serve_write
+	DOS	_READ
+	bra.s	serve_moved
+serve_write:
+	DOS	_WRITE
+serve_moved:
+	lea	10(sp), sp
+	cmp.l	request_length(pc), d0
+	bne.s	serve_reply
+	moveq.l	#0, d3
+
+serve_reply:
+	moveq.l	#MSX68K_FN_VM_REPLY, d0
+	move.l	vm_id(pc), d1
+	move.l	d3, d2
+	bsr	msx68k_call
+	bra	serve_next
+serve_done:
+	movem.l	(sp)+, d0-d3/a0-a1
+	rts
 
 * -----------------------------------------------------------------------------
 * Helper: msx68k_call (see msx68k.mac)
@@ -172,6 +256,8 @@ str_needs_sx:
 	.dc.b	"VMX68K.X runs on SX-Window under msx68k.", 13, 10, 0
 win_title:
 	.dc.b	6, "VMX68K", 0
+drive0_path:
+	.dc.b	"A:\VMX68K\DRIVE0.XDF", 0
 	.even
 win_bounds:
 	.dc.w	40, 40, 808, 552	; left, top, right, bottom: 768 x 512, the VM's screen
@@ -181,6 +267,18 @@ win_ptr:
 app_task_id:
 	.dc.l	0
 vm_id:
+	.dc.l	0
+drive0_fd:
+	.dc.w	-1
+	.even
+drive0_size:
+	.dc.l	0
+request:
+request_kind:
+	.dc.l	0
+request_offset:
+	.dc.l	0
+request_length:
 	.dc.l	0
 win_active:
 	.dc.b	0
@@ -204,6 +302,13 @@ app_stack:
 	.ds.b	8192
 	.even
 app_stack_top:
+	.even
+
+* A read or write of a whole cylinder, both sides, of any floppy format. It comes last, as
+* PC-relative references reach only 32 KB.
+DISK_BUFFER_SIZE	.equ	32768
+disk_buffer:
+	.ds.b	DISK_BUFFER_SIZE
 	.even
 
 prog_end:

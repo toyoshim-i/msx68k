@@ -111,9 +111,11 @@ windows work the same way as the master VM.
   rectangles. So moving, covering, and uncovering the window need no code in VMX68K.SX.
 - **Window size.** The window's content is the VM's screen at its native size, fixed for now
   (768×512 for Human68k 3.02 at boot).
-- **First disk.** The host reads the floppy image for drive 0 of new VMs itself, named by a
-  command-line option of the app. Images come from the master VM's drives once the VM's screen
-  shows in its window (Section 2).
+- **First disk.** The host read the floppy image for drive 0 of new VMs itself at first, named by
+  a command-line option of the app. Images come from the master VM's drives now that the VM's
+  screen shows in its window (Section 2).
+- **Drive 0's image, for now.** Until the settings GUI chooses images, VMX68K.SX serves the file
+  at a fixed path, `A:\VMX68K\DRIVE0.XDF`, as the VM's drive 0.
 
 ## 4. First Goal
 
@@ -139,6 +141,16 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   registers, and dispatches into one of two 1024×1024 textures; `VmScreenOutput` gives the main
   thread the latest completed one. At Human68k's `A>` prompt a frame uploads about 2 KB, and
   10 KB when the cursor blinks (`crates/msx68k-vicon/tests/vm_screen.rs`).
+- VMX68K.X opens `A:\VMX68K\DRIVE0.XDF` for reading and writing when it starts and passes its size
+  to `VmOpen`. The app then gives the VM's drive 0 a remote disk (`RemoteDisk`), unless
+  `--vm-fd0` names an image for the host to read itself. The FDC finishes a command at once, so
+  the VM waits where the command runs: a read asks for every sector to EOT, and the other side
+  for a multi-track command, in one request; a write sends the written sectors in one request
+  before the result phase. VMX68K.X carries requests out one at a time with DOS `_SEEK`,
+  `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Its event loop asks
+  `TSEventAvail` for null events too, which return on every turn, so requests are served while
+  nothing else happens. Human68k 3.02 boots from the master VM's HDD to `A>` this way
+  (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
 - The compositor shader has no scanline table, sprites, or BG yet; it composites text and
   graphic page 0 from the state at the end of the frame.
 - The final pass (`render_bus_to_surface_view`) draws the master VM's screen, then each

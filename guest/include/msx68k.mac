@@ -13,9 +13,10 @@ MSX68K_FN_VERSION	.equ	0	; Returns the version in D0.L
 MSX68K_FN_GET_WHEEL	.equ	1	; Returns D1 reverse, D2 clicks, D3 trackpad pixels
 MSX68K_FN_SET_WHEEL	.equ	2	; Sets D1-D3 and returns them as clamped
 MSX68K_FN_SCREEN_MODE	.equ	3	; D1.L = -1 queries, otherwise switches the resolution
-MSX68K_FN_VM_OPEN	.equ	4	; D1.L = WindowPtr; returns the VM ID
-MSX68K_FN_VM_POLL	.equ	5	; D1.L = VM ID; carries out its pending requests
+MSX68K_FN_VM_OPEN	.equ	4	; D1.L = WindowPtr, D2.L = drive 0 image size; returns the VM ID
+MSX68K_FN_VM_POLL	.equ	5	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns a disk request
 MSX68K_FN_VM_CLOSE	.equ	6	; D1.L = VM ID; stops the VM
+MSX68K_FN_VM_REPLY	.equ	7	; D1.L = VM ID, D2.L = 0 when the request succeeded
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the

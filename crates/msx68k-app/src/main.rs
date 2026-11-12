@@ -282,7 +282,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD/.DIM)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD/.DIM)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
-                           --vm-fd0 <path>      Floppy image that VMs opened by VMX68K.X boot from\n  \
+                           --vm-fd0 <path>      Floppy image for VMs of VMX68K.X instead of its A:\\VMX68K\\DRIVE0.XDF\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
                            --cpu <model>        CPU: 68000 | 68030 (default: 68000)\n  \
@@ -764,8 +764,12 @@ impl Msx68kApp {
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
             match event {
-                VmEvent::Opened { id, window } => {
-                    if let Some(guest) = self.start_guest_vm(id, window) {
+                VmEvent::Opened {
+                    id,
+                    window,
+                    drive0_bytes,
+                } => {
+                    if let Some(guest) = self.start_guest_vm(id, window, drive0_bytes as usize) {
                         self.guest_vms.push(guest);
                     }
                 }
@@ -774,7 +778,15 @@ impl Msx68kApp {
         }
     }
 
-    fn start_guest_vm(&self, id: u32, window: u32) -> Option<GuestVm> {
+    /// Stops every VM, detaching its disk first so its thread is not left waiting for it.
+    fn stop_guest_vms(&mut self) {
+        for guest in &self.guest_vms {
+            self.vm.bus.detach_vm_disk(guest.id);
+        }
+        self.guest_vms.clear();
+    }
+
+    fn start_guest_vm(&mut self, id: u32, window: u32, drive0_bytes: usize) -> Option<GuestVm> {
         let gpu = self.gpu.as_ref()?;
         let mut vm = X68kVm::new(
             VmConfig::app_vm()
@@ -783,7 +795,15 @@ impl Msx68kApp {
         );
         vm.bus.load_cgrom(&self.guest_cgrom);
         vm.bus.load_ipl_rom(&self.guest_ipl);
-        if let Some(path) = &self.args.vm_fd0_path {
+        if drive0_bytes > 0 && self.args.vm_fd0_path.is_none() {
+            // Drive 0 is the image VMX68K.X keeps on the master VM's drive and serves.
+            let (disk, requests) = msx68k_bus::vmx68k::remote_disk(drive0_bytes);
+            if vm.bus.fdc.insert_remote_disk(0, disk, false) {
+                self.vm.bus.attach_vm_disk(id, requests);
+            } else {
+                eprintln!("VM {id}: unsupported image size for drive 0: {drive0_bytes} bytes");
+            }
+        } else if let Some(path) = &self.args.vm_fd0_path {
             // Write-protected, and only ever a copy: the image on the host stays as it is.
             match std::fs::read(path) {
                 Ok(data) => {
@@ -931,7 +951,7 @@ impl ApplicationHandler for Msx68kApp {
             WindowEvent::CloseRequested => {
                 self.flush_persistent_storage(true);
                 // VM threads present to the GPU, so they stop before it goes.
-                self.guest_vms.clear();
+                self.stop_guest_vms();
                 if let Some(gpu) = &self.gpu {
                     let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
                 }
@@ -1124,7 +1144,7 @@ impl Drop for Msx68kApp {
     fn drop(&mut self) {
         self.flush_persistent_storage(true);
         // VM threads present to the GPU at every vertical blank, so they stop before it goes.
-        self.guest_vms.clear();
+        self.stop_guest_vms();
         if let Some(gpu) = &self.gpu {
             let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
         }

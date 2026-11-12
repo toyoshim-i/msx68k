@@ -76,6 +76,8 @@ pub enum AppFunction {
     VmPoll = 5,
     /// Stops VM `D1.L`.
     VmClose = 6,
+    /// Answers the disk request `VmPoll` handed out for VM `D1.L`.
+    VmReply = 7,
 }
 
 impl AppFunction {
@@ -88,6 +90,7 @@ impl AppFunction {
             4 => Some(Self::VmOpen),
             5 => Some(Self::VmPoll),
             6 => Some(Self::VmClose),
+            7 => Some(Self::VmReply),
             _ => None,
         }
     }
@@ -163,6 +166,7 @@ impl X68kBus {
                 Some(AppFunction::VmOpen) => self.hypercall_vm_open(state),
                 Some(AppFunction::VmPoll) => self.hypercall_vm_poll(state),
                 Some(AppFunction::VmClose) => self.hypercall_vm_close(state),
+                Some(AppFunction::VmReply) => self.hypercall_vm_reply(state),
                 None => TrapResult::Unhandled,
             },
         }

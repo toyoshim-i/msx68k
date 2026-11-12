@@ -4,6 +4,7 @@
 use msx68k_cpu::BusFault;
 
 use crate::dmac::Dmac;
+use crate::vmx68k::RemoteDisk;
 
 // Main Status Register ($E94001 read) bit masks
 pub const MSR_RQM: u8 = 0x80; // Request for Master
@@ -318,6 +319,8 @@ pub struct FloppyDrive {
     pub write_protected: bool,
     /// Raw disk image data (`None` if no floppy is inserted).
     pub image: Option<Vec<u8>>,
+    /// An image kept by the master VM instead (`docs/VMX68K.md` Section 3.1).
+    pub remote: Option<RemoteDisk>,
     /// Geometry of the mounted disk image.
     pub geometry: FloppyGeometry,
     /// Pending Seek/Recalibrate or Ready-transition interrupt result `(st0, pcn)`.
@@ -333,6 +336,7 @@ impl FloppyDrive {
             motor_on: false,
             write_protected: false,
             image: None,
+            remote: None,
             geometry: FloppyGeometry::XDF_2HD,
             pending_irq: None,
         }
@@ -341,7 +345,7 @@ impl FloppyDrive {
     /// Returns `true` if a disk image is currently inserted.
     #[inline]
     pub const fn is_inserted(&self) -> bool {
-        self.image.is_some()
+        self.image.is_some() || self.remote.is_some()
     }
 
     /// Returns `true` if the drive is ready (connected, disk inserted, and motor spinning).
@@ -349,6 +353,17 @@ impl FloppyDrive {
     pub const fn is_ready(&self) -> bool {
         self.connected && self.is_inserted() && self.motor_on
     }
+}
+
+/// Bytes a read or write starting at sector `r` of side `h` can transfer: to `eot`, then the
+/// other side too for a multi-track command on side 0. They lie together in the image.
+fn command_span(geom: FloppyGeometry, mt: bool, h: u8, r: u8, eot: u8) -> usize {
+    let last = eot.min(geom.first_sector_id + geom.sectors_per_track - 1);
+    let mut sectors = (last as usize + 1).saturating_sub(r as usize);
+    if mt && h & 1 == 0 {
+        sectors += (last as usize + 1).saturating_sub(geom.first_sector_id as usize);
+    }
+    sectors * geom.sector_bytes()
 }
 
 /// NEC uPD72065 Floppy Disk Controller and 4-Drive FDD subsystem (`$E94000`–`$E95FFF`).
@@ -430,10 +445,28 @@ impl Fdc {
         true
     }
 
+    /// Inserts a disk image the master VM keeps into drive `unit`, which reads and writes it
+    /// through requests. Its size must be one of a raw floppy image.
+    pub fn insert_remote_disk(&mut self, unit: usize, disk: RemoteDisk, write_protected: bool) -> bool {
+        let Some(geometry) = FloppyGeometry::from_image_len(disk.len()) else {
+            return false;
+        };
+        let Some(drv) = self.drives.get_mut(unit) else {
+            return false;
+        };
+        drv.connected = true;
+        drv.geometry = geometry;
+        drv.write_protected = write_protected;
+        drv.image = None;
+        drv.remote = Some(disk);
+        true
+    }
+
     /// Ejects the floppy disk from drive `unit` (`0..=3`).
     pub fn eject_disk(&mut self, unit: usize) {
         if unit < 4 {
             self.drives[unit].image = None;
+            self.drives[unit].remote = None;
             self.drives[unit].motor_on = false;
         }
     }
@@ -581,16 +614,34 @@ impl Fdc {
 
                 let drv = &mut self.drives[us];
                 drv.pcn = c;
-                let Some(image) = drv.image.as_ref() else {
-                    let st0 = ST0_AT | ST0_NR | ((h & 1) << 2) | (us as u8);
-                    self.enter_result_phase(&[st0, 0, 0, c, h, r, n], true, ioi);
-                    return;
-                };
                 let geom = drv.geometry;
                 let sec_len = geom.sector_bytes();
+                // A remote image is asked for every sector the command can transfer at once,
+                // and the VM waits for it here, where the sectors go to the DMAC.
+                let (image, base): (std::borrow::Cow<[u8]>, usize) = match (&drv.image, &drv.remote) {
+                    (Some(image), _) => (std::borrow::Cow::Borrowed(&image[..]), 0),
+                    (None, Some(remote)) => {
+                        let fetched = geom.sector_offset(c, h, r, n).and_then(|first| {
+                            let len = command_span(geom, mt, h, r, eot).min(remote.len() - first);
+                            remote.read(first, len).map(|data| (data, first))
+                        });
+                        let Some((data, first)) = fetched else {
+                            let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
+                            self.enter_result_phase(&[st0, ST1_ND, 0, c, h, r, n], true, ioi);
+                            return;
+                        };
+                        (std::borrow::Cow::Owned(data), first)
+                    }
+                    (None, None) => {
+                        let st0 = ST0_AT | ST0_NR | ((h & 1) << 2) | (us as u8);
+                        self.enter_result_phase(&[st0, 0, 0, c, h, r, n], true, ioi);
+                        return;
+                    }
+                };
 
                 loop {
-                    let Some(offset) = geom.sector_offset(c, h, r, n) else {
+                    let Some(offset) = geom.sector_offset(c, h, r, n).and_then(|o| o.checked_sub(base))
+                    else {
                         let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
                         self.enter_result_phase(&[st0, ST1_ND, 0, c, h, r, n], true, ioi);
                         return;
@@ -650,14 +701,33 @@ impl Fdc {
                 }
                 let geom = drv.geometry;
                 let sec_len = geom.sector_bytes();
-                let Some(image) = drv.image.as_mut() else {
-                    let st0 = ST0_AT | ST0_NR | ((h & 1) << 2) | (us as u8);
-                    self.enter_result_phase(&[st0, 0, 0, c, h, r, n], true, ioi);
-                    return;
+                // A remote image is written in one request once the DMAC has given every
+                // sector, and the result phase waits for it.
+                let remote = drv.remote.clone();
+                let mut written = Vec::new();
+                let first = geom.sector_offset(c, h, r, n);
+                let (image, base): (&mut [u8], usize) = match (drv.image.as_mut(), &remote, first) {
+                    (Some(image), _, _) => (&mut image[..], 0),
+                    (None, Some(remote), Some(first)) => {
+                        let len = command_span(geom, mt, h, r, eot).min(remote.len() - first);
+                        written.resize(len, 0);
+                        (&mut written[..], first)
+                    }
+                    (None, Some(_), None) => {
+                        let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
+                        self.enter_result_phase(&[st0, ST1_ND, 0, c, h, r, n], true, ioi);
+                        return;
+                    }
+                    (None, None, _) => {
+                        let st0 = ST0_AT | ST0_NR | ((h & 1) << 2) | (us as u8);
+                        self.enter_result_phase(&[st0, 0, 0, c, h, r, n], true, ioi);
+                        return;
+                    }
                 };
+                let mut written_len = 0;
 
                 loop {
-                    let Some(offset) = geom.sector_offset(c, h, r, n) else {
+                    let Some(offset) = geom.sector_offset(c, h, r, n).and_then(|o| o.checked_sub(base)) else {
                         let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
                         self.enter_result_phase(&[st0, ST1_ND, 0, c, h, r, n], true, ioi);
                         return;
@@ -668,9 +738,10 @@ impl Fdc {
                         return;
                     }
 
-                    for slot in &mut image[offset..offset + sec_len] {
+                    for (i, slot) in image[offset..offset + sec_len].iter_mut().enumerate() {
                         if let Some(byte) = dmac.memory_to_device_u8(0, main_ram) {
                             *slot = byte;
+                            written_len = written_len.max(offset + i + 1);
                         } else {
                             break;
                         }
@@ -696,6 +767,14 @@ impl Fdc {
                     }
                 }
 
+                if let (Some(remote), Some(first)) = (&remote, first) {
+                    written.truncate(written_len);
+                    if !written.is_empty() && !remote.write(first, written) {
+                        let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
+                        self.enter_result_phase(&[st0, ST1_NW, 0, c, h, r, n], true, ioi);
+                        return;
+                    }
+                }
                 let st0 = ((h & 1) << 2) | (us as u8);
                 self.enter_result_phase(&[st0, 0, 0, c, h, r, n], true, ioi);
             }
