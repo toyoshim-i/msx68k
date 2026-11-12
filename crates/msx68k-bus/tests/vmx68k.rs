@@ -115,6 +115,8 @@ fn vmx68k_opens_a_vm_in_its_window() {
     // at the top left of the desktop covers a corner of it.
     let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
     assert_eq!((layout.left, layout.top), (40, 40));
+    // The new window is active, so the keyboard goes to the VM.
+    assert_eq!(vm.bus.active_window(), Some(window));
     assert_eq!(layout.visible, [(45, 40, 808, 93), (40, 93, 808, 552)]);
 
     // Dragging the title bar moves the content, with nothing reported by VMX68K.X.

@@ -8,6 +8,9 @@ use msx68k_cpu::{CpuState, TrapResult};
 
 use crate::bus::X68kBus;
 
+/// `SYS/FSX.X` global holding the active window record (`WMActive`), from its text base.
+const ACTIVE_WINDOW: u32 = 0x543CA;
+
 // Window records (`SXDEF2.H`).
 const WINDOW_BITMAP: u32 = 0;
 const WINDOW_RECT: u32 = 4;
@@ -45,6 +48,12 @@ pub struct VmWindowLayout {
 }
 
 impl X68kBus {
+    /// Returns SX-Window's active window, the one that gets the keyboard, once it runs.
+    pub fn active_window(&self) -> Option<u32> {
+        let window = self.peek_u32(self.native_gm_text_base? + ACTIVE_WINDOW)?;
+        (window != 0).then_some(window & 0x00FF_FFFF)
+    }
+
     /// Takes the VMs opened and closed since the last call, in order.
     pub fn take_vm_events(&mut self) -> Vec<VmEvent> {
         std::mem::take(&mut self.vm_windows.events)

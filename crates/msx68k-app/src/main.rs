@@ -317,7 +317,7 @@ struct GuestVm {
     /// The master VM's window record it shows in.
     window: u32,
     /// Stops and joins the VM's thread when dropped.
-    _thread: VmThread,
+    thread: VmThread,
     output: Arc<VmScreenOutput>,
 }
 
@@ -328,6 +328,8 @@ struct Msx68kApp {
     guest_ipl: Vec<u8>,
     guest_cgrom: Vec<u8>,
     guest_vms: Vec<GuestVm>,
+    /// The VM each held key went to, so its release follows it: `None` for the master VM.
+    key_targets: std::collections::HashMap<u8, Option<u32>>,
     gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
     last_title_update: Instant,
@@ -531,6 +533,7 @@ impl Msx68kApp {
             guest_ipl,
             guest_cgrom: cgrom,
             guest_vms: Vec::new(),
+            key_targets: Default::default(),
             gdb,
             gpu: None,
             last_title_update: now,
@@ -735,6 +738,28 @@ impl Msx68kApp {
         }
     }
 
+    /// Sends a key to the VM whose window SX-Window has active, straight into its MFP, or to
+    /// the master VM. A release goes where its press went.
+    fn send_key(&mut self, scancode: u8, pressed: bool) {
+        let target = if pressed {
+            let active = self.vm.bus.active_window();
+            let guest = self
+                .guest_vms
+                .iter()
+                .find(|guest| Some(guest.window) == active)
+                .map(|guest| guest.id);
+            self.key_targets.insert(scancode, guest);
+            guest
+        } else {
+            self.key_targets.remove(&scancode).flatten()
+        };
+        let byte = if pressed { scancode } else { scancode | 0x80 };
+        match target.and_then(|id| self.guest_vms.iter().find(|guest| guest.id == id)) {
+            Some(guest) => guest.thread.post(move |vm| vm.bus.mfp.push_keyboard_byte(byte)),
+            None => self.vm.bus.mfp.push_keyboard_byte(byte),
+        }
+    }
+
     /// Starts and stops the VMs that VMX68K.X opened and closed.
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
@@ -782,7 +807,7 @@ impl Msx68kApp {
         Some(GuestVm {
             id,
             window,
-            _thread: thread,
+            thread,
             output,
         })
     }
@@ -1057,12 +1082,7 @@ impl ApplicationHandler for Msx68kApp {
                     }
                     if !event.repeat {
                         if let Some(sc) = map_keycode_to_x68k_scancode(code) {
-                            let byte = if event.state == ElementState::Pressed {
-                                sc
-                            } else {
-                                sc | 0x80
-                            };
-                            self.vm.bus.mfp.push_keyboard_byte(byte);
+                            self.send_key(sc, event.state == ElementState::Pressed);
                         }
                     }
                 }

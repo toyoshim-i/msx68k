@@ -73,6 +73,15 @@ impl VmThread {
         result.recv().expect("the VM thread must reply")
     }
 
+    /// Runs `f` on the VM between two frames, without waiting for it, as for input.
+    pub fn post(&self, f: impl FnOnce(&mut X68kVm) + Send + 'static) {
+        self.requests
+            .as_ref()
+            .expect("the VM thread is running")
+            .send(Box::new(f))
+            .expect("the VM thread must be running");
+    }
+
     /// Stops the thread and returns its VM.
     pub fn stop(mut self) -> X68kVm {
         self.requests = None;
@@ -167,6 +176,15 @@ mod tests {
         );
         let vm = thread.stop();
         assert_eq!(vm.cpu_state.pc, 0x1000);
+    }
+
+    #[test]
+    fn posted_requests_run_in_order() {
+        let thread = VmThread::spawn(idle_vm(), Pace::Unthrottled);
+        for value in 1..=3 {
+            thread.post(move |vm| vm.cpu_state.d[0] = vm.cpu_state.d[0] * 10 + value);
+        }
+        assert_eq!(thread.with_vm(|vm| vm.cpu_state.d[0]), 123);
     }
 
     #[test]
