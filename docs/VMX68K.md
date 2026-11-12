@@ -33,6 +33,22 @@ run in a VM of their own from the start.
 - **Settings.** From the application's menus, graphically: drive assignments (host drives or
   virtual files such as disk images) and memory size, among others. A setup is saved as a settings
   file, and opening the file boots a VM with the same settings.
+- **Settings menus.** VMX68K.SX's window has a bar of icon menus, as `コンソール.X` and
+  `シャーペン.X` do, for:
+  - the CPU, its kind and speed;
+  - the memory size;
+  - the boot device kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets it);
+  - drive assignment, in one of two modes: bypass mode, with the path of the CONFIG.SYS the VM
+    boots with, or custom mode, where each of the VM's drives is given a floppy or HDD image
+    file or one of the primary VM's drives, and the list can be edited. An HDD image goes on
+    the VM's SCSI and is the VM's alone.
+- **Applying settings.** Saving changed settings shows a dialog saying that they take effect
+  when the VM restarts, and asks whether to restart it now or later by hand.
+- **Floppy drives.** Floppy images can be ejected and swapped without a restart: an icon for
+  each floppy drive offers eject and swap.
+- **A settings file per VM.** Each VM setup is one resource library (`.LB`, as `MSX68K.LB`)
+  holding its settings and its own SRAM, kept apart from the master's.
+- **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.
 - **Disk images.** The first test boots `disks/HUMAN302.XDF` from the host directly. As soon as
   the VM shows its screen in the window, images come from the master VM's drives. Floppy and hard
   disk images are read and written on every access, written through, never cached whole: still
@@ -210,7 +226,8 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 ## 6. Open Questions
 
 - **Mouse input to VMs**: relative or absolute motion, pointer capture, and how to leave it.
-- **Settings file format** and how double-clicking a settings file opens VMX68K.SX with it.
+- **Settings file contents**: the resources in a VM's `.LB` and their layout, and how
+  double-clicking one opens VMX68K.SX with it.
 - **Display scaling**: how a VM screen is scaled, once windows go beyond native size.
 - **The special hook** for booting in the master VM's environment.
 - **Startup speed** of a VM, and how several VMs and their sound are scheduled and mixed.
