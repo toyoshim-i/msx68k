@@ -39,16 +39,19 @@ run in a VM of their own from the start.
   is changed in a dialog, saved when the dialog closes, and followed, if anything changed, by a
   dialog saying the settings take effect when the VM restarts and asking whether to restart now
   or later by hand.
-  - **Hardware**: "Hardware settings..." opens a dialog for the CPU's kind, the memory size, and
-    drive assignment. Drive assignment is in one of two modes: bypass mode, with the path of
-    the CONFIG.SYS the VM boots with, or custom mode, where each of the VM's drives is given a
-    floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
-    HDD image goes on the VM's SCSI and is the VM's alone. Under the dialog item, the menu
-    lists the speeds of the current CPU, applied and saved when chosen.
-  - **Boot**: the boot device kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets
-    it), written and saved when chosen and taking effect at the next reset, as on the real
-    machine. In bypass mode it stays on msx68k's boot ROM and cannot be chosen; the VM's
+  - **Configuration**: one icon whose menu has, in order: "Configuration..." to open the
+    configuration dialog; the current CPU's name (such as 68000), as a heading; that CPU's
+    speeds, applied and saved when chosen; and, in custom mode only, "Boot", a submenu of the
+    boot devices kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets them), written
+    and saved when chosen and taking effect at the next reset, as on the real machine. In bypass
+    mode the boot device stays on msx68k's boot ROM and the item is not shown; the VM's
     CONFIG.SYS decides what it starts.
+  - **The configuration dialog** sets the CPU's kind, the memory size with a slider, and drive
+    assignment. Drive assignment is in one of two modes: bypass mode, with the path of the
+    CONFIG.SYS the VM boots with, or custom mode, where each of the VM's drives is given a
+    floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
+    HDD image goes on the VM's SCSI and is the VM's alone. Custom mode keeps the machine's own
+    limits: two or four floppy drives, and the drive letters Human68k gives them.
   - **Floppy drives**: an icon for each floppy drive shows whether a disk is in and has an
     access lamp. Clicking it ejects the disk, and dropping an image on it from the Filer swaps
     it in, both at once and without a restart.
