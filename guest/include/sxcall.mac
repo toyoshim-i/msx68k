@@ -45,6 +45,7 @@ EMGetNextEvent		.equ	$A357	; Compatibility alias
 TSGetEvent		.equ	$A358	; Yield and retrieve event (EMPostYield)
 EMPostYield		.equ	$A358	; Compatibility alias
 TSPostEventTsk		.equ	$A35A
+TSGetTdb		.equ	$A35B	; Copy a task's record (buffer of 512 bytes, task ID.w, -1 for this one)
 TSGetID			.equ	$A360	; Get current task / app RefCon
 TSResNew		.equ	$A4A0	; Create an empty resource map for the task's resource chain
 TSResOpen		.equ	$A4A1	; Open a resource file for the task (name ptr) -> A0 map

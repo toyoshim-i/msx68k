@@ -325,7 +325,16 @@ struct GuestVm {
     accesses_seen: u64,
     /// Until when the VM's access lamp stays lit after its last access.
     lamp_until: Option<Instant>,
+    /// The VM's SRAM each time it changed, sent from its thread, and the latest not yet handed
+    /// to VMX68K.X with when it came.
+    sram_changes: std::sync::mpsc::Receiver<Vec<u8>>,
+    sram_changed: Arc<std::sync::mpsc::Sender<Vec<u8>>>,
+    sram_pending: Option<(Vec<u8>, Instant)>,
 }
+
+/// How long a VM's SRAM stays unchanged before VMX68K.X saves it, so that a program writing
+/// it byte by byte is saved once.
+const SRAM_SETTLE: Duration = Duration::from_millis(500);
 
 /// How long a VM's access lamp stays lit after an access, which is over at once in emulation.
 const LAMP_AFTERGLOW: Duration = Duration::from_millis(200);
@@ -773,8 +782,8 @@ impl Msx68kApp {
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
             match event {
-                VmEvent::Opened { id, window, drives, .. } => {
-                    if let Some(guest) = self.start_guest_vm(id, window, drives) {
+                VmEvent::Opened { id, window, drives, speed, sram, .. } => {
+                    if let Some(guest) = self.start_guest_vm(id, window, drives, speed, sram) {
                         self.guest_vms.push(guest);
                     }
                 }
@@ -788,8 +797,8 @@ impl Msx68kApp {
         }
     }
 
-    /// Lights each VM's access lamp while it reaches its drives, and for a while after, and
-    /// reports the size of its screen.
+    /// Lights each VM's access lamp while it reaches its drives, and for a while after, reports
+    /// the size of its screen, and hands its SRAM to VMX68K.X to save when it changed.
     fn update_vm_lamps(&mut self) {
         let now = Instant::now();
         for guest in &mut self.guest_vms {
@@ -804,6 +813,20 @@ impl Msx68kApp {
             if let Some(frame) = guest.output.completed() {
                 self.vm.bus.set_vm_screen_size(guest.id, frame.width, frame.height);
             }
+            // The VM's SRAM goes to VMX68K.X to save in its setup once it settles.
+            let changed = Arc::clone(&guest.sram_changed);
+            guest.thread.post(move |vm| {
+                if vm.bus.take_sram_dirty() {
+                    let _ = changed.send(vm.bus.sram().to_vec());
+                }
+            });
+            while let Ok(sram) = guest.sram_changes.try_recv() {
+                guest.sram_pending = Some((sram, now));
+            }
+            if guest.sram_pending.as_ref().is_some_and(|(_, at)| now >= *at + SRAM_SETTLE) {
+                let (sram, _) = guest.sram_pending.take().unwrap();
+                self.vm.bus.set_vm_sram(guest.id, sram);
+            }
         }
     }
 
@@ -815,13 +838,22 @@ impl Msx68kApp {
         self.guest_vms.clear();
     }
 
-    fn start_guest_vm(&mut self, id: u32, window: u32, drives: u32) -> Option<GuestVm> {
+    fn start_guest_vm(
+        &mut self,
+        id: u32,
+        window: u32,
+        drives: u32,
+        speed: CpuSpeedMode,
+        sram: Option<Vec<u8>>,
+    ) -> Option<GuestVm> {
+        const RAM_MB: usize = 4;
         let gpu = self.gpu.as_ref()?;
-        let mut vm = X68kVm::new(
-            VmConfig::app_vm()
-                .with_speed_mode(CpuSpeedMode::Mhz10)
-                .with_ram_mb(4),
-        );
+        let mut vm = X68kVm::new(VmConfig::app_vm().with_speed_mode(speed).with_ram_mb(RAM_MB));
+        // The VM's own SRAM from its setup, with the size of its RAM as the machine has it.
+        if let Some(sram) = sram.filter(|sram| sram.len() == vm.bus.sram().len()) {
+            vm.bus.sram_mut().copy_from_slice(&sram);
+            vm.bus.sram_mut()[8..12].copy_from_slice(&((RAM_MB << 20) as u32).to_be_bytes());
+        }
         vm.bus.load_cgrom(&self.guest_cgrom);
         vm.bus.load_ipl_rom(&self.guest_ipl);
         if let Some(path) = &self.args.vm_fd0_path {
@@ -849,6 +881,7 @@ impl Msx68kApp {
             return None;
         }
         let accesses = vm.bus.drive_access_counter();
+        let (sram_changed, sram_changes) = std::sync::mpsc::channel();
         let mut screen = VmScreen::new(gpu.compositor.device(), gpu.compositor.queue());
         let output = screen.output();
         let thread = VmThread::spawn_with_vblank(vm, Pace::RealTime, move |vm| {
@@ -863,6 +896,9 @@ impl Msx68kApp {
             accesses,
             accesses_seen: 0,
             lamp_until: None,
+            sram_changes,
+            sram_changed: Arc::new(sram_changed),
+            sram_pending: None,
         })
     }
 

@@ -1,7 +1,8 @@
 //! Installs or updates VMX68K.X, built from guest/vmx68k/vmx68k.s, and its VMX68K.LB in \X68
 //! of an existing SX-Window HDD image in place, and gives it a drive 0 image at
-//! \VMX68K\DRIVE0.XDF, a copy of disks/HUMAN302.XDF, unless one is there already. Everything
-//! else on it stays as it is.
+//! \VMX68K\DRIVE0.XDF, a copy of disks/HUMAN302.XDF, unless one is there already, and registers
+//! VM setups (*.V68) in \SHELL\ICON.LB to open with VMX68K.X. Everything else on it stays as
+//! it is.
 //!
 //! cargo run -p msx68k-bus --example install_vmx68k -- <image.HDS>
 
@@ -9,7 +10,7 @@ use std::path::Path;
 
 use msx68k_bus::guest_build::build_guest_x_executable;
 use msx68k_bus::human_fs::{short_name, HumanVolume};
-use msx68k_bus::vmx68k_library::vmx68k_library;
+use msx68k_bus::vmx68k_library::{add_setup_icon, vmx68k_library};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -39,6 +40,17 @@ fn main() {
             println!("Added \\X68\\VMX68K.{ext} ({} bytes)", data.len());
         }
         assert_eq!(volume.read_file(&x68, &name).as_deref(), Some(&data[..]));
+    }
+
+    // The Filer opens VM setups with VMX68K.X once SX-Window restarts.
+    let (shell, icons) = ([short_name("SHELL", "")], short_name("ICON", "LB"));
+    match volume.read_file(&shell, &icons).and_then(|library| add_setup_icon(&library)) {
+        Some(library) => {
+            volume.replace_file(&shell, &icons, &library, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));
+            assert_eq!(volume.read_file(&shell, &icons).as_deref(), Some(&library[..]));
+            println!("Registered *.V68 in \\SHELL\\ICON.LB");
+        }
+        None => println!("No \\SHELL\\ICON.LB to register *.V68 in"),
     }
 
     let (dir, drive0) = (short_name("VMX68K", ""), short_name("DRIVE0", "XDF"));

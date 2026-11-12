@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd;
+use msx68k_bus::human_fs::{short_name, HumanVolume};
+use msx68k_bus::scsi::{build_bootable_sxwin_scsi_hdd_with_files, ExtractedFile};
+use msx68k_bus::sx_resource::ResourceLibrary;
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
 
 /// Hard disk icon on the desktop of the test disk, which opens `\X68`.
@@ -14,6 +16,11 @@ fn root() -> std::path::PathBuf {
 }
 
 fn boot() -> Option<X68kVm> {
+    boot_with(Vec::new())
+}
+
+/// Boots the test disk with `extra` files on it.
+fn boot_with(extra: Vec<ExtractedFile>) -> Option<X68kVm> {
     let read = |name: &str| std::fs::read(root().join(name)).ok();
     let (ipl, cgrom, human) = (
         read("roms/IPLROM.DAT")?,
@@ -38,10 +45,8 @@ fn boot() -> Option<X68kVm> {
     );
     vm.bus.load_cgrom(&cgrom);
     vm.bus.load_ipl_rom(&ipl);
-    assert!(vm.bus.insert_scsi_hdd(
-        0,
-        build_bootable_sxwin_scsi_hdd(&human, &sx_refs, 32)
-    ));
+    let disk = build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, extra);
+    assert!(vm.bus.insert_scsi_hdd(0, disk));
     vm.bus.set_boot_from_scsi(true);
     vm.reset().unwrap();
     vm.run_steps(30_000_000);
@@ -92,6 +97,16 @@ fn text_index(vm: &X68kVm, (x, y): (usize, usize)) -> u8 {
     let (row, plane) = (vm.bus.active_tvram_row_bytes(), vm.bus.active_tvram_plane_bytes());
     let (at, bit) = (y * row + x / 8, 7 - (x & 7));
     (0..4).fold(0, |v, p| v | ((tvram[p * plane + at] >> bit) & 1) << p)
+}
+
+/// The speed kept in the setup `name` of `\VMX68K` on the VM's disk, and whether it has SRAM.
+fn saved_setup(vm: &X68kVm, name: &str) -> Option<(u16, bool)> {
+    let mut image = vm.bus.scsi_hdd_data(0)?.to_vec();
+    let volume = HumanVolume::open(&mut image)?;
+    let data = volume.read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))?;
+    let setup = ResourceLibrary::parse(&data)?;
+    let settings = &setup.get(b"V68S", 0)?.data;
+    Some((u16::from_be_bytes([settings[2], settings[3]]), setup.get(b"SRAM", 0).is_some()))
 }
 
 fn screenshot(vm: &X68kVm, name: &str) {
@@ -147,6 +162,9 @@ fn vmx68k_opens_a_vm_in_its_window() {
     // SX-Window's icon panel at the top left of the desktop covers a corner of it.
     let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
     assert_eq!((layout.left, layout.top), (40, 64));
+    // Started without a setup, VMX68K.X makes the default one with what the VM starts with.
+    assert_eq!(saved_setup(&vm, "DEFAULT"), Some((0, false)), "10 MHz and no SRAM yet");
+
     // The VM's screen shows where the window leaves the text clear: below the bar.
     assert_ne!(text_index(&vm, (300, 52)), 0, "the bar");
     for at in [(300, 64), (400, 300), (807, 575)] {
@@ -189,6 +207,12 @@ fn vmx68k_opens_a_vm_in_its_window() {
     assert_eq!(vm.bus.take_vm_events(), [VmEvent::Speed { id: 1, mode: CpuSpeedMode::Mhz16 }]);
     choose_speed(&mut vm, Some(3), "speeds_16mhz");
     assert_eq!(vm.bus.take_vm_events(), [VmEvent::Speed { id: 1, mode: CpuSpeedMode::Burst }]);
+    assert_eq!(saved_setup(&vm, "DEFAULT"), Some((3, false)), "a speed chosen is saved");
+
+    // SRAM the VM changed is saved in its setup.
+    vm.bus.set_vm_sram(1, vec![0x5A; msx68k_bus::vmx68k::VM_SRAM_BYTES]);
+    vm.run_steps(3_000_000);
+    assert_eq!(saved_setup(&vm, "DEFAULT"), Some((3, true)));
     // Let go away from the menu, nothing is chosen.
     choose_speed(&mut vm, None, "speeds_burst");
     assert_eq!(vm.bus.take_vm_events(), []);
@@ -216,4 +240,38 @@ fn vmx68k_opens_a_vm_in_its_window() {
     click(&mut vm, (897, 129), 1, 3_000_000);
     screenshot(&vm, "closed");
     assert_eq!(vm.bus.take_vm_events(), [VmEvent::Closed { id: 1 }]);
+}
+
+#[test]
+fn a_setup_opens_vmx68k_with_its_settings() {
+    // A setup in \X68, with the VM at Burst and its own SRAM.
+    let sram: Vec<u8> = (0..msx68k_bus::vmx68k::VM_SRAM_BYTES).map(|i| (i * 7) as u8).collect();
+    let mut raw_name = [b' '; 8];
+    raw_name[..2].copy_from_slice(b"AA");
+    let setup = ExtractedFile {
+        path_dirs: vec![(*b"X68     ", *b"   ", [0; 10])],
+        raw_name,
+        raw_ext: *b"V68",
+        raw_name2: [0; 10],
+        data: msx68k_bus::vmx68k_library::setup_library(3, Some(&sram)),
+        attr: 0x20,
+        time: 0x6000,
+        date: 0x5821,
+    };
+    let Some(mut vm) = boot_with(vec![setup]) else {
+        eprintln!("ROMs or disks not found, skipping the VMX68K test");
+        return;
+    };
+    // \X68 lists AA.V68 first, by its own icon, and a double-click opens it with VMX68K.X,
+    // as \SHELL\ICON.LB says.
+    click(&mut vm, DRIVE_ICON, 2, 3_000_000);
+    screenshot(&vm, "x68_setup");
+    click(&mut vm, (104, 92), 2, 8_000_000);
+    screenshot(&vm, "setup_opened");
+    let events = vm.bus.take_vm_events();
+    let [VmEvent::Opened { speed, sram: Some(opened), .. }] = &events[..] else {
+        panic!("the setup must open one VM with its SRAM: {events:?}");
+    };
+    assert_eq!(*speed, CpuSpeedMode::Burst);
+    assert!(opened == &sram, "the setup's own SRAM");
 }

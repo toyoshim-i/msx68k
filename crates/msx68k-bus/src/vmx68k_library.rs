@@ -1,7 +1,8 @@
 //! `VMX68K.LB`, VMX68K.SX's resource library, kept next to `VMX68K.X` in `\X68`
 //! (`docs/VMX68K.md` Section 2, "Settings menus"): the icons of its icon bar and the submenus
 //! of their menus, which SX-Window's Menu Man takes only as `'MENU'` resources of an open
-//! library. VMX68K.X opens it at start.
+//! library. VMX68K.X opens it at start. Also the entry of `\SHELL\ICON.LB` that opens VM
+//! setups (`*.V68`) with VMX68K.X.
 
 use crate::sx_resource::{Resource, ResourceLibrary};
 
@@ -11,6 +12,50 @@ pub const SPEED_MENU_ID: u16 = 1;
 
 /// `'PLOT'` of the Configuration icon, a plot image ([`plot_image`]).
 pub const CONFIGURATION_ICON_ID: u16 = 1;
+
+/// ID of the `'ICN#'` entry and its `'PAT3'` icon that `\SHELL\ICON.LB` gets for VM setups,
+/// after Sharp's entries (`$80`..`$BB`).
+pub const SETUP_ICON_ID: u16 = 0xC0;
+
+/// The file icon of a VM setup (`*.V68`), a plate as the Filer's file icons are, white at its
+/// top and left with a black shadow at its bottom and right, holding an X68000 (see
+/// [`plot_image`], whose layout `'PAT3'` icons share).
+const SETUP_ICON: [&str; 34] = [
+    "oooooooooooooooooooooooooooooooooooooooooooooo  ",
+    "o.............................................##",
+    "o................##############...............##",
+    "o................#............#...............##",
+    "o.............#########..#########............##",
+    "o.............#ooooooo#..#ooooooo#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+ooooo+#..#+ooooo+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+ooooo+#..#+ooooo+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+#####+#..#+#####+#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#+++++++#..#+++++++#............##",
+    "o.............#########..#########............##",
+    "o.............#####################...........##",
+    "o.............................................##",
+    "o.............................................##",
+    "o.............................................##",
+    " ###############################################",
+    "  ##############################################",
+];
 
 /// Items of the speed menu, in Shift_JIS as SX-Window shows them: Burst is 最高速.
 const SPEEDS: [&[u8]; 4] = [b"10MHz", b"16MHz", b"24MHz", b"\x8D\xC5\x8D\x82\x91\xAC"];
@@ -95,6 +140,48 @@ fn menu(items: &[&[u8]]) -> Vec<u8> {
     data
 }
 
+/// An `'ICN#'` entry (`IcKind` of `TASK.H`), laid out as Sharp's in `\SHELL\ICON.LB`: its icon
+/// `'PAT3'` `id`, the attributes and right-press menus of Sharp's file entries, then the file
+/// name `pattern`, the `program` that opens it, and its `parameters` (`%` for the file), as
+/// Pascal strings.
+fn icon_entry(id: u16, pattern: &[u8], program: &[u8], parameters: &[u8]) -> Vec<u8> {
+    let mut data = b"PAT3".to_vec();
+    for word in [id, 0x0007, 0x0000, 0x0009, 0x000A] {
+        data.extend_from_slice(&word.to_be_bytes());
+    }
+    for text in [pattern, program, parameters] {
+        data.push(text.len() as u8);
+        data.extend_from_slice(text);
+    }
+    data
+}
+
+/// Returns `library` (`\SHELL\ICON.LB`) with the entry that opens VM setups (`*.v68`) with
+/// VMX68K.X and their file icon, as Sharp's installer registers applications, or `None` if it
+/// cannot be parsed. The Filer reads it when SX-Window starts.
+pub fn add_setup_icon(library: &[u8]) -> Option<Vec<u8>> {
+    let mut library = ResourceLibrary::parse(library)?;
+    library.insert(
+        b"ICN#",
+        Resource::new(SETUP_ICON_ID, icon_entry(SETUP_ICON_ID, b"*.v68", b"vmx68k.x", b"%")),
+    );
+    library.insert(b"PAT3", Resource::new(SETUP_ICON_ID, plot_image(&SETUP_ICON)));
+    Some(library.to_bytes())
+}
+
+/// Builds a VM setup (`*.V68`) as VMX68K.X writes it: `'V68S'` 0, its version (1) and the
+/// speed (as `VmSpeed`'s), and `'SRAM'` 0, the VM's 16 KB of SRAM once it has one.
+pub fn setup_library(speed: u16, sram: Option<&[u8]>) -> Vec<u8> {
+    let mut library = ResourceLibrary::new();
+    let mut settings = 1u16.to_be_bytes().to_vec();
+    settings.extend_from_slice(&speed.to_be_bytes());
+    library.insert(b"V68S", Resource::new(0, settings));
+    if let Some(sram) = sram {
+        library.insert(b"SRAM", Resource::new(0, sram.to_vec()));
+    }
+    library.to_bytes()
+}
+
 /// Builds `VMX68K.LB`.
 pub fn vmx68k_library() -> Vec<u8> {
     let mut library = ResourceLibrary::new();
@@ -137,5 +224,26 @@ mod tests {
         let data = plot_image(&["o.+# "; 1]);
         assert_eq!(&data[..8], &[0, 0, 0, 0, 0, 5, 0, 1]);
         assert_eq!(&data[8..], &[0b0101_0000, 0, 0b0011_0000, 0, 0b1111_0000, 0]);
+    }
+
+    #[test]
+    fn setups_open_with_vmx68k() {
+        let mut icons = ResourceLibrary::new();
+        icons.insert(b"ICN#", Resource::new(0x91, icon_entry(0x91, b"*.lb", b"", b"")));
+        let icons = ResourceLibrary::parse(&add_setup_icon(&icons.to_bytes()).unwrap()).unwrap();
+        let entry = &icons.get(b"ICN#", SETUP_ICON_ID).unwrap().data;
+        assert_eq!(&entry[..6], b"PAT3\x00\xC0");
+        assert_eq!(&entry[14..], b"\x05*.v68\x08vmx68k.x\x01%");
+        let icon = &icons.get(b"PAT3", SETUP_ICON_ID).unwrap().data;
+        assert_eq!(&icon[..8], &[0, 0, 0, 0, 0, 48, 0, 34]);
+        assert!(icons.get(b"ICN#", 0x91).is_some(), "Sharp's entries stay");
+    }
+
+    #[test]
+    fn entries_are_laid_out_as_sharps() {
+        // Sharp's `*.bat` entry, $9A.
+        let mut sharp = b"PAT3\x00\x9A\x00\x07\x00\x00\x00\x09\x00\x0A".to_vec();
+        sharp.extend_from_slice(b"\x05*.bat\x09command.x\x01%");
+        assert_eq!(icon_entry(0x9A, b"*.bat", b"command.x", b"%"), sharp);
     }
 }

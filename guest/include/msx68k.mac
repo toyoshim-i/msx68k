@@ -13,12 +13,15 @@ MSX68K_FN_VERSION	.equ	0	; Returns the version in D0.L
 MSX68K_FN_GET_WHEEL	.equ	1	; Returns D1 reverse, D2 clicks, D3 trackpad pixels
 MSX68K_FN_SET_WHEEL	.equ	2	; Sets D1-D3 and returns them as clamped
 MSX68K_FN_SCREEN_MODE	.equ	3	; D1.L = -1 queries, otherwise switches the resolution
-MSX68K_FN_VM_OPEN	.equ	4	; D1.L = WindowPtr, D2.L = drive 0 image size, D3.L = drives, D4.W = screen's top; returns the VM ID
+MSX68K_FN_VM_OPEN	.equ	4	; D1.L = WindowPtr, D2.L = drive 0 image size, D3.L = drives, D4.W = screen's top,
+				; D5.L = 16 KB SRAM or 0, D6.L = speed; returns the VM ID
 MSX68K_FN_VM_POLL	.equ	5	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns a disk request
 MSX68K_FN_VM_CLOSE	.equ	6	; D1.L = VM ID; stops the VM
 MSX68K_FN_VM_REPLY	.equ	7	; D1.L = VM ID, D2.L = 0 when the request succeeded
 MSX68K_FN_VM_SPEED	.equ	8	; D1.L = VM ID, D2.L = speed: 0 10 MHz, 1 16 MHz, 2 24 MHz, 3 Burst
-MSX68K_FN_VM_STATUS	.equ	9	; D1.L = VM ID; returns D0 bit 0 = access lamp lit, D1.L = width << 16 | height
+MSX68K_FN_VM_STATUS	.equ	9	; D1.L = VM ID; returns D0 bit 0 = lamp lit, bit 1 = SRAM to save,
+				; D1.L = width << 16 | height
+MSX68K_FN_VM_SRAM	.equ	10	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns the SRAM's size
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the

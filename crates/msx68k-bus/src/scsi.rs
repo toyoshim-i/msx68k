@@ -1189,6 +1189,20 @@ pub fn build_bootable_sxwin_scsi_hdd_with_files(
         merged_map.insert(make_file_key(&vmx68k), vmx68k);
     }
 
+    // 4c'. Register VM setups (*.V68) in \SHELL\ICON.LB, so that the Filer shows them with their
+    // icon and opens them with VMX68K.X, as Sharp's installer registers applications.
+    for f in merged_map.values_mut() {
+        if f.path_dirs.len() == 1
+            && normalize_sjis(&f.path_dirs[0].0).starts_with(b"SHELL ")
+            && normalize_sjis(&f.raw_name) == *b"ICON    "
+            && normalize_sjis(&f.raw_ext).starts_with(b"LB")
+        {
+            if let Some(library) = crate::vmx68k_library::add_setup_icon(&f.data) {
+                f.data = library;
+            }
+        }
+    }
+
     for f in extra_files {
         merged_map.insert(make_file_key(&f), f);
     }

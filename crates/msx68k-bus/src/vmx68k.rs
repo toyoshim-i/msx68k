@@ -182,12 +182,20 @@ impl RemoteDisk {
 }
 
 /// A change VMX68K.SX made to the set of VMs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmEvent {
     /// A VM was asked for, to be shown in the window at `window`, with a disk image of
-    /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, and the
-    /// master's `drives`, from A:, that it can see in bypass mode.
-    Opened { id: u32, window: u32, drive0_bytes: u32, drives: u32 },
+    /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, the
+    /// master's `drives`, from A:, that it can see in bypass mode, and from its setup the
+    /// `speed` to start at and its own SRAM, if the setup has one yet.
+    Opened {
+        id: u32,
+        window: u32,
+        drive0_bytes: u32,
+        drives: u32,
+        speed: CpuSpeedMode,
+        sram: Option<Vec<u8>>,
+    },
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
     /// The VM was closed.
@@ -202,8 +210,11 @@ const VM_SPEEDS: [CpuSpeedMode; 4] = [
     CpuSpeedMode::Burst,
 ];
 
+/// Bytes of a VM's SRAM, which VMX68K.SX keeps in the VM's setup.
+pub const VM_SRAM_BYTES: usize = 16 * 1024;
+
 /// A VM VMX68K.SX has open.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OpenVm {
     id: u32,
     /// Its window record.
@@ -215,18 +226,24 @@ struct OpenVm {
     status_told: VmStatus,
     /// Whether VMX68K.SX has been sent `E_USER1` for a status it has not asked about yet.
     status_woken: bool,
+    /// The VM's SRAM as it last changed, for VMX68K.SX to save with `VmSram`.
+    sram: Option<Vec<u8>>,
 }
 
 /// The state of a VM that VMX68K.SX shows: its access lamp and its screen's size.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct VmStatus {
     lamp: bool,
+    /// Whether the VM's SRAM changed and is to be saved.
+    sram: bool,
     /// Width and height, `(0, 0)` until the VM shows a frame.
     screen: (u16, u16),
 }
 
 /// `VmStatus` bit of a lit access lamp.
 const STATUS_LAMP: u32 = 1;
+/// `VmStatus` bit of SRAM to save, which `VmSram` hands over.
+const STATUS_SRAM: u32 = 2;
 
 /// The VMs VMX68K.SX has open.
 #[derive(Debug, Default)]
@@ -303,6 +320,15 @@ impl X68kBus {
         }
     }
 
+    /// Hands VMX68K.SX the SRAM of VM `id`, which changed, to save in the VM's setup. A change
+    /// wakes it with `E_USER1`, and it takes the bytes with `VmSram`.
+    pub fn set_vm_sram(&mut self, id: u32, sram: Vec<u8>) {
+        if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            open.sram = Some(sram);
+            open.status.sram = true;
+        }
+    }
+
     /// Reports the size of the frames VM `id` shows, which VMX68K.SX sizes its window to. A
     /// change wakes it with `E_USER1` to ask for it with `VmStatus`.
     pub fn set_vm_screen_size(&mut self, id: u32, width: u32, height: u32) {
@@ -319,11 +345,9 @@ impl X68kBus {
             return;
         };
         for i in 0..self.vm_windows.open.len() {
-            let open = self.vm_windows.open[i];
-            if open.status != open.status_told
-                && !open.status_woken
-                && self.post_event(text_base, E_USER1, open.window, (0, 0))
-            {
+            let open = &self.vm_windows.open[i];
+            let (changed, window) = (open.status != open.status_told && !open.status_woken, open.window);
+            if changed && self.post_event(text_base, E_USER1, window, (0, 0)) {
                 self.vm_windows.open[i].status_woken = true;
             }
         }
@@ -356,8 +380,9 @@ impl X68kBus {
     }
 
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
-    /// VMX68K.SX serves, `D3.L` of the master's drives from A:, and its screen `D4.W` lines
-    /// below the top of the window's content, and returns its ID in `D0.L`.
+    /// VMX68K.SX serves, `D3.L` of the master's drives from A:, its screen `D4.W` lines below
+    /// the top of the window's content, the 16 KB of its SRAM at `D5.L` (0 for none yet), and
+    /// the speed `D6.L` (as `VmSpeed`'s), and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
@@ -370,12 +395,22 @@ impl X68kBus {
             status: VmStatus::default(),
             status_told: VmStatus::default(),
             status_woken: false,
+            sram: None,
         });
+        let sram_at = state.d[5] & 0x00FF_FFFF;
+        let sram = (sram_at != 0).then(|| {
+            (0..VM_SRAM_BYTES as u32)
+                .map(|i| self.peek_u8(sram_at + i).unwrap_or(0))
+                .collect()
+        });
+        let windows = &mut self.vm_windows;
         windows.events.push(VmEvent::Opened {
             id,
             window,
             drive0_bytes: state.d[2],
             drives: state.d[3].min(26),
+            speed: VM_SPEEDS.get(state.d[6] as usize).copied().unwrap_or(CpuSpeedMode::Mhz10),
+            sram,
         });
         state.d[0] = id;
         TrapResult::Handled { extra_cycles: 0 }
@@ -522,8 +557,8 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp,
-    /// or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
+    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp
+    /// and bit 1 SRAM to save, or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
     /// height`, 0 before its first frame).
     pub(crate) fn hypercall_vm_status(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
@@ -534,8 +569,29 @@ impl X68kBus {
         open.status_told = open.status;
         open.status_woken = false;
         let status = open.status;
-        state.d[0] = if status.lamp { STATUS_LAMP } else { 0 };
+        state.d[0] = if status.lamp { STATUS_LAMP } else { 0 } | if status.sram { STATUS_SRAM } else { 0 };
         state.d[1] = (status.screen.0 as u32) << 16 | status.screen.1 as u32;
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmSram`: copies the SRAM of VM `D1.L` that `VmStatus` reported to save into the buffer
+    /// at `D2.L` of `D3.L` bytes, and returns its size, 0 when there is none, or -1 for an
+    /// unknown VM.
+    pub(crate) fn hypercall_vm_sram(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        let (buffer, size) = (state.d[2] & 0x00FF_FFFF, state.d[3] as usize);
+        let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) else {
+            state.d[0] = u32::MAX;
+            return TrapResult::Handled { extra_cycles: 0 };
+        };
+        open.status.sram = false;
+        open.status_told.sram = false;
+        let sram = open.sram.take().unwrap_or_default();
+        let len = sram.len().min(size);
+        for (i, &byte) in sram[..len].iter().enumerate() {
+            self.poke_u8(buffer + i as u32, byte);
+        }
+        state.d[0] = len as u32;
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -620,11 +676,62 @@ mod tests {
         assert_eq!(
             bus.take_vm_events(),
             [
-                VmEvent::Opened { id: 1, window: 0x0012_3456, drive0_bytes: 0, drives: 0 },
-                VmEvent::Opened { id: 2, window: 0x0012_3500, drive0_bytes: 0, drives: 0 },
+                VmEvent::Opened {
+                    id: 1,
+                    window: 0x0012_3456,
+                    drive0_bytes: 0,
+                    drives: 0,
+                    speed: CpuSpeedMode::Mhz10,
+                    sram: None,
+                },
+                VmEvent::Opened {
+                    id: 2,
+                    window: 0x0012_3500,
+                    drive0_bytes: 0,
+                    drives: 0,
+                    speed: CpuSpeedMode::Mhz10,
+                    sram: None,
+                },
                 VmEvent::Closed { id: 1 },
             ]
         );
         assert!(bus.take_vm_events().is_empty());
+    }
+
+    #[test]
+    fn a_setup_brings_its_sram_and_speed_and_gets_the_sram_back() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let mut state = CpuState::default();
+        let setup = 0x2_0000;
+        for i in 0..VM_SRAM_BYTES as u32 {
+            bus.poke_u8(setup + i, i as u8);
+        }
+        state.d[1] = 0x0012_3456;
+        state.d[5] = setup;
+        state.d[6] = 3;
+        bus.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        let [VmEvent::Opened { speed, sram: Some(sram), .. }] = &bus.take_vm_events()[..] else {
+            panic!("one VM with SRAM");
+        };
+        assert_eq!(*speed, CpuSpeedMode::Burst);
+        assert_eq!(sram.len(), VM_SRAM_BYTES);
+        assert_eq!(sram[0x123], 0x23);
+
+        // Changed SRAM is reported, then copied into VMX68K.SX's buffer once.
+        bus.set_vm_sram(id, vec![0xA5; VM_SRAM_BYTES]);
+        state.d[1] = id;
+        bus.hypercall_vm_status(&mut state);
+        assert_eq!(state.d[0] & STATUS_SRAM, STATUS_SRAM);
+        let buffer = 0x6_0000;
+        state.d[1] = id;
+        state.d[2] = buffer;
+        state.d[3] = VM_SRAM_BYTES as u32;
+        bus.hypercall_vm_sram(&mut state);
+        assert_eq!(state.d[0], VM_SRAM_BYTES as u32);
+        assert_eq!(bus.peek_u8(buffer + 100), Some(0xA5));
+        state.d[1] = id;
+        bus.hypercall_vm_status(&mut state);
+        assert_eq!(state.d[0] & STATUS_SRAM, 0, "saved once");
     }
 }

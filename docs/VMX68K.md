@@ -68,7 +68,23 @@ run in a VM of their own from the start.
     reads, writes, and READ ID; SCSI reads and writes; remote drive requests) and sets the
     lamp on the master, which wakes VMX68K.SX with `E_USER1` to read it with `VmStatus` (9).
 - **A settings file per VM.** Each VM setup is one resource library (`.LB`, as `MSX68K.LB`)
-  holding its settings and its own SRAM, kept apart from the master's.
+  holding its settings and its own SRAM, kept apart from the master's, named `*.V68`: SX-Window
+  opens a document with its application by an `'ICN#'` entry of `\SHELL\ICON.LB` matching its
+  name, and `*.lb` is taken there. An entry for `*.v68`, with its own file icon, opens
+  VMX68K.SX with the file; the HDD builder adds it to new disks and `install_vmx68k` to an
+  existing one. Started without a setup, VMX68K.SX uses `A:\VMX68K\DEFAULT.V68`, made when
+  missing. The VM's SRAM is written back to its setup whenever it changes.
+  - **Contents**: `'V68S'` 0, the version (1) and the speed (as `VmSpeed`'s), and `'SRAM'` 0,
+    the VM's 16 KB of SRAM once it has one (`vmx68k_library::setup_library`).
+  - **Opening**: the setup's path is VMX68K.SX's first command line word, which the Filer gives
+    (`vmx68k.x %`). VMX68K.SX reads the setup, drops the library unwritten, and passes the speed
+    and SRAM to `VmOpen` (`D6.L`, `D5.L`); the app starts the VM with them, the SRAM's RAM size
+    set to the VM's. VMX68K.SX finds its own `VMX68K.LB` from its program's name in its task
+    record (`TSGetTdb`), as Sharp's skeleton does.
+  - **Saving**: when a speed is chosen, and when the VM's SRAM changes. The app takes the SRAM
+    from the VM's thread once it stays unchanged for 0.5 s, so a program writing it byte by
+    byte is saved once; the master wakes VMX68K.SX, which takes it with `VmSram` (10) and
+    writes the setup, as SXMODE.X writes `MSX68K.LB`.
 - **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.
 - **Disk images.** The first test boots `disks/HUMAN302.XDF` from the host directly. As soon as
   the VM shows its screen in the window, images come from the master VM's drives. Floppy and hard

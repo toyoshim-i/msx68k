@@ -94,6 +94,23 @@ official SX-Window programming manuals.
   top and left, black bottom and right) holds a recess (black top and left, white bottom and
   right) over dark gray, and the picture is white with a black shadow to the bottom right.
 
+### 1.7 Documents and Their Applications (`\SHELL\ICON.LB`)
+- The Filer's icons and what a double-click runs come from the `'ICN#'` resources of
+  `\SHELL\ICON.LB`, `IcKind` records of `TASK.H`: the icon's resource type and ID (`'PAT3'`),
+  attributes, left-click handling, the right-press menus, then Pascal strings of a file name
+  pattern (`*.pix`, `key.sys`), the program to run, and its parameters, where `%` stands for
+  the file (`*.pix` → `ｷｬﾝﾊﾞｽ.x %`, `*.bat` → `command.x %`). Programs are named without a
+  path. User entries start at ID `$80`; the first match in ID order wins, so names come before
+  patterns (`key.sys` `$89` before `*.sys` `$8C`). `*.lb` (`$91`) has no program.
+- The icons, `'PAT3'`, are plot images (Section 1.5): their rectangle, planes 0 and 1, and the
+  mask, about 48×34, a plate white at its top and left with a black shadow at its bottom
+  and right.
+- A program started so finds `%` replaced by the file's path on its command line, in its task
+  record (`TSGetTdb`, `$A35B`: a 90-byte name, the program's path, then the command line as a
+  Pascal string).
+- Sharp's installer (`ｲﾝｽﾄｰﾗ.X`, "アイコン登録") registers applications there, as `*.pen` →
+  `ｼｬｰﾍﾟﾝ.x %` and `*.ins` → `ｲﾝｽﾄｰﾗ.x`.
+
 ### 1.6 State of VMX68K
 - VMX68K.X (`guest/vmx68k/vmx68k.s`) opens a 768x512 window, `VmOpen`s, waits for events with
   `E_USER1` in its mask, and serves bridge requests (`serve_disk`, 16 kinds). The host wakes it
@@ -118,9 +135,13 @@ official SX-Window programming manuals.
    (Section 1.6).
 2. ~~The access lamp.~~ Done (2026-11-13). The floppy icons wait for custom mode, which the
    settings library and dialog bring, as they show only there.
-3. The per-VM settings library (`.LB`) with its SRAM, the boot device submenu, and the menu to
-   make a new setup; saving what is applied at once starts here.
-4. The configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
+3. The per-VM settings library (`.LB`) with its SRAM, written back whenever it changes, and
+   `A:\VMX68K\DEFAULT.V68` without one given; saving what is applied at once starts here.
+   Setups are `*.V68`, opened with VMX68K.SX by an `'ICN#'` entry in `\SHELL\ICON.LB`
+   (Section 1.7). Decided and built 2026-11-13 ([VMX68K.md](VMX68K.md) Section 2, "A settings
+   file per VM").
+4. The boot device submenu and the menu to make a new setup (moved from step 3, 2026-11-13,
+   as they need custom mode and a path input), and the configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
    restart question (`DMError` `D_YESNO`).
 
 ### 2.2 Pieces

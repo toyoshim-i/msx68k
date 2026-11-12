@@ -4,7 +4,9 @@
 * window's content below an icon bar, so this task opens the window, draws the
 * bar and pops up its menus, carries out the VM's disk requests when the host
 * sends E_USER1 for them, and closes the VM at the end. The bar's icons and the
-* menus' submenus are resources of VMX68K.LB, next to this program.
+* menus' submenus are resources of VMX68K.LB, next to this program. The VM's
+* setup, its settings and its own SRAM, is a resource library too, *.V68, given on
+* the command line, as the Filer gives it (\SHELL\ICON.LB), or DEFAULT.V68.
 * Drive 0 of the VM is the image at DRIVE0_PATH, read and written through
 * Human68k here, so the VM's disks live on the master VM's drives.
 * Assembled by rhas and linked by rhlk
@@ -18,6 +20,11 @@
 BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
 SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
 CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
+SETUP_TYPE	.equ	'V68S'		; The setup's settings: version.w, speed.w
+SETUP_VERSION	.equ	1
+SETUP_SIZE	.equ	4
+SRAM_TYPE	.equ	'SRAM'		; The VM's own SRAM
+SRAM_SIZE	.equ	16384
 G_THRU		.equ	0		; Clear text, where the host shows the VM's screen
 G_WHITE		.equ	8
 G_LGRAY		.equ	9
@@ -67,6 +74,15 @@ gui_start:
 	move.l	a0, (a1)
 	move.l	a0, d0
 	beq	do_ts_exit
+
+	* This program's own resources are its name with .LB for its extension, and the
+	* VM's setup is the command line's first word, or the default one
+	move.w	#-1, -(sp)		; this task
+	pea	disk_buffer(pc)
+	SXCALL	TSGetTdb		; $A35B
+	addq.l	#6, sp
+	bsr	take_paths
+	bsr	load_setup
 
 	* Open VMX68K.LB and read all of it, leaving no file open; without it the bar
 	* stays empty
@@ -120,11 +136,24 @@ drives_counted:
 	move.l	win_ptr(pc), d1
 	move.l	drive0_size(pc), d2
 	moveq.l	#BAR_HEIGHT, d4		; the VM's screen goes below the bar
+	moveq.l	#0, d5			; the VM's SRAM from its setup, if it has one
+	tst.b	has_sram(pc)
+	beq.s	vm_open_sram
+	lea	sram_buffer(pc), a0
+	move.l	a0, d5
+vm_open_sram:
+	move.w	vm_speed(pc), d6
+	ext.l	d6
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
 	lea	vm_id(pc), a1
 	move.l	d0, (a1)
+	* A setup that is not there yet is made with what the VM starts with
+	tst.b	setup_found(pc)
+	bne.s	setup_kept
+	bsr	save_setup
+setup_kept:
 
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	WMShow			; $A207
@@ -345,6 +374,10 @@ update_status:
 	beq.s	update_lamp
 	bsr	resize_window
 update_lamp:
+	btst	#1, d0			; SRAM to save
+	beq.s	update_lamp_bit
+	bsr	take_sram
+update_lamp_bit:
 	andi.b	#1, d0			; the lamp
 	cmp.b	lamp_lit(pc), d0
 	beq.s	update_lamp_done
@@ -353,6 +386,201 @@ update_lamp:
 	bsr	draw_lamp
 update_lamp_done:
 	movem.l	(sp)+, d0-d3/a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: take_sram
+* Takes the VM's SRAM that changed from the host and saves it in the setup.
+* -----------------------------------------------------------------------------
+take_sram:
+	movem.l	d0-d3/a0-a1, -(sp)
+	moveq.l	#MSX68K_FN_VM_SRAM, d0
+	move.l	vm_id(pc), d1
+	lea	sram_buffer(pc), a0
+	move.l	a0, d2
+	move.l	#SRAM_SIZE, d3
+	bsr	msx68k_call
+	cmpi.l	#SRAM_SIZE, d0
+	bne.s	take_sram_done
+	lea	has_sram(pc), a1
+	st	(a1)
+	bsr	save_setup
+take_sram_done:
+	movem.l	(sp)+, d0-d3/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: take_paths
+* From this task's record in disk_buffer, makes library_path, the program's name
+* with .LB for its extension, and setup_path, the command line's first word or
+* the default setup.
+* -----------------------------------------------------------------------------
+take_paths:
+	movem.l	d0-d1/a0-a2, -(sp)
+	lea	disk_buffer(pc), a0	; Task.name
+	lea	library_path(pc), a1
+	suba.l	a2, a2			; after the last '.'
+	moveq.l	#PATH_MAX-4, d1
+take_name:
+	move.b	(a0)+, d0
+	move.b	d0, (a1)+
+	beq.s	take_name_done
+	cmpi.b	#'.', d0
+	bne.s	take_name_next
+	movea.l	a1, a2
+take_name_next:
+	dbra	d1, take_name
+	clr.b	(a1)
+take_name_done:
+	move.l	a2, d0
+	beq.s	take_command
+	move.b	#'L', (a2)+
+	move.b	#'B', (a2)+
+	clr.b	(a2)
+
+take_command:
+	lea	disk_buffer+TASK_COMMAND(pc), a0	; LASCII: its length, then its text
+	moveq.l	#0, d1
+	move.b	(a0)+, d1
+	lea	setup_path(pc), a1
+take_command_skip:
+	subq.w	#1, d1
+	bmi.s	take_command_default
+	move.b	(a0)+, d0
+	cmpi.b	#' ', d0
+	bls.s	take_command_skip
+	moveq.l	#PATH_MAX-2, d0
+take_command_copy:
+	move.b	-1(a0), (a1)+
+	subq.w	#1, d1
+	bmi.s	take_command_end
+	cmpi.b	#' ', (a0)+
+	bls.s	take_command_end
+	dbra	d0, take_command_copy
+take_command_end:
+	clr.b	(a1)
+	bra.s	take_paths_done
+take_command_default:
+	lea	default_setup_path(pc), a0
+take_command_default_copy:
+	move.b	(a0)+, (a1)+
+	bne.s	take_command_default_copy
+	lea	setup_is_default(pc), a1
+	st	(a1)
+take_paths_done:
+	movem.l	(sp)+, d0-d1/a0-a2
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: load_setup
+* Reads the VM's speed and SRAM from its setup, and drops the library unwritten.
+* Sets setup_found when the setup is there.
+* -----------------------------------------------------------------------------
+load_setup:
+	movem.l	d0-d1/a0-a1, -(sp)
+	pea	setup_path(pc)
+	SXCALL	TSResOpen		; $A4A1
+	addq.l	#4, sp
+	move.l	a0, d0
+	beq	load_setup_done
+	SXCALL	TSResLoad		; $A4A5
+	lea	setup_found(pc), a1
+	st	(a1)
+
+	clr.w	-(sp)
+	move.l	#SETUP_TYPE, -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	move.l	a0, d0
+	beq.s	load_setup_sram
+	movea.l	(a0), a0
+	move.w	2(a0), d0		; the speed
+	cmpi.w	#SPEED_COUNT, d0
+	bcc.s	load_setup_sram
+	lea	vm_speed(pc), a1
+	move.w	d0, (a1)
+
+load_setup_sram:
+	clr.w	-(sp)
+	move.l	#SRAM_TYPE, -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	move.l	a0, d0
+	beq.s	load_setup_close
+	movea.l	(a0), a0
+	lea	sram_buffer(pc), a1
+	move.w	#SRAM_SIZE/4-1, d1
+load_setup_copy:
+	move.l	(a0)+, (a1)+
+	dbra	d1, load_setup_copy
+	lea	has_sram(pc), a1
+	st	(a1)
+
+load_setup_close:
+	SXCALL	TSResRemove		; $A4A4
+load_setup_done:
+	movem.l	(sp)+, d0-d1/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: save_setup
+* Writes the VM's speed and, once there is one, its SRAM to its setup, making the
+* setup, and for the default one its directory, when it is not there.
+* -----------------------------------------------------------------------------
+save_setup:
+	movem.l	d0-d3/a0-a1, -(sp)
+	tst.b	setup_is_default(pc)
+	beq.s	save_setup_open
+	pea	default_setup_dir(pc)
+	DOS	_MKDIR			; there already, it fails, as it may
+	addq.l	#4, sp
+save_setup_open:
+	lea	setup_rec(pc), a0
+	move.w	#SETUP_VERSION, (a0)
+	move.w	vm_speed(pc), 2(a0)
+	lea	setup_handle(pc), a1	; pseudo-handles to the records
+	move.l	a0, (a1)+
+	lea	sram_buffer(pc), a0
+	move.l	a0, (a1)
+
+	pea	setup_path(pc)
+	SXCALL	TSResOpen		; $A4A1
+	addq.l	#4, sp
+	move.l	a0, d0
+	bne.s	save_setup_add
+	SXCALL	TSResNew		; $A4A0
+save_setup_add:
+	clr.w	-(sp)
+	move.l	#SETUP_TYPE, -(sp)
+	SXCALL	TSRscRemove		; $A4AC
+	addq.l	#6, sp
+	move.l	#SETUP_SIZE, -(sp)
+	pea	setup_handle(pc)
+	clr.w	-(sp)
+	move.l	#SETUP_TYPE, -(sp)
+	SXCALL	TSRscAdd		; $A4AA
+	lea	14(sp), sp
+
+	tst.b	has_sram(pc)
+	beq.s	save_setup_close
+	clr.w	-(sp)
+	move.l	#SRAM_TYPE, -(sp)
+	SXCALL	TSRscRemove		; $A4AC
+	addq.l	#6, sp
+	move.l	#SRAM_SIZE, -(sp)
+	pea	sram_handle(pc)
+	clr.w	-(sp)
+	move.l	#SRAM_TYPE, -(sp)
+	SXCALL	TSRscAdd		; $A4AA
+	lea	14(sp), sp
+
+save_setup_close:
+	pea	setup_path(pc)
+	SXCALL	TSResClose		; $A4A2
+	addq.l	#4, sp
+	lea	setup_found(pc), a1
+	st	(a1)
+	movem.l	(sp)+, d0-d3/a0-a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -526,6 +754,7 @@ config_speed_built:
 	bne.s	config_menu_done
 	lea	vm_speed(pc), a1
 	move.w	d2, (a1)
+	bsr	save_setup
 config_menu_done:
 	movem.l	(sp)+, d0-d3/a0-a2
 	rts
@@ -772,8 +1001,10 @@ win_title:
 	.dc.b	6, "VMX68K", 0
 drive0_path:
 	.dc.b	"A:\VMX68K\DRIVE0.XDF", 0
-library_path:
-	.dc.b	"A:\X68\VMX68K.LB", 0
+default_setup_path:
+	.dc.b	"A:\VMX68K\DEFAULT.V68", 0
+default_setup_dir:
+	.dc.b	"A:\VMX68K", 0
 * The Configuration menu, in Shift_JIS: "設定..." for the dialog, not there yet,
 * and the CPU with its speeds, an item whose shortcut is ESC and whose check is
 * the submenu's 'MENU' ID
@@ -828,6 +1059,26 @@ library_open:
 	.dc.b	0
 lamp_lit:
 	.dc.b	0			; the access lamp as drawn
+has_sram:
+	.dc.b	0			; sram_buffer holds the VM's SRAM
+setup_found:
+	.dc.b	0			; the setup file is there
+setup_is_default:
+	.dc.b	0			; the setup is DEFAULT.V68
+	.even
+setup_rec:
+	.dc.w	SETUP_VERSION, 0
+setup_handle:
+	.dc.l	0
+sram_handle:
+	.dc.l	0
+* Task records hold a 90-byte name, then the command line
+PATH_MAX	.equ	92
+TASK_COMMAND	.equ	90
+library_path:
+	.ds.b	PATH_MAX
+setup_path:
+	.ds.b	PATH_MAX
 	.even
 screen_size:
 	.dc.l	768 << 16 | 512		; the VM's screen the window fits, width << 16 | height
@@ -859,6 +1110,11 @@ app_stack:
 	.ds.b	8192
 	.even
 app_stack_top:
+	.even
+
+* The VM's own SRAM, kept in its setup
+sram_buffer:
+	.ds.b	SRAM_SIZE
 	.even
 
 * A read or write of a whole cylinder, both sides, of any floppy format. It comes last, as
