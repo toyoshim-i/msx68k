@@ -156,6 +156,7 @@ WMBringToFront		.equ	$A1FE	; Compatibility alias
 WMSelectWindow		.equ	$A1FE	; Compatibility alias
 WMCarry			.equ	$A200
 WMMove			.equ	$A202
+WMSize			.equ	$A203	; Size a window's content (win, LPoint size, fUpdate.w)
 WMDrag			.equ	$A205
 WMDragWindow		.equ	$A205	; Compatibility alias
 WMShow			.equ	$A207	; Show window (Window *)

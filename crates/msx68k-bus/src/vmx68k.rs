@@ -210,12 +210,19 @@ struct OpenVm {
     window: u32,
     /// Lines of the window's content above the VM's screen, VMX68K.SX's icon bar.
     screen_top: i16,
-    /// Whether the VM's access lamp is lit, as the app sets it.
+    /// What the app reports of the VM for VMX68K.SX's window, and what `VmStatus` last told.
+    status: VmStatus,
+    status_told: VmStatus,
+    /// Whether VMX68K.SX has been sent `E_USER1` for a status it has not asked about yet.
+    status_woken: bool,
+}
+
+/// The state of a VM that VMX68K.SX shows: its access lamp and its screen's size.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct VmStatus {
     lamp: bool,
-    /// The lamp as `VmStatus` last told VMX68K.SX.
-    lamp_told: bool,
-    /// Whether VMX68K.SX has been sent `E_USER1` for a lamp it has not asked about yet.
-    lamp_woken: bool,
+    /// Width and height, `(0, 0)` until the VM shows a frame.
+    screen: (u16, u16),
 }
 
 /// `VmStatus` bit of a lit access lamp.
@@ -292,7 +299,15 @@ impl X68kBus {
     /// change wakes it with `E_USER1` to ask for it with `VmStatus`.
     pub fn set_vm_lamp(&mut self, id: u32, lit: bool) {
         if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
-            open.lamp = lit;
+            open.status.lamp = lit;
+        }
+    }
+
+    /// Reports the size of the frames VM `id` shows, which VMX68K.SX sizes its window to. A
+    /// change wakes it with `E_USER1` to ask for it with `VmStatus`.
+    pub fn set_vm_screen_size(&mut self, id: u32, width: u32, height: u32) {
+        if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            open.status.screen = (width.min(0xFFFF) as u16, height.min(0xFFFF) as u16);
         }
     }
 
@@ -305,11 +320,11 @@ impl X68kBus {
         };
         for i in 0..self.vm_windows.open.len() {
             let open = self.vm_windows.open[i];
-            if open.lamp != open.lamp_told
-                && !open.lamp_woken
+            if open.status != open.status_told
+                && !open.status_woken
                 && self.post_event(text_base, E_USER1, open.window, (0, 0))
             {
-                self.vm_windows.open[i].lamp_woken = true;
+                self.vm_windows.open[i].status_woken = true;
             }
         }
         let mut wake = Vec::new();
@@ -352,9 +367,9 @@ impl X68kBus {
             id,
             window,
             screen_top: state.d[4] as i16,
-            lamp: false,
-            lamp_told: false,
-            lamp_woken: false,
+            status: VmStatus::default(),
+            status_told: VmStatus::default(),
+            status_woken: false,
         });
         windows.events.push(VmEvent::Opened {
             id,
@@ -507,22 +522,20 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L` in `D0.L`, bit 0 its access lamp, or
-    /// -1 for an unknown VM.
+    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp,
+    /// or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
+    /// height`, 0 before its first frame).
     pub(crate) fn hypercall_vm_status(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
-        state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
-            Some(open) => {
-                open.lamp_told = open.lamp;
-                open.lamp_woken = false;
-                if open.lamp {
-                    STATUS_LAMP
-                } else {
-                    0
-                }
-            }
-            None => u32::MAX,
+        let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) else {
+            state.d[0] = u32::MAX;
+            return TrapResult::Handled { extra_cycles: 0 };
         };
+        open.status_told = open.status;
+        open.status_woken = false;
+        let status = open.status;
+        state.d[0] = if status.lamp { STATUS_LAMP } else { 0 };
+        state.d[1] = (status.screen.0 as u32) << 16 | status.screen.1 as u32;
         TrapResult::Handled { extra_cycles: 0 }
     }
 

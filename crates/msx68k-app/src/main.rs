@@ -788,7 +788,8 @@ impl Msx68kApp {
         }
     }
 
-    /// Lights each VM's access lamp while it reaches its drives, and for a while after.
+    /// Lights each VM's access lamp while it reaches its drives, and for a while after, and
+    /// reports the size of its screen.
     fn update_vm_lamps(&mut self) {
         let now = Instant::now();
         for guest in &mut self.guest_vms {
@@ -799,6 +800,10 @@ impl Msx68kApp {
             }
             let lit = guest.lamp_until.is_some_and(|until| now < until);
             self.vm.bus.set_vm_lamp(guest.id, lit);
+            // VMX68K.X sizes its window to the VM's screen as the VM changes its mode.
+            if let Some(frame) = guest.output.completed() {
+                self.vm.bus.set_vm_screen_size(guest.id, frame.width, frame.height);
+            }
         }
     }
 

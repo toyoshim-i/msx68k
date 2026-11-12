@@ -159,7 +159,7 @@ event_loop:
 	cmpi.w	#14, d0			; E_USER1: disk requests, or the lamp changed
 	bne.s	event_loop
 	bsr	serve_disk
-	bsr	update_lamp
+	bsr	update_status
 	bra.s	event_loop
 
 handle_activate:
@@ -328,16 +328,23 @@ draw_bar_done:
 	rts
 
 * -----------------------------------------------------------------------------
-* Helper: update_lamp
-* Asks the host for the VM's access lamp and draws it if it changed.
+* Helper: update_status
+* Asks the host for the VM's state: sizes the window to the VM's screen when the
+* VM changed its mode, and draws the access lamp if it changed.
 * -----------------------------------------------------------------------------
-update_lamp:
+update_status:
 	movem.l	d0-d3/a1, -(sp)
 	moveq.l	#MSX68K_FN_VM_STATUS, d0
 	move.l	vm_id(pc), d1
 	bsr	msx68k_call
 	tst.l	d0
-	bmi.s	update_lamp_done
+	bmi	update_lamp_done
+	tst.l	d1
+	beq.s	update_lamp
+	cmp.l	screen_size(pc), d1
+	beq.s	update_lamp
+	bsr	resize_window
+update_lamp:
 	andi.b	#1, d0			; the lamp
 	cmp.b	lamp_lit(pc), d0
 	beq.s	update_lamp_done
@@ -346,6 +353,54 @@ update_lamp:
 	bsr	draw_lamp
 update_lamp_done:
 	movem.l	(sp)+, d0-d3/a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: resize_window
+* Sizes the window to a VM screen of D1.L = width << 16 | height below the bar,
+* moving what is drawn by the right edge, and draws the bar anew.
+* -----------------------------------------------------------------------------
+resize_window:
+	movem.l	d0-d2/a1, -(sp)
+	lea	screen_size(pc), a1
+	move.l	d1, (a1)
+	move.w	d1, d2			; height
+	swap	d1			; width
+	lea	bar_rect(pc), a1
+	move.w	d1, 4(a1)
+	lea	bar_line_rect(pc), a1
+	move.w	d1, 4(a1)
+	lea	screen_rect(pc), a1
+	move.w	d1, 4(a1)
+	move.w	d2, d0
+	addi.w	#BAR_HEIGHT, d0
+	move.w	d0, 6(a1)
+	* The lamp, 19 dots in from the right
+	lea	lamp_rects(pc), a1
+	move.w	d1, d0
+	subi.w	#19, d0
+	move.w	d0, 0(a1)
+	addq.w	#1, d0
+	move.w	d0, 8(a1)
+	move.w	d0, 16(a1)
+	move.w	d1, d0
+	subq.w	#5, d0
+	move.w	d0, 4(a1)
+	move.w	d0, 12(a1)
+	subq.w	#1, d0
+	move.w	d0, 20(a1)
+
+	move.w	#-1, -(sp)		; fUpdate: draw it anew
+	move.w	d2, d0			; sizePt: the height with the bar in its low word,
+	addi.w	#BAR_HEIGHT, d0
+	move.w	d0, -(sp)
+	move.w	d1, -(sp)		; and the width in its high word
+	move.l	win_ptr(pc), -(sp)
+	SXCALL	WMSize			; $A203
+	lea	10(sp), sp
+	* Shrinking exposes nothing to update: the lamp has moved all the same
+	bsr	draw_bar
+	movem.l	(sp)+, d0-d2/a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -773,6 +828,9 @@ library_open:
 	.dc.b	0
 lamp_lit:
 	.dc.b	0			; the access lamp as drawn
+	.even
+screen_size:
+	.dc.l	768 << 16 | 512		; the VM's screen the window fits, width << 16 | height
 	.even
 * Speed the VM runs at, by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
 vm_speed:

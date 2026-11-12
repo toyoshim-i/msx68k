@@ -168,6 +168,21 @@ fn vmx68k_opens_a_vm_in_its_window() {
     vm.run_steps(2_000_000);
     assert_eq!(text_index(&vm, LAMP), G_DGRAY);
 
+    // The window follows the VM's screen when the VM changes its mode, the bar and the lamp
+    // with it, the screen's top left staying where it was.
+    for (width, height) in [(512, 512), (256, 256), (768, 512)] {
+        vm.bus.set_vm_screen_size(1, width, height);
+        vm.run_steps(4_000_000);
+        screenshot(&vm, &format!("size_{width}x{height}"));
+        let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
+        assert_eq!((layout.left, layout.top), (40, 64), "{width}x{height}");
+        let (right, bottom) = layout.visible.iter().fold((0, 0), |(r, b), v| (r.max(v.2), b.max(v.3)));
+        assert_eq!((right, bottom), (40 + width as i32, 64 + height as i32), "{width}x{height}");
+        let (width, height) = (width as usize, height as usize);
+        assert_eq!(text_index(&vm, (40 + width - 12, 52)), G_DGRAY, "the lamp at {width}");
+        assert_eq!(text_index(&vm, (40 + width - 1, 64 + height - 1)), 0, "the screen at {width}");
+    }
+
     // The right button on the Configuration icon pops up its menu, and the CPU's item its
     // speeds; one chosen goes to the host at once. The submenu checks the current speed.
     choose_speed(&mut vm, Some(1), "speeds");

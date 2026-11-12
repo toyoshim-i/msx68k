@@ -167,7 +167,10 @@ windows work the same way as the master VM.
   on the screen), and its visible region, which become the `VmLayer`'s position and scissor
   rectangles. So moving, covering, and uncovering the window need no code in VMX68K.SX.
 - **Window size.** The window's content is the icon bar, 24 lines, over the VM's screen at its
-  native size, fixed for now (768×512 for Human68k 3.02 at boot).
+  native size (768×512 for Human68k 3.02 at boot). When the VM changes its mode, the app
+  reports the size of its frames to the master, which wakes VMX68K.SX with `E_USER1`; it reads
+  the size with `VmStatus` (`D1.L` = `width << 16 | height`) and sizes its window with `WMSize`,
+  keeping its top left, and draws the bar anew to the new width.
 - **First disk.** The host read the floppy image for drive 0 of new VMs itself at first, named by
   a command-line option of the app. Images come from the master VM's drives now that the VM's
   screen shows in its window (Section 2).

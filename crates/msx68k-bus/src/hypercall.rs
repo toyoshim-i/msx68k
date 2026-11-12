@@ -86,7 +86,7 @@ pub enum AppFunction {
     VmReply = 7,
     /// Sets the speed of VM `D1.L` from VMX68K.SX's menu.
     VmSpeed = 8,
-    /// Returns the state of VM `D1.L`, its access lamp, for VMX68K.SX's bar.
+    /// Returns the state of VM `D1.L`, its access lamp and screen size, for VMX68K.SX's window.
     VmStatus = 9,
 }
 
