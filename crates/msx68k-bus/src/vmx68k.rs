@@ -14,6 +14,9 @@ use crate::bus::X68kBus;
 /// `SYS/FSX.X` global holding the active window record (`WMActive`), from its text base.
 const ACTIVE_WINDOW: u32 = 0x543CA;
 
+/// User event VMX68K.SX gets when a VM has disk requests (`E_USER1` of `SXDEF2.H`).
+const E_USER1: u16 = 14;
+
 // Window records (`SXDEF2.H`).
 const WINDOW_BITMAP: u32 = 0;
 const WINDOW_RECT: u32 = 4;
@@ -111,6 +114,8 @@ struct VmDisk {
     pending: VecDeque<DiskRequest>,
     /// Buffer address and size that `VmPoll` was given for the request at the front.
     buffer: Option<(u32, u32)>,
+    /// Whether VMX68K.SX has been sent `E_USER1` for requests it has not polled for yet.
+    woken: bool,
 }
 
 /// Where a VM's window shows on the master VM's screen.
@@ -137,6 +142,7 @@ impl X68kBus {
             requests,
             pending: VecDeque::new(),
             buffer: None,
+            woken: false,
         };
         self.vm_windows.disks.retain(|(open, _)| *open != id);
         self.vm_windows.disks.push((id, disk));
@@ -145,6 +151,36 @@ impl X68kBus {
     /// Drops the disk requests of VM `id`, which fails the ones its thread waits for.
     pub fn detach_vm_disk(&mut self, id: u32) {
         self.vm_windows.disks.retain(|(open, _)| *open != id);
+    }
+
+    /// Sends `E_USER1` to the window of each VM with disk requests VMX68K.SX has not polled
+    /// for, so it wakes for them rather than polling on every turn. Called when the guest is
+    /// about to take an event, when its queue is consistent.
+    pub(crate) fn wake_vm_windows(&mut self) {
+        let Some(text_base) = self.native_gm_text_base else {
+            return;
+        };
+        let mut wake = Vec::new();
+        for (id, disk) in &mut self.vm_windows.disks {
+            if disk.woken || disk.buffer.is_some() {
+                continue;
+            }
+            while let Ok(request) = disk.requests.try_recv() {
+                disk.pending.push_back(request);
+            }
+            if !disk.pending.is_empty() {
+                if let Some(&(_, window)) = self.vm_windows.open.iter().find(|(open, _)| open == id) {
+                    wake.push((*id, window));
+                }
+            }
+        }
+        for (id, window) in wake {
+            if self.post_event(text_base, E_USER1, window, (0, 0)) {
+                if let Some((_, disk)) = self.vm_windows.disks.iter_mut().find(|(open, _)| *open == id) {
+                    disk.woken = true;
+                }
+            }
+        }
     }
 
     /// Takes the VMs opened and closed since the last call, in order.
@@ -184,6 +220,7 @@ impl X68kBus {
             state.d[0] = 0;
             return TrapResult::Handled { extra_cycles: 0 };
         };
+        disk.woken = false;
         if disk.buffer.is_none() {
             while let Ok(request) = disk.requests.try_recv() {
                 disk.pending.push_back(request);

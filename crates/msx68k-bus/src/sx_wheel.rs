@@ -175,8 +175,8 @@ impl X68kBus {
             return;
         };
         if let Some(point) = self.scroll_arrow(text_base, horizontal, toward_end) {
-            if self.post_event(text_base, E_MSLDOWN, point) {
-                self.post_event(text_base, E_MSLUP, point);
+            if self.post_event(text_base, E_MSLDOWN, 0, point) {
+                self.post_event(text_base, E_MSLUP, 0, point);
             }
         }
     }
@@ -269,14 +269,15 @@ impl X68kBus {
         None
     }
 
-    /// Posts a mouse event at the global `point` the way `EMSet` does. Returns `false` when
-    /// the queue is full or the event is masked.
-    fn post_event(&mut self, text_base: u32, what: u16, point: (i16, i16)) -> bool {
+    /// Posts an event for `whom` at the global `point` the way `EMSet` does. Returns `false`
+    /// when the queue is full or the event is masked.
+    pub(crate) fn post_event(&mut self, text_base: u32, what: u16, whom: u32, point: (i16, i16)) -> bool {
         let em = text_base + EVENT_MANAGER;
         let posted = (|| {
             let entry = self.peek_u32(em + EM_FREE)?;
             let mask = self.peek_u16(em + EM_MASK)?;
-            if entry == 0 || (mask >> what) & 1 == 0 {
+            // User events are not in the system's mask; whoever posts one means it.
+            if entry == 0 || (what < 14 && (mask >> what) & 1 == 0) {
                 return None;
             }
             let when = self.peek_u32(text_base + SYSTEM_TIME)?;
@@ -292,7 +293,7 @@ impl X68kBus {
         let writes = [
             (em + EM_FREE, next_free),
             (entry + ENTRY_NEXT, 0),
-            (entry + ENTRY_WHOM, 0),
+            (entry + ENTRY_WHOM, whom),
             (entry + ENTRY_WHEN, when),
             (entry + ENTRY_WHERE, place),
             (entry + ENTRY_HOW, how),

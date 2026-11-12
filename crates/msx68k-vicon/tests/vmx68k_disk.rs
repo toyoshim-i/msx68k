@@ -1,5 +1,6 @@
 //! A VM opened by VMX68K.X boots Human68k 3.02 from a disk image on the master VM's HDD,
-//! which VMX68K.X reads through the master's Human68k (`docs/VMX68K.md` Sections 3.1 and 3.5).
+//! which VMX68K.X reads through the master's Human68k when the host wakes it with `E_USER1`,
+//! even with its window behind another (`docs/VMX68K.md` Sections 3.1 and 3.5).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,10 +82,13 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     click(&mut master, (22, 340), 2, 3_000_000);
     click(&mut master, (343, 175), 2, 8_000_000);
     let events = master.bus.take_vm_events();
-    let [VmEvent::Opened { id, drive0_bytes, .. }] = events[..] else {
+    let [VmEvent::Opened { id, window, drive0_bytes }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
     assert_eq!(drive0_bytes as usize, human.len(), "VMX68K.X found the image's size");
+    // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
+    click(&mut master, (22, 340), 2, 3_000_000);
+    assert_ne!(master.bus.active_window(), Some(window));
 
     // As the app does: drive 0 of the VM is the master's image, served by VMX68K.X.
     let (disk, requests) = remote_disk(drive0_bytes as usize);

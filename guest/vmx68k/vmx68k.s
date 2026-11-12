@@ -2,7 +2,7 @@
 * VMX68K.X: shows a virtual X68000 in an SX-Window window (docs/VMX68K.md)
 * The host runs the VM on a thread of its own and lays its screen over the
 * window's content, so this task only opens the window, carries out the VM's
-* disk requests on every pass of its event loop, and closes the VM at the end.
+* disk requests when the host sends E_USER1 for them, and closes the VM at the end.
 * Drive 0 of the VM is the image at DRIVE0_PATH, read and written through
 * Human68k here, so the VM's disks live on the master VM's drives.
 * Assembled by rhas and linked by rhlk
@@ -93,11 +93,10 @@ no_drive0:
 	st	(a1)
 
 event_loop:
-	bsr	serve_disk
 
 	pea	event_rec(pc)
-	* EM_NULL makes it return on every turn, so the VM's disk requests are served while idle
-	move.w	#$3283, -(sp)		; EM_NULL | EM_MSLDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
+	* The host sends E_USER1 to the window when the VM has disk requests
+	move.w	#$7282, -(sp)		; EM_USER1 | EM_MSLDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
 	SXCALL	TSEventAvail		; $A357
 	addq.l	#6, sp
 
@@ -115,6 +114,9 @@ event_loop:
 	beq.s	handle_system
 	cmpi.w	#13, d0			; E_SYSTEM2
 	beq.s	handle_system
+	cmpi.w	#14, d0			; E_USER1: the VM has disk requests
+	bne.s	event_loop
+	bsr	serve_disk
 	bra.s	event_loop
 
 handle_activate:

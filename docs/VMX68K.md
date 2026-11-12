@@ -62,10 +62,10 @@ which reads or writes the disk image through the master VM's DOS.
 
 ### 3.2 Picking Up Requests
 SX-Window multitasks cooperatively: VMX68K.SX runs only when the scheduler gives it a turn, and
-the host cannot make that happen sooner. So VMX68K.SX polls. On every pass of its event loop it
-asks the host for pending requests with a hypercall, carries them out, and returns the results.
-Its loop waits for events in a way that also returns when there are none, so it keeps polling
-while idle.
+the host cannot make that happen sooner. So the host sends VMX68K.SX an event when a VM has
+requests, as if SX-Window delivered it: `E_USER1`, addressed to the VM's window. VMX68K.SX waits
+for events as usual, and on `E_USER1` asks the host for the pending requests with a hypercall,
+carries them out, and returns the results. It takes no turns while there is nothing to do.
 
 ### 3.3 Screens
 All composition runs in GPU shaders, once per frame. Effects that change registers within a frame,
@@ -147,10 +147,14 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   the VM waits where the command runs: a read asks for every sector to EOT, and the other side
   for a multi-track command, in one request; a write sends the written sectors in one request
   before the result phase. VMX68K.X carries requests out one at a time with DOS `_SEEK`,
-  `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Its event loop asks
-  `TSEventAvail` for null events too, which return on every turn, so requests are served while
-  nothing else happens. Human68k 3.02 boots from the master VM's HDD to `A>` this way
-  (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
+  `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Human68k 3.02 boots from the
+  master VM's HDD to `A>` this way (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
+- The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
+  Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests
+  until VMX68K.X polls. SX-Window's own mask (`$03BF`) leaves user events out, so the host posts
+  them past it. The Task Manager hands the event to the window's task even behind another window.
+  Booting Human68k takes about 290 wake-ups and 580 polls; with null events instead, VMX68K.X
+  polled about 11,000 times.
 - The compositor shader has no scanline table, sprites, or BG yet; it composites text and
   graphic page 0 from the state at the end of the frame.
 - The final pass (`render_bus_to_surface_view`) draws the master VM's screen, then each
