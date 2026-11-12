@@ -219,8 +219,12 @@ windows work the same way as the primary VM.
 - **First disk.** The host read the floppy image for drive 0 of new VMs itself at first, named by
   a command-line option of the app. Images come from the primary VM's drives now that the VM's
   screen shows in its window (Section 2).
-- **Drive 0's image, for now.** Until the settings GUI chooses images, VMX68K.SX serves the file
-  at a fixed path, `A:\VMX68K\DRIVE0.XDF`, as the VM's drive 0.
+- **Custom floppy images.** The settings GUI's ファイル rows now open raw floppy images on
+  the primary's drives and pass their handles to the host at `VmOpen`/`VmRestart` in `A2.L`.
+  Reads and writes go through VMX68K.X's DOS calls; images stay open until restart or exit.
+  Missing files leave empty units, and three or four floppy units connect all four drives.
+  The legacy `A:\VMX68K\DRIVE0.XDF` service remains for compatibility tests. HDD/SCSI image
+  mounting and custom shared/passthrough rows are still pending (see the settings UI notes).
 
 ## 4. First Goal
 

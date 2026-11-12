@@ -143,11 +143,18 @@ impl VmBridge {
 pub struct RemoteDisk {
     len: usize,
     bridge: VmBridge,
+    /// The primary's file handle of the image, or `None` for drive 0's, which VMX68K.SX keeps.
+    handle: Option<u32>,
 }
 
 impl RemoteDisk {
     pub fn new(bridge: VmBridge, len: usize) -> Self {
-        Self { len, bridge }
+        Self { len, bridge, handle: None }
+    }
+
+    /// An image VMX68K.SX opened as the primary's file `handle`, of `len` bytes.
+    pub fn with_handle(bridge: VmBridge, handle: u32, len: usize) -> Self {
+        Self { len, bridge, handle: Some(handle) }
     }
 
     /// Size of the image.
@@ -161,23 +168,28 @@ impl RemoteDisk {
 
     /// Reads `len` bytes at `offset`, waiting for the primary VM.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        let op = BridgeOp::Read {
-            offset: offset as u32,
-            len: len as u32,
+        let (offset, count) = (offset as u32, len as u32);
+        let (op, done) = match self.handle {
+            Some(handle) => (BridgeOp::HandleRead { handle, offset, len: count }, count),
+            None => (BridgeOp::Read { offset, len: count }, 0),
         };
         self.bridge
             .ask(op)
-            .filter(|reply| reply.result == 0 && reply.data.len() == len)
+            .filter(|reply| reply.result == done && reply.data.len() == len)
             .map(|reply| reply.data)
     }
 
     /// Writes `data` at `offset`, waiting for the primary VM.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
-        let op = BridgeOp::Write {
-            offset: offset as u32,
-            data,
+        let offset = offset as u32;
+        let (op, done) = match self.handle {
+            Some(handle) => {
+                let len = data.len() as u32;
+                (BridgeOp::HandleWrite { handle, offset, data }, len)
+            }
+            None => (BridgeOp::Write { offset, data }, 0),
         };
-        self.bridge.ask(op).is_some_and(|reply| reply.result == 0)
+        self.bridge.ask(op).is_some_and(|reply| reply.result == done)
     }
 }
 
@@ -198,13 +210,100 @@ pub enum VmEvent {
         /// The CPU and the RAM in MB, from the setup.
         cpu: CpuModel,
         ram_mb: u32,
+        /// Custom mode's drives, or `None` in shared mode.
+        custom: Option<Vec<CustomDrive>>,
     },
-    /// VMX68K.SX set the VM up anew, to restart it at once with its CPU, RAM, and speed.
-    Restart { id: u32, cpu: CpuModel, ram_mb: u32, speed: CpuSpeedMode },
+    /// VMX68K.SX set the VM up anew, to restart it at once with its CPU, RAM, speed, and drives.
+    Restart {
+        id: u32,
+        cpu: CpuModel,
+        ram_mb: u32,
+        speed: CpuSpeedMode,
+        custom: Option<Vec<CustomDrive>>,
+    },
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
     /// The VM was closed.
     Closed { id: u32 },
+}
+
+/// A drive of a VM in custom mode, as VMX68K.SX set it up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomDrive {
+    /// An image file VMX68K.SX opened, read and written through `handle`, of `len` bytes.
+    File { handle: u32, len: u32 },
+    /// An image file VMX68K.SX could not open, an empty drive.
+    Missing,
+    /// The primary's drive `drive` (1 is A:), file-level.
+    Shared { drive: u32 },
+    /// The primary's floppy drive `drive` (1 is A:), sector-level.
+    Passthrough { drive: u32 },
+}
+
+/// Bytes of an entry of the drive table `VmOpen` and `VmRestart` take in `A2.L`, after its
+/// count (a word): its kind (0 file, 1 shared, 2 passthrough), its handle or drive (-1 for a
+/// file that did not open), and the file's size.
+const DRIVE_TABLE_ENTRY: u32 = 8;
+
+impl X68kBus {
+    /// Installs raw floppy images from a custom setup, in row order. Missing images
+    /// reserve an empty floppy unit. Returns entries needing a later storage backend
+    /// (HDD, shared, passthrough, or more than four floppies).
+    pub fn install_custom_floppies(
+        &mut self,
+        bridge: VmBridge,
+        drives: &[CustomDrive],
+    ) -> Vec<CustomDrive> {
+        let mut unit = 0;
+        let mut unsupported = Vec::new();
+        for &drive in drives {
+            match drive {
+                CustomDrive::File { handle, len }
+                    if crate::fdc::FloppyGeometry::from_image_len(len as usize).is_some()
+                        && unit < 4 =>
+                {
+                    self.fdc.insert_remote_disk(
+                        unit,
+                        RemoteDisk::with_handle(bridge.clone(), handle, len as usize),
+                        false,
+                    );
+                    unit += 1;
+                }
+                CustomDrive::Missing if unit < 4 => unit += 1,
+                _ => unsupported.push(drive),
+            }
+        }
+        // Real machines have two or four units, including empty drives.
+        let count = if unit > 2 { 4 } else { 2 };
+        for (i, drive) in self.fdc.drives.iter_mut().enumerate() {
+            drive.connected = i < count;
+        }
+        unsupported
+    }
+
+    /// Reads the drive table at `at`, or `None` for shared mode (0).
+    fn custom_drives(&self, at: u32) -> Option<Vec<CustomDrive>> {
+        let at = at & 0x00FF_FFFF;
+        if at == 0 {
+            return None;
+        }
+        let count = self.peek_u16(at).unwrap_or(0).min(8) as u32;
+        let drives = (0..count)
+            .map(|row| {
+                let entry = at + 2 + row * DRIVE_TABLE_ENTRY;
+                let kind = self.peek_u16(entry).unwrap_or(0);
+                let arg = self.peek_u16(entry + 2).unwrap_or(0xFFFF);
+                let len = self.peek_u32(entry + 4).unwrap_or(0);
+                match (kind, arg) {
+                    (0, 0xFFFF) => CustomDrive::Missing,
+                    (0, handle) => CustomDrive::File { handle: handle as u32, len },
+                    (1, drive) => CustomDrive::Shared { drive: drive as u32 },
+                    (_, drive) => CustomDrive::Passthrough { drive: drive as u32 },
+                }
+            })
+            .collect();
+        Some(drives)
+    }
 }
 
 /// Speeds of a VM's CPU by their order in VMX68K.SX's menu, the numbers `VmSpeed` takes.
@@ -425,8 +524,9 @@ impl X68kBus {
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
     /// VMX68K.SX serves, `D3.L` of the primary's drives from A:, its screen `D4.W` lines below
     /// the top of the window's content, the 16 KB of its SRAM at `D5.L` (0 for none yet), and
-    /// the speed `D6.L` (as `VmSpeed`'s), and its CPU and RAM `D7.L` (`cpu << 16 | MB`, see
-    /// [`setup_machine`]), and returns its ID in `D0.L`.
+    /// the speed `D6.L` (as `VmSpeed`'s), its CPU and RAM `D7.L` (`cpu << 16 | MB`, see
+    /// [`setup_machine`]), and custom mode's drive table at `A2.L` (0 in shared mode, see
+    /// [`CustomDrive`]), and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
@@ -449,6 +549,7 @@ impl X68kBus {
                 .map(|i| self.peek_u8(sram_at + i).unwrap_or(0))
                 .collect()
         });
+        let custom = self.custom_drives(state.a[2]);
         let windows = &mut self.vm_windows;
         windows.events.push(VmEvent::Opened {
             id,
@@ -459,6 +560,7 @@ impl X68kBus {
             sram,
             cpu,
             ram_mb,
+            custom,
         });
         state.d[0] = id;
         TrapResult::Handled { extra_cycles: 0 }
@@ -605,17 +707,21 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmRestart`: restarts VM `D1.L` with the CPU and RAM `D2.L` (as `VmOpen`'s `D7.L`) and
-    /// the speed `D3.L` of that CPU, keeping its window, drives, and SRAM. Returns 0, or -1 for
-    /// an unknown VM.
+    /// `VmRestart`: restarts VM `D1.L` with the CPU and RAM `D2.L` (as `VmOpen`'s `D7.L`), the
+    /// speed `D3.L` of that CPU, and the drive table at `A2.L` (as `VmOpen`'s), keeping its
+    /// window and SRAM. Returns 0, or -1 for an unknown VM.
     pub(crate) fn hypercall_vm_restart(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
         let (cpu, ram_mb) = setup_machine(state.d[2]);
+        let custom = self.custom_drives(state.a[2]);
         state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
             Some(open) => {
                 open.cpu = cpu;
                 let speed = vm_speed(cpu, state.d[3]);
-                self.vm_windows.events.push(VmEvent::Restart { id, cpu, ram_mb, speed });
+                // Retire the old requests before the task can serve another event
+                // with its newly opened image handles.
+                self.detach_vm_bridge(id);
+                self.vm_windows.events.push(VmEvent::Restart { id, cpu, ram_mb, speed, custom });
                 0
             }
             None => u32::MAX,
@@ -717,6 +823,29 @@ fn nul_terminated(path: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn handle_disk_requires_complete_reads_and_writes() {
+        let (bridge, requests) = vm_bridge();
+        let worker = std::thread::spawn(move || {
+            let disk = RemoteDisk::with_handle(bridge, 17, 4096);
+            assert_eq!(disk.read(512, 3), Some(vec![1, 2, 3]));
+            assert!(disk.write(1024, vec![4, 5]));
+            assert_eq!(disk.read(0, 3), None);
+            assert!(!disk.write(0, vec![6, 7]));
+        });
+        for (op, result, data) in [
+            (BridgeOp::HandleRead { handle: 17, offset: 512, len: 3 }, 3, vec![1, 2, 3]),
+            (BridgeOp::HandleWrite { handle: 17, offset: 1024, data: vec![4, 5] }, 2, vec![]),
+            (BridgeOp::HandleRead { handle: 17, offset: 0, len: 3 }, 2, vec![1, 2]),
+            (BridgeOp::HandleWrite { handle: 17, offset: 0, data: vec![6, 7] }, 1, vec![]),
+        ] {
+            let request = requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert_eq!(request.op, op);
+            request.reply.send(Some(BridgeReply { result, data })).unwrap();
+        }
+        worker.join().unwrap();
+    }
     use super::*;
     use crate::timing::CpuSpeedMode;
 
@@ -755,6 +884,7 @@ mod tests {
                     sram: None,
                     cpu: CpuModel::Mc68000,
                     ram_mb: 4,
+                    custom: None,
                 },
                 VmEvent::Opened {
                     id: 2,
@@ -765,6 +895,7 @@ mod tests {
                     sram: None,
                     cpu: CpuModel::Mc68000,
                     ram_mb: 4,
+                    custom: None,
                 },
                 VmEvent::Closed { id: 1 },
             ]
@@ -833,14 +964,26 @@ mod tests {
         bus.hypercall_vm_speed(&mut state);
         assert_eq!(state.d[0], u32::MAX);
 
+        // The old bridge must stop accepting requests before newly opened handles
+        // can be served by VMX68K.X, even before the app consumes the restart event.
+        let (old_bridge, requests) = vm_bridge();
+        bus.attach_vm_bridge(id, requests);
+
         // Restarted as a 68000 with 12 MB at 16 MHz, it numbers the 68000's speeds.
         state.d[1] = id;
         state.d[2] = 12;
         state.d[3] = 1;
         bus.hypercall_vm_restart(&mut state);
+        assert!(old_bridge.ask(BridgeOp::Read { offset: 0, len: 1 }).is_none());
         assert_eq!(
             bus.take_vm_events(),
-            [VmEvent::Restart { id, cpu: CpuModel::Mc68000, ram_mb: 12, speed: CpuSpeedMode::Mhz16 }]
+            [VmEvent::Restart {
+                id,
+                cpu: CpuModel::Mc68000,
+                ram_mb: 12,
+                speed: CpuSpeedMode::Mhz16,
+                custom: None
+            }]
         );
         state.d[1] = id;
         state.d[2] = 3;

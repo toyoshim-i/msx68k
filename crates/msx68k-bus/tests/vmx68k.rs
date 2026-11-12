@@ -518,7 +518,11 @@ fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     click(&mut vm, (610, 198), 1, 4_000_000);
     assert_eq!(
         vm.bus.take_vm_events(),
-        [VmEvent::Restart { id: 1, cpu: CpuModel::Mc68030, ram_mb: 8, speed: CpuSpeedMode::Mhz25 }]
+        [VmEvent::Restart { id: 1, cpu: CpuModel::Mc68030, ram_mb: 8, speed: CpuSpeedMode::Mhz25, custom: Some(vec![
+            msx68k_bus::vmx68k::CustomDrive::Missing,
+            msx68k_bus::vmx68k::CustomDrive::Shared { drive: 3 },
+            msx68k_bus::vmx68k::CustomDrive::Passthrough { drive: 2 },
+        ]) }]
     );
     assert_eq!(text_index(&vm, (300, 200)), 0, "the VM's screen back where the dialog was");
 

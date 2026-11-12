@@ -132,6 +132,9 @@ size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
 vm_drives:	.ds.b	DRIVES_SIZE	; the setup's drives
 dlg_drives:	.ds.b	DRIVES_SIZE	; the configuration dialog's
 det_drives:	.ds.b	DRIVES_SIZE	; ドライブの詳細's
+drive_table:	.ds.w	1		; count, then kind.w, handle.w, size.l
+		.ds.b	DRIVE_ROWS*8
+image_path:	.ds.b	PATH_MAX+2
 dlg_text:	.ds.b	256		; a dialog item's text
 VARS_SIZE:
 sram_buffer:	.ds.b	SRAM_SIZE	; the VM's own SRAM, kept in its setup
@@ -256,6 +259,8 @@ count_drives:
 drives_counted:
 	subq.w	#1, d3
 
+	bsr	open_custom_drives
+
 	* Ask the host for a VM; without msx68k there is none, and the task ends
 	moveq.l	#MSX68K_FN_VM_OPEN, d0
 	move.l	win_ptr(a5), d1
@@ -273,6 +278,7 @@ vm_open_sram:
 	swap	d7
 	move.w	vm_ram(a5), d7
 	move.w	vm_cpu(a5), run_cpu(a5)
+	bsr	custom_drive_table
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
@@ -403,6 +409,7 @@ quit_app:
 	DOS	_CLOSE
 	addq.l	#2, sp
 dispose_window:
+	bsr	close_custom_drives
 	* VMX68K.LB goes without being written back
 	tst.b	library_open(a5)
 	beq.s	library_closed
@@ -995,7 +1002,7 @@ speed_list_done:
 * whether to restart it now.
 * -----------------------------------------------------------------------------
 config_dialog:
-	movem.l	d0-d3/a0-a1, -(sp)
+	movem.l	d0-d3/a0-a2, -(sp)
 	move.w	vm_cpu(a5), dlg_cpu(a5)
 	move.w	vm_ram(a5), dlg_ram(a5)
 	move.w	#cfg_dialog, cfg_dialog+DIALOG_RECORD(a5)
@@ -1119,6 +1126,8 @@ config_dialog_save:
 	addq.l	#6, sp
 	cmpi.w	#1, d0			; はい
 	bne	config_dialog_done
+	bsr	close_custom_drives
+	bsr	open_custom_drives
 	moveq.l	#MSX68K_FN_VM_RESTART, d0
 	move.l	vm_id(a5), d1
 	move.w	vm_cpu(a5), d2
@@ -1126,6 +1135,7 @@ config_dialog_save:
 	move.w	vm_ram(a5), d2
 	move.w	vm_speed(a5), d3
 	ext.l	d3
+	bsr	custom_drive_table
 	bsr	msx68k_call
 	tst.l	d0
 	bne	config_dialog_done
@@ -1137,7 +1147,108 @@ config_dialog_done:
 	move.l	win_ptr(a5), -(sp)
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
-	movem.l	(sp)+, d0-d3/a0-a1
+	movem.l	(sp)+, d0-d3/a0-a2
+	rts
+
+* The running VM's image handles belong to this task, independently of the saved
+* choices (which can change without a restart). A2 is zero for shared mode.
+custom_drive_table:
+	suba.l	a2, a2
+	tst.w	vm_drives+DRV_MODE(a5)
+	beq.s	custom_drive_table_done
+	lea	drive_table(a5), a2
+custom_drive_table_done:
+	rts
+
+open_custom_drives:
+	movem.l	d0-d7/a0-a4, -(sp)
+	clr.w	drive_table(a5)
+	tst.w	vm_drives+DRV_MODE(a5)
+	beq	open_custom_done
+	move.w	vm_drives+DRV_COUNT(a5), d7
+	cmpi.w	#DRIVE_ROWS, d7
+	bls.s	open_custom_count
+	moveq.l	#DRIVE_ROWS, d7
+open_custom_count:
+	move.w	d7, drive_table(a5)
+	subq.w	#1, d7
+	bmi	open_custom_done
+	lea	vm_drives+DRV_ENTRIES(a5), a3
+	lea	drive_table+2(a5), a4
+open_custom_next:
+	move.w	(a3), (a4)
+	move.w	#-1, 2(a4)
+	clr.l	4(a4)
+	tst.w	(a3)
+	bne.s	open_custom_letter
+	moveq.l	#0, d1
+	move.b	2(a3), d1
+	cmpi.w	#PATH_MAX, d1
+	bhi.s	open_custom_advance
+	lea	3(a3), a0
+	lea	image_path(a5), a1
+	bra.s	open_custom_copy_test
+open_custom_copy:
+	move.b	(a0)+, (a1)+
+open_custom_copy_test:
+	dbra	d1, open_custom_copy
+	clr.b	(a1)
+	move.w	#2, -(sp)
+	pea	image_path(a5)
+	DOS	_OPEN
+	addq.l	#6, sp
+	tst.l	d0
+	bmi.s	open_custom_advance
+	move.w	d0, 2(a4)
+	move.w	#2, -(sp)
+	clr.l	-(sp)
+	move.w	d0, -(sp)
+	DOS	_SEEK
+	addq.l	#8, sp
+	tst.l	d0
+	bpl.s	open_custom_size
+	move.w	2(a4), -(sp)
+	DOS	_CLOSE
+	addq.l	#2, sp
+	move.w	#-1, 2(a4)
+	bra.s	open_custom_advance
+open_custom_size:
+	move.l	d0, 4(a4)
+	bra.s	open_custom_advance
+open_custom_letter:
+	moveq.l	#0, d0
+	move.b	3(a3), d0
+	andi.w	#$DF, d0
+	subi.w	#'A'-1, d0
+	move.w	d0, 2(a4)
+open_custom_advance:
+	lea	ENTRY_SIZE(a3), a3
+	addq.l	#8, a4
+	dbra	d7, open_custom_next
+open_custom_done:
+	movem.l	(sp)+, d0-d7/a0-a4
+	rts
+
+close_custom_drives:
+	movem.l	d0/d7/a4, -(sp)
+	move.w	drive_table(a5), d7
+	clr.w	drive_table(a5)
+	subq.w	#1, d7
+	bmi.s	close_custom_done
+	lea	drive_table+2(a5), a4
+close_custom_next:
+	tst.w	(a4)
+	bne.s	close_custom_advance
+	move.w	2(a4), d0
+	bmi.s	close_custom_advance
+	move.w	d0, -(sp)
+	DOS	_CLOSE
+	addq.l	#2, sp
+close_custom_advance:
+	addq.l	#8, a4
+	dbra	d7, close_custom_next
+close_custom_done:
+	movem.l	(sp)+, d0/d7/a4
 	rts
 
 * Copies the drives at A0 to A1

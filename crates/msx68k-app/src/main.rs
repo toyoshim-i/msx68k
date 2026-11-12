@@ -796,13 +796,13 @@ impl Msx68kApp {
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
             match event {
-                VmEvent::Opened { id, window, drives, speed, sram, cpu, ram_mb, .. } => {
+                VmEvent::Opened { id, window, drives, speed, sram, cpu, ram_mb, custom, .. } => {
                     let machine = GuestMachine { cpu, ram_mb, speed };
-                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram) {
+                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
                         self.guest_vms.push(guest);
                     }
                 }
-                VmEvent::Restart { id, cpu, ram_mb, speed } => {
+                VmEvent::Restart { id, cpu, ram_mb, speed, custom } => {
                     let Some(at) = self.guest_vms.iter().position(|guest| guest.id == id) else {
                         continue;
                     };
@@ -812,7 +812,7 @@ impl Msx68kApp {
                     let (window, drives, sram) = (old.window, old.drives, old.sram.clone());
                     drop(old);
                     let machine = GuestMachine { cpu, ram_mb, speed };
-                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram) {
+                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
                         self.guest_vms.push(guest);
                     }
                 }
@@ -875,6 +875,7 @@ impl Msx68kApp {
         drives: u32,
         machine: GuestMachine,
         sram: Option<Vec<u8>>,
+        custom: Option<Vec<msx68k_bus::vmx68k::CustomDrive>>,
     ) -> Option<GuestVm> {
         let gpu = self.gpu.as_ref()?;
         // A 68030 needs the X68030's IPL ROM.
@@ -906,6 +907,12 @@ impl Msx68kApp {
                 }
                 Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
             }
+        } else if let Some(custom) = custom {
+            let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
+            for drive in vm.bus.install_custom_floppies(bridge, &custom) {
+                eprintln!("VM {id}: custom drive not supported yet: {drive:?}");
+            }
+            self.vm.bus.attach_vm_bridge(id, requests);
         } else {
             // Shared mode: the VM sees the primary's drives under the same letters, bridged
             // at the file level through VMX68K.X, and boots from A:. The floppy image mode for

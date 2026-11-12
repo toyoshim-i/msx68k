@@ -147,11 +147,20 @@ official SX-Window programming manuals.
   now (`VmRestart` 11).
 - **The VM** starts with the setup's CPU (68030 from `IPLROM30.DAT`), RAM, speed, and SRAM, in
   shared mode: its drives are the primary's, under the same letters, and its own floppy drives
-  get no letters. Custom mode's drives are saved but not given to the VM yet (4b-1, in
-  progress: a drive table for `VmOpen`/`VmRestart` in `A2.L`, image files on the VM's FDD and
-  SCSI read and written through the primary).
+  get no letters. Custom mode now passes a drive table to `VmOpen`/`VmRestart` in `A2.L`
+  (0 for shared mode; count.w, then kind.w, handle/drive.w, size.l per row). VMX68K.X opens file images
+  read/write and owns their handles until restart or exit; saving a setup and declining restart
+  leaves the running images open. Raw floppy images are mounted in file-row order through
+  `RemoteDisk::with_handle`, without copying the whole image. A file that cannot open reserves
+  an empty floppy unit; three or four units connect all four drives. The VM boots from its own
+  SRAM, without installing the shared boot ROM. HDD/SCSI, shared, and passthrough rows are
+  still pending and the host reports them as unsupported; DIM images are not handled by this
+  remote raw-floppy path yet.
 - Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
   VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
+  `crates/msx68k-vicon/tests/vmx68k_disk.rs` also boots a custom raw image from the primary's
+  HDD, using a path different from legacy DRIVE0.XDF, checking an absent image and four-drive
+  connection. The bus unit test checks exact read/write counts on handle requests.
 ---
 
 ## 2. Proposed Implementation (not decided)
@@ -166,17 +175,18 @@ official SX-Window programming manuals.
      question.~~ Done.
    - 4b drive assignment, shared and custom mode, in the order ファイル, 共有, パススルー (mock:
      [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png)). The dialogs
-     are done; 4b-1 (image files given to the VM) is in progress, then 4b-2 (共有 drives) and
-     4b-3 (パススルー).
+     are done; 4b-1 has raw floppy files working, with HDD/SCSI still pending, then 4b-2
+     (共有 drives) and 4b-3 (パススルー).
    - 4c the boot device submenu and the floppy icons, which need custom mode.
    - 4d the menu to make a new setup, which chooses the boot device it writes in the setup's
      SRAM.
 
 ### 2.2 Pieces Still to Build
-- **Custom drives on the VM** (4b-1): VMX68K.X opens each ファイル drive's image and passes a
-  table of handles and sizes; floppy-sized images go on the VM's FDD (units in row order, four
-  units for three or more), read and written with the handle requests; HDD images on its SCSI,
-  which needs SCSI reads and writes through the bridge. Custom mode boots as the VM's SRAM says.
+- **Custom drives on the VM** (4b-1): Raw floppy images and the table/handle lifecycle are
+  implemented. Next, put HDD images on its SCSI, with reads and writes through the bridge (no whole-image cache), including boot,
+  capacity detection, and the block driver's partition metadata. Preserve the setup's SRAM
+  boot choice. Add remote DIM support separately if needed: the current FDC remote backend
+  accepts raw image sizes only.
 - **共有 drives** (4b-2) as remote drives of the VM, after its floppy and SCSI drives.
 - **パススルー** (4b-3): a primary floppy drive handed to the VM sector by sector, write-
   protected on the primary meanwhile.

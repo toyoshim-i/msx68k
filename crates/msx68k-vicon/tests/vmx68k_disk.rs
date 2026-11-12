@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use msx68k_bus::scsi::{build_bootable_sxwin_scsi_hdd_with_files, ExtractedFile};
 use msx68k_bus::vm_thread::{Pace, VmThread};
-use msx68k_bus::vmx68k::{vm_bridge, RemoteDisk};
+use msx68k_bus::vmx68k::{vm_bridge, CustomDrive, RemoteDisk};
+use msx68k_bus::sx_resource::{Resource, ResourceLibrary};
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
 use msx68k_vicon::decode_tvram_ank_lines;
 
@@ -29,6 +30,15 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 
 #[test]
 fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
+    boot_image(false);
+}
+
+#[test]
+fn a_vm_boots_from_a_custom_image_on_the_primary_vms_drive() {
+    boot_image(true);
+}
+
+fn boot_image(custom: bool) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -63,6 +73,27 @@ fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
         date: 0x5821,
         data: human.clone(),
     };
+    let mut files = vec![drive0];
+    if custom {
+        // A different image from the legacy DRIVE0 path proves that the configured
+        // handle, rather than the old fixed image, reaches the VM.
+        files[0].raw_name = *b"CUSTOM  ";
+        let mut library = ResourceLibrary::parse(
+            &msx68k_bus::vmx68k_library::setup_library(0, 0, 4, None),
+        ).unwrap();
+        library.insert(b"V68D", Resource::new(0,
+            msx68k_bus::vmx68k_library::setup_drives(true, &[
+                (0, b"A:\\VMX68K\\CUSTOM.XDF"),
+                (0, b"A:\\VMX68K\\ABSENT.XDF"),
+                (0, b"A:\\VMX68K\\CUSTOM.XDF"),
+            ]),
+        ));
+        let mut setup = files[0].clone();
+        setup.raw_name = *b"DEFAULT ";
+        setup.raw_ext = *b"V68";
+        setup.data = library.to_bytes();
+        files.push(setup);
+    }
     let mut primary = X68kVm::new(
         VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
@@ -72,7 +103,7 @@ fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
     primary.bus.load_ipl_rom(&ipl);
     assert!(primary.bus.insert_scsi_hdd(
         0,
-        build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, vec![drive0])
+        build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, files)
     ));
     primary.bus.set_boot_from_scsi(true);
     primary.reset().unwrap();
@@ -82,10 +113,18 @@ fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
     click(&mut primary, (22, 340), 2, 3_000_000);
     click(&mut primary, (104, 255), 2, 8_000_000);
     let events = primary.bus.take_vm_events();
-    let [VmEvent::Opened { id, window, drive0_bytes, .. }] = events[..] else {
+    let [VmEvent::Opened { id, window, drive0_bytes, custom: ref custom_drives, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
-    assert_eq!(drive0_bytes as usize, human.len(), "VMX68K.X found the image's size");
+    if custom {
+        let drives = custom_drives.as_ref().expect("custom drive table");
+        assert!(matches!(drives.as_slice(), [
+            CustomDrive::File { len, .. }, CustomDrive::Missing, CustomDrive::File { .. }
+        ] if *len as usize == human.len()));
+    } else {
+        assert!(custom_drives.is_none());
+        assert_eq!(drive0_bytes as usize, human.len(), "VMX68K.X found the image's size");
+    }
     // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
     click(&mut primary, (22, 340), 2, 3_000_000);
     assert_ne!(primary.bus.active_window(), Some(window));
@@ -93,7 +132,6 @@ fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
     // As the app does: drive 0 of the VM is the primary's image, served by VMX68K.X.
     let (bridge, requests) = vm_bridge();
     primary.bus.attach_vm_bridge(id, requests);
-    let disk = RemoteDisk::new(bridge, drive0_bytes as usize);
     let mut vm = X68kVm::new(
         VmConfig::app_vm()
             .with_speed_mode(CpuSpeedMode::Mhz10)
@@ -101,7 +139,15 @@ fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
     );
     vm.bus.load_cgrom(&cgrom);
     vm.bus.load_ipl_rom(&ipl);
-    assert!(vm.bus.fdc.insert_remote_disk(0, disk, false));
+    if let Some(drives) = custom_drives {
+        assert!(vm.bus.install_custom_floppies(bridge, drives).is_empty());
+        assert!(vm.bus.fdc.drives.iter().all(|drive| drive.connected));
+        assert!(!vm.bus.fdc.drives[1].is_inserted());
+        assert!(vm.bus.fdc.drives[2].is_inserted());
+    } else {
+        let disk = RemoteDisk::new(bridge, drive0_bytes as usize);
+        assert!(vm.bus.fdc.insert_remote_disk(0, disk, false));
+    }
     vm.reset().unwrap();
 
     // The VM's thread waits while the primary serves it, so the prompt is looked for there.
