@@ -1153,11 +1153,33 @@ pub fn build_bootable_sxwin_scsi_hdd_with_files(
         }
     }
 
+    // 4c. Build VMX68K.X from guest/vmx68k/vmx68k.s into \X68, with SX-Window's applications.
+    let vmx68k_src = workspace_root.join("guest/vmx68k/vmx68k.s");
+    if let Ok(vmx68k_bytes) =
+        crate::guest_build::build_guest_x_executable(&vmx68k_src, &[&inc_dir])
+    {
+        let mut x68_dir = [b' '; 8];
+        x68_dir[..3].copy_from_slice(b"X68");
+        let mut raw_name = [b' '; 8];
+        raw_name[..6].copy_from_slice(b"VMX68K");
+        let vmx68k = ExtractedFile {
+            path_dirs: vec![(x68_dir, [b' '; 3], [0u8; 10])],
+            raw_name,
+            raw_ext: *b"X  ",
+            raw_name2: [0u8; 10],
+            attr: 0x20,
+            time: 0x6000,
+            date: 0x5821,
+            data: vmx68k_bytes,
+        };
+        merged_map.insert(make_file_key(&vmx68k), vmx68k);
+    }
+
     for f in extra_files {
         merged_map.insert(make_file_key(&f), f);
     }
 
-    // 4c. Inject SX.BAT into root A:\ matching official SX31_HD.INS installer
+    // 4d. Inject SX.BAT into root A:\ matching official SX31_HD.INS installer
     let mut raw_sx_name = [b' '; 8];
     raw_sx_name[..2].copy_from_slice(b"SX");
     let mut raw_sx_ext = [b' '; 3];

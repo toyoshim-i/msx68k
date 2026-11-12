@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use msx68k_bus::{CpuModel, CpuSpeedMode, FrameBudget, GdbServer, VmConfig, X68kVm};
-use msx68k_vicon::{ViconGpuCompositor, ViconSurfacePresenter};
+use msx68k_bus::vm_thread::{Pace, VmThread};
+use msx68k_bus::{CpuModel, CpuSpeedMode, FrameBudget, GdbServer, VmConfig, VmEvent, X68kVm};
+use msx68k_vicon::{
+    ScreenRect, ViconGpuCompositor, ViconSurfacePresenter, VmLayer, VmScreen, VmScreenOutput,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -116,6 +119,8 @@ struct AppArgs {
     cgrom_path: PathBuf,
     fd0_path: Option<PathBuf>,
     fd1_path: Option<PathBuf>,
+    /// Floppy image VMs opened by VMX68K.X boot from (`docs/VMX68K.md` Section 3.5).
+    vm_fd0_path: Option<PathBuf>,
     hdd0_path: Option<PathBuf>,
     sram_path: PathBuf,
     /// Speed given by `--speed`; otherwise 10 MHz for the MC68000 and 25 MHz for the MC68030.
@@ -137,6 +142,7 @@ impl Default for AppArgs {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CGROM_PATH));
         let fd0_path = std::env::var_os("MSX68K_FD0").map(PathBuf::from);
         let fd1_path = std::env::var_os("MSX68K_FD1").map(PathBuf::from);
+        let vm_fd0_path = std::env::var_os("MSX68K_VM_FD0").map(PathBuf::from);
         let hdd0_path = std::env::var_os("MSX68K_HDD0").map(PathBuf::from);
         let sram_path = std::env::var_os("MSX68K_SRAM")
             .map(PathBuf::from)
@@ -152,6 +158,7 @@ impl Default for AppArgs {
             cgrom_path,
             fd0_path,
             fd1_path,
+            vm_fd0_path,
             hdd0_path,
             sram_path,
             speed_mode: None,
@@ -189,6 +196,11 @@ impl AppArgs {
                 "--fd1" => {
                     if let Some(p) = args.next() {
                         cfg.fd1_path = Some(PathBuf::from(p));
+                    }
+                }
+                "--vm-fd0" => {
+                    if let Some(p) = args.next() {
+                        cfg.vm_fd0_path = Some(PathBuf::from(p));
                     }
                 }
                 "--hdd0" => {
@@ -270,6 +282,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD/.DIM)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD/.DIM)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
+                           --vm-fd0 <path>      Floppy image that VMs opened by VMX68K.X boot from\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
                            --cpu <model>        CPU: 68000 | 68030 (default: 68000)\n  \
@@ -298,9 +311,23 @@ struct GpuWindowState {
     window: Arc<Window>,
 }
 
+/// A VM opened by VMX68K.X, running on a thread of its own and shown in its window.
+struct GuestVm {
+    id: u32,
+    /// The master VM's window record it shows in.
+    window: u32,
+    /// Stops and joins the VM's thread when dropped.
+    _thread: VmThread,
+    output: Arc<VmScreenOutput>,
+}
+
 struct Msx68kApp {
     args: AppArgs,
     vm: X68kVm,
+    /// ROMs for VMs opened by VMX68K.X, which are MC68000 machines.
+    guest_ipl: Vec<u8>,
+    guest_cgrom: Vec<u8>,
+    guest_vms: Vec<GuestVm>,
     gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
     last_title_update: Instant,
@@ -496,9 +523,14 @@ impl Msx68kApp {
         );
 
         let now = Instant::now();
+        // VMs opened by VMX68K.X are MC68000 machines whatever the master VM is.
+        let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         Self {
             args,
             vm,
+            guest_ipl,
+            guest_cgrom: cgrom,
+            guest_vms: Vec::new(),
             gdb,
             gpu: None,
             last_title_update: now,
@@ -603,14 +635,41 @@ impl Msx68kApp {
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
+            // Each VM's screen goes where its window shows, clipped to the visible parts.
+            let placed: Vec<_> = self
+                .guest_vms
+                .iter()
+                .filter_map(|guest| {
+                    let layout = self.vm.bus.vm_window_layout(guest.window)?;
+                    let visible: Vec<ScreenRect> = layout
+                        .visible
+                        .iter()
+                        .map(|&(left, top, right, bottom)| ScreenRect {
+                            left,
+                            top,
+                            right,
+                            bottom,
+                        })
+                        .collect();
+                    Some((guest, layout.left, layout.top, visible))
+                })
+                .collect();
+            let layers: Vec<VmLayer> = placed
+                .iter()
+                .map(|(guest, left, top, visible)| VmLayer {
+                    output: &guest.output,
+                    left: *left,
+                    top: *top,
+                    visible,
+                })
+                .collect();
             gpu.compositor.render_bus_to_surface_view(
                 &self.vm.bus,
                 &gpu.presenter,
                 &view,
                 gpu.surface_config.width,
                 gpu.surface_config.height,
-                // VM windows join once VMX68K.SX reports them.
-                &[],
+                &layers,
             );
 
             frame.present();
@@ -674,6 +733,58 @@ impl Msx68kApp {
                 })
             }
         }
+    }
+
+    /// Starts and stops the VMs that VMX68K.X opened and closed.
+    fn update_guest_vms(&mut self) {
+        for event in self.vm.bus.take_vm_events() {
+            match event {
+                VmEvent::Opened { id, window } => {
+                    if let Some(guest) = self.start_guest_vm(id, window) {
+                        self.guest_vms.push(guest);
+                    }
+                }
+                VmEvent::Closed { id } => self.guest_vms.retain(|guest| guest.id != id),
+            }
+        }
+    }
+
+    fn start_guest_vm(&self, id: u32, window: u32) -> Option<GuestVm> {
+        let gpu = self.gpu.as_ref()?;
+        let mut vm = X68kVm::new(
+            VmConfig::app_vm()
+                .with_speed_mode(CpuSpeedMode::Mhz10)
+                .with_ram_mb(4),
+        );
+        vm.bus.load_cgrom(&self.guest_cgrom);
+        vm.bus.load_ipl_rom(&self.guest_ipl);
+        if let Some(path) = &self.args.vm_fd0_path {
+            // Write-protected, and only ever a copy: the image on the host stays as it is.
+            match std::fs::read(path) {
+                Ok(data) => {
+                    if !vm.bus.insert_floppy(0, data, true) {
+                        eprintln!("Unsupported floppy image size for VMs: {}", path.display());
+                    }
+                }
+                Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
+            }
+        }
+        if let Err(e) = vm.reset() {
+            eprintln!("VM {id} failed to reset: {e:?}");
+            return None;
+        }
+        let mut screen = VmScreen::new(gpu.compositor.device(), gpu.compositor.queue());
+        let output = screen.output();
+        let thread = VmThread::spawn_with_vblank(vm, Pace::RealTime, move |vm| {
+            screen.present(&mut vm.bus);
+        });
+        println!("Started VM {id} for window ${window:06X}");
+        Some(GuestVm {
+            id,
+            window,
+            _thread: thread,
+            output,
+        })
     }
 
     fn step_vm_one_frame(&mut self) {
@@ -794,6 +905,8 @@ impl ApplicationHandler for Msx68kApp {
         match event {
             WindowEvent::CloseRequested => {
                 self.flush_persistent_storage(true);
+                // VM threads present to the GPU, so they stop before it goes.
+                self.guest_vms.clear();
                 if let Some(gpu) = &self.gpu {
                     let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
                 }
@@ -974,6 +1087,7 @@ impl ApplicationHandler for Msx68kApp {
             // Run and present here rather than on redraw requests, which a compositor may withhold
             // indefinitely, for example while the window is covered.
             self.step_vm_one_frame();
+            self.update_guest_vms();
             self.render_frame();
         }
         // A GDB client waits for each reply, so keep round trips well below a frame.
@@ -989,6 +1103,8 @@ impl ApplicationHandler for Msx68kApp {
 impl Drop for Msx68kApp {
     fn drop(&mut self) {
         self.flush_persistent_storage(true);
+        // VM threads present to the GPU at every vertical blank, so they stop before it goes.
+        self.guest_vms.clear();
         if let Some(gpu) = &self.gpu {
             let _ = gpu.compositor.device().poll(wgpu::Maintain::Wait);
         }

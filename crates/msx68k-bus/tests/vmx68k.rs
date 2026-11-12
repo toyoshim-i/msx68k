@@ -1,10 +1,9 @@
-//! VMX68K.X opens a window and asks the host for a VM to show in it (`docs/VMX68K.md`
+//! VMX68K.X, in `\X68` of the built disk, opens a window and asks the host for a VM to show in it (`docs/VMX68K.md`
 //! Section 3.5).
 
 use std::path::Path;
 
-use msx68k_bus::guest_build::build_guest_x_executable;
-use msx68k_bus::scsi::{build_bootable_sxwin_scsi_hdd_with_files, ExtractedFile};
+use msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd;
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
 
 /// Hard disk icon on the desktop of the test disk, which opens `\X68`.
@@ -32,25 +31,6 @@ fn boot() -> Option<X68kVm> {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
 
-    let mut x68_dir = [b' '; 8];
-    x68_dir[..3].copy_from_slice(b"X68");
-    let mut raw_name = [b' '; 8];
-    raw_name[..6].copy_from_slice(b"VMX68K");
-    let vmx68k = ExtractedFile {
-        path_dirs: vec![(x68_dir, [b' '; 3], [0u8; 10])],
-        raw_name,
-        raw_ext: *b"X  ",
-        raw_name2: [0u8; 10],
-        attr: 0x20,
-        time: 0x6000,
-        date: 0x5821,
-        data: build_guest_x_executable(
-            &root().join("guest/vmx68k/vmx68k.s"),
-            &[&root().join("guest/include")],
-        )
-        .expect("VMX68K.X must build"),
-    };
-
     let mut vm = X68kVm::new(
         VmConfig::master_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
@@ -60,7 +40,7 @@ fn boot() -> Option<X68kVm> {
     vm.bus.load_ipl_rom(&ipl);
     assert!(vm.bus.insert_scsi_hdd(
         0,
-        build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, vec![vmx68k])
+        build_bootable_sxwin_scsi_hdd(&human, &sx_refs, 32)
     ));
     vm.bus.set_boot_from_scsi(true);
     vm.reset().unwrap();
