@@ -29,6 +29,7 @@ fn scancodes(text: &str) -> Vec<(u8, bool)> {
             }
             ' ' => (0x35, false),
             '.' => (0x32, false),
+            ':' => (0x28, false),
             '>' => (0x32, true),
             '\\' => (0x0E, false),
             '\n' => (0x1D, false),
@@ -121,14 +122,18 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     master.bus.set_boot_from_scsi(true);
     master.reset().unwrap();
     master.run_steps(30_000_000);
+    // B:, the master's first floppy drive, holds a disk for the VM to read, put in after the
+    // master booted from its HDD rather than from it.
+    assert!(master.bus.insert_floppy(0, human.clone(), true));
 
     // \X68 lists VMX68K.X after HDフォーマット.X.
     click(&mut master, (22, 340), 2, 3_000_000);
     click(&mut master, (343, 175), 2, 8_000_000);
     let events = master.bus.take_vm_events();
-    let [VmEvent::Opened { id, window, .. }] = events[..] else {
+    let [VmEvent::Opened { id, window, drives, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
+    assert_eq!(drives, 3, "the master has A: and the floppy drives B: and C:");
     // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
     click(&mut master, (22, 340), 2, 3_000_000);
     assert_ne!(master.bus.active_window(), Some(window));
@@ -143,7 +148,7 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     );
     vm.bus.load_cgrom(&cgrom);
     vm.bus.load_ipl_rom(&ipl);
-    vm.bus.install_remote_boot(RemoteFs::new(bridge, vec![1]));
+    vm.bus.install_remote_boot(RemoteFs::new(bridge, (1..=drives).collect()));
     vm.reset().unwrap();
 
     // The VM's thread waits while the master serves it, so the prompt is looked for there.
@@ -189,6 +194,22 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
         wait_for_disk(&mut master, |v| v.read_file(&dir, &short_name("bye", "txt")).is_some()
             && v.read_file(&dir, &short_name("hi", "txt")).is_none()),
         "REN must rename it on the master's drive"
+    );
+
+    // B: is the master's B:: a listing of its floppy, by its volume name and files (HUMAN.SYS
+    // is a system file DIR leaves out), written to A:.
+    type_text(&thread, &mut master, "dir b: >dirb.txt\n");
+    assert!(
+        wait_for_disk(&mut master, |v| v
+            .read_file(&[], &short_name("dirb", "txt"))
+            .is_some_and(|listing| listing.windows(15).any(|w| w == b"Human68k_Ver3  ")
+                && listing.windows(7).any(|w| w == b"COMMAND"))),
+        "DIR B: must list the master's floppy: {:?}",
+        {
+            let mut image = master.bus.scsi_hdd_data(0).unwrap().to_vec();
+            let file = HumanVolume::open(&mut image).unwrap().read_file(&[], &short_name("dirb", "txt"));
+            file.map(|f| String::from_utf8_lossy(&f).into_owned())
+        }
     );
 
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.

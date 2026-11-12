@@ -169,8 +169,9 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   a boot ROM at `$FC0000` laid out like the internal SCSI ROM (IPL boot handle, install handle
   at the boot routine - 16, `'Human68k'`), and SRAM boots from it. The IPL boot routine reads
   `HUMAN.SYS` from the master's `A:` through the bridge, puts its text and data at `$6800`,
-  clears its bss, and jumps there. The install routine builds a remote device (`$2000`) with
-  one unit, the master's `A:`. Its initialise command writes `$00` over its command code,
+  clears its bss, and jumps there. The install routine builds a remote device (`$2000`) with a
+  unit for each of the master's drives from `A:`, which VMX68K.X counts with `_GETDPB` when it
+  starts and passes to `VmOpen` in `D3.L`, so the VM's letters are the master's. Its initialise command writes `$00` over its command code,
   since Human68k reuses the request to initialise DISK2HD without setting it, which `$40`
   would send past DISK2HD's jump table. CHDIR, FILES, NFILES, OPEN
   for reading, READ, SEEK, CLOSE, FILEDATE, DSKFRE, DRVCTRL, GETDPB, FFLUSH, and MEDIACHECK
@@ -184,7 +185,8 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   `\VMX68K\CONFIG.SYS`, or, when the master has none, a CONFIG.SYS the host serves from
   memory (`FILES`, `BUFFERS`, `LASTDRIVE` only). Human68k 3.02 boots this way, runs the
   master's `AUTOEXEC.BAT`, and reaches `A>`; `MD`, `ECHO` into a file, and `REN` typed in it
-  land on the master's drive (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
+  land on the master's drive, and `DIR B:` lists the floppy in the master's `B:`
+  (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
   The app starts VMs this way unless `--vm-fd0` names a floppy image.
 - The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
   Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests

@@ -764,8 +764,8 @@ impl Msx68kApp {
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
             match event {
-                VmEvent::Opened { id, window, .. } => {
-                    if let Some(guest) = self.start_guest_vm(id, window) {
+                VmEvent::Opened { id, window, drives, .. } => {
+                    if let Some(guest) = self.start_guest_vm(id, window, drives) {
                         self.guest_vms.push(guest);
                     }
                 }
@@ -782,7 +782,7 @@ impl Msx68kApp {
         self.guest_vms.clear();
     }
 
-    fn start_guest_vm(&mut self, id: u32, window: u32) -> Option<GuestVm> {
+    fn start_guest_vm(&mut self, id: u32, window: u32, drives: u32) -> Option<GuestVm> {
         let gpu = self.gpu.as_ref()?;
         let mut vm = X68kVm::new(
             VmConfig::app_vm()
@@ -802,11 +802,13 @@ impl Msx68kApp {
                 Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
             }
         } else {
-            // Drive bypass mode: the VM boots from the master's A:, bridged at the file level
-            // through VMX68K.X. The floppy image mode for drive 0 comes with the VM's settings.
+            // Drive bypass mode: the VM sees the master's drives under the same letters, bridged
+            // at the file level through VMX68K.X, and boots from A:. The floppy image mode for
+            // drive 0 comes with the VM's settings.
             let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
+            let drives = (1..=drives.max(1)).collect();
             vm.bus
-                .install_remote_boot(msx68k_bus::remote_fs::RemoteFs::new(bridge, vec![1]));
+                .install_remote_boot(msx68k_bus::remote_fs::RemoteFs::new(bridge, drives));
             self.vm.bus.attach_vm_bridge(id, requests);
         }
         if let Err(e) = vm.reset() {

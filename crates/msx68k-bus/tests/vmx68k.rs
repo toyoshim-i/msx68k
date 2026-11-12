@@ -108,7 +108,7 @@ fn vmx68k_opens_a_vm_in_its_window() {
     screenshot(&vm, "vmx68k");
 
     let events = vm.bus.take_vm_events();
-    let [VmEvent::Opened { id: 1, window, drive0_bytes: 0 }] = events[..] else {
+    let [VmEvent::Opened { id: 1, window, drive0_bytes: 0, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
     // The content is the VM's 768x512 screen at the window's bounds. SX-Window's icon panel

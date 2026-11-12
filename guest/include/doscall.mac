@@ -74,3 +74,4 @@ _DSKFRE		.equ	$FF36
 _RENAME		.equ	$FF86
 _FILEDATE	.equ	$FF87
 _NEWFILE	.equ	$FF8B
+_GETDPB		.equ	$FF32

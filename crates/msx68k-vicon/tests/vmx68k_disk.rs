@@ -82,7 +82,7 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     click(&mut master, (22, 340), 2, 3_000_000);
     click(&mut master, (343, 175), 2, 8_000_000);
     let events = master.bus.take_vm_events();
-    let [VmEvent::Opened { id, window, drive0_bytes }] = events[..] else {
+    let [VmEvent::Opened { id, window, drive0_bytes, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
     assert_eq!(drive0_bytes as usize, human.len(), "VMX68K.X found the image's size");

@@ -182,8 +182,9 @@ impl RemoteDisk {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmEvent {
     /// A VM was asked for, to be shown in the window at `window`, with a disk image of
-    /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it.
-    Opened { id: u32, window: u32, drive0_bytes: u32 },
+    /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, and the
+    /// master's `drives`, from A:, that it can see in bypass mode.
+    Opened { id: u32, window: u32, drive0_bytes: u32, drives: u32 },
     /// The VM was closed.
     Closed { id: u32 },
 }
@@ -281,7 +282,7 @@ impl X68kBus {
     }
 
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
-    /// VMX68K.SX serves, and returns its ID in `D0.L`.
+    /// VMX68K.SX serves and `D3.L` of the master's drives from A:, and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
@@ -292,6 +293,7 @@ impl X68kBus {
             id,
             window,
             drive0_bytes: state.d[2],
+            drives: state.d[3].min(26),
         });
         state.d[0] = id;
         TrapResult::Handled { extra_cycles: 0 }
@@ -474,6 +476,7 @@ mod tests {
         let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
         let mut state = CpuState::default();
         state.d[2] = 0;
+        state.d[3] = 0;
         state.d[1] = 0x0012_3456;
         bus.hypercall_vm_open(&mut state);
         assert_eq!(state.d[0], 1);
@@ -494,8 +497,8 @@ mod tests {
         assert_eq!(
             bus.take_vm_events(),
             [
-                VmEvent::Opened { id: 1, window: 0x0012_3456, drive0_bytes: 0 },
-                VmEvent::Opened { id: 2, window: 0x0012_3500, drive0_bytes: 0 },
+                VmEvent::Opened { id: 1, window: 0x0012_3456, drive0_bytes: 0, drives: 0 },
+                VmEvent::Opened { id: 2, window: 0x0012_3500, drive0_bytes: 0, drives: 0 },
                 VmEvent::Closed { id: 1 },
             ]
         );

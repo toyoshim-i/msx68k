@@ -76,6 +76,21 @@ gui_start:
 	move.l	d0, (a1)
 no_drive0:
 
+	* Count the master's drives from A:, which a VM in bypass mode sees as its own
+	moveq.l	#0, d3
+count_drives:
+	addq.w	#1, d3
+	cmpi.w	#26, d3
+	bhi.s	drives_counted
+	pea	disk_buffer(pc)
+	move.w	d3, -(sp)
+	DOS	_GETDPB
+	addq.l	#6, sp
+	tst.l	d0
+	bpl.s	count_drives
+drives_counted:
+	subq.w	#1, d3
+
 	* Ask the host for a VM; without msx68k there is none, and the task ends
 	moveq.l	#MSX68K_FN_VM_OPEN, d0
 	move.l	win_ptr(pc), d1
