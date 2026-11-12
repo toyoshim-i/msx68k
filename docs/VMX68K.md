@@ -40,7 +40,7 @@ run in a VM of their own from the start.
   dialog saying the settings take effect when the VM restarts and asking whether to restart now
   or later by hand.
   - **Configuration**: one icon whose menu has, in order: "Configuration..." to open the
-    configuration dialog; the current CPU's name (such as 68000), as a heading; that CPU's
+    configuration dialog; the current CPU's name (such as 68000), a submenu of that CPU's
     speeds, applied and saved when chosen; and, in custom mode only, "Boot", a submenu of the
     boot devices kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets them), written
     and saved when chosen and taking effect at the next reset, as on the real machine. In bypass
