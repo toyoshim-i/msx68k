@@ -16,29 +16,30 @@ pub const CONFIGURATION_ICON_ID: u16 = 1;
 const SPEEDS: [&[u8]; 4] = [b"10MHz", b"16MHz", b"24MHz", b"\x8D\xC5\x8D\x82\x91\xAC"];
 
 /// The Configuration icon (see [`plot_image`]), in the style of SX-Window's icons: a picture
-/// in a rectangular recess, black at its top and left and white at its bottom and right, over
-/// dark gray, here a white gear with its shadow to the bottom right.
+/// in a rectangular recess, 3:2 as the Filer's and the desktop panel's icons are, black at its
+/// top and left and white at its bottom and right, over dark gray; here a white gear with its
+/// shadow to the bottom right.
 const CONFIGURATION_ICON: [&str; 20] = [
-    "####################",
-    "#++++++++++++++++++o",
-    "#++++++++++++++++++o",
-    "#+++++++ooo++++++++o",
-    "#+++oo++ooo#+oo++++o",
-    "#+++ooooooooooo#+++o",
-    "#++++ooooooooo##+++o",
-    "#++++ooo###ooo#++++o",
-    "#++oooo##+++oooo+++o",
-    "#++oooo#++++oooo#++o",
-    "#++oooo#++++oooo#++o",
-    "#+++#ooo+++ooo###++o",
-    "#++++ooooooooo#++++o",
-    "#+++ooooooooooo++++o",
-    "#+++oo##ooo##oo#+++o",
-    "#++++##+ooo#++##+++o",
-    "#++++++++###+++++++o",
-    "#++++++++++++++++++o",
-    "#++++++++++++++++++o",
-    "#ooooooooooooooooooo",
+    "##############################",
+    "#++++++++++++++++++++++++++++o",
+    "#++++++++++++++++++++++++++++o",
+    "#++++++++++++ooo+++++++++++++o",
+    "#++++++++oo++ooo#+oo+++++++++o",
+    "#++++++++ooooooooooo#++++++++o",
+    "#+++++++++ooooooooo##++++++++o",
+    "#+++++++++ooo###ooo#+++++++++o",
+    "#+++++++oooo##+++oooo++++++++o",
+    "#+++++++oooo#++++oooo#+++++++o",
+    "#+++++++oooo#++++oooo#+++++++o",
+    "#++++++++#ooo+++ooo###+++++++o",
+    "#+++++++++ooooooooo#+++++++++o",
+    "#++++++++ooooooooooo+++++++++o",
+    "#++++++++oo##ooo##oo#++++++++o",
+    "#+++++++++##+ooo#++##++++++++o",
+    "#+++++++++++++###++++++++++++o",
+    "#++++++++++++++++++++++++++++o",
+    "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
 ];
 
 /// Encodes a picture as a plot image, which `GMPlotImg` draws with a plot mode of two pages:
@@ -127,7 +128,7 @@ mod tests {
         let speeds = library.get(b"MENU", SPEED_MENU_ID).unwrap();
         assert_eq!(&speeds.data[18..20], &[0, 4]);
         let icon = library.get(b"PLOT", CONFIGURATION_ICON_ID).unwrap();
-        assert_eq!(&icon.data[..8], &[0, 0, 0, 0, 0, 20, 0, 20]);
+        assert_eq!(&icon.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
         assert_eq!(icon.data.len(), 8 + 3 * 20 * 4, "two planes and the mask");
     }
 

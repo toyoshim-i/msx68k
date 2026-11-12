@@ -35,7 +35,7 @@ run in a VM of their own from the start.
   file, and opening the file boots a VM with the same settings.
 - **Settings menus.** VMX68K.SX's window has a bar of icons above the VM's screen, pictures
   rather than words, as in `シャーペン.X`, each in the style of SX-Window's icons: a picture in
-  a rectangular recess. The right button on one pops up its menu, as SX-Window's menus follow
+  a rectangular recess, 3:2 wide. The right button on one pops up its menu, as SX-Window's menus follow
   the right button (`MNSelect`). Menus are in Japanese, as SX-Window is. The icons and the
   submenus are resources of `VMX68K.LB`, next to `VMX68K.X`, since the Menu Man takes
   submenus only as `'MENU'` resources of an open library. There is no

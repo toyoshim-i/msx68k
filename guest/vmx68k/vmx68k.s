@@ -669,7 +669,7 @@ bar_line_rect:
 screen_rect:
 	.dc.w	0, BAR_HEIGHT, 768, BAR_HEIGHT+512
 config_icon_rect:
-	.dc.w	4, 2, 24, 22
+	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
 
 win_ptr:
 	.dc.l	0
