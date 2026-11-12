@@ -109,9 +109,6 @@ fn test_scsi_hdd_generation_and_partition_table() {
 
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
-    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
-    let _ = std::fs::write(&hds_path, &hdd_image);
-
     // Diagnostic: inspect directory structure and FAT on generated hdd_image
     {
         let part_offset = 32 * 1024;
@@ -668,9 +665,6 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
     };
     let hdd_image =
         build_bootable_sxwin_scsi_hdd_with_files(&human_data, &sx_refs, 32, vec![sxmode]);
-
-    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
-    let _ = std::fs::write(&hds_path, &hdd_image);
 
     let mut vm = X68kVm::new(
         VmConfig::master_sx()
@@ -1685,9 +1679,6 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx_loaded.iter().map(|(n, b)| (*n, b.as_slice())).collect();
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
-
-    let hds_path = workspace_root.join("disks/SXWIN31.HDS");
-    let _ = std::fs::write(&hds_path, &hdd_image);
 
     let mut vm = X68kVm::new(
         VmConfig::master_sx()
