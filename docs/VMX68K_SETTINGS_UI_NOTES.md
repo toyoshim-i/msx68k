@@ -129,51 +129,59 @@ official SX-Window programming manuals.
 - Sharp's installer (`ｲﾝｽﾄｰﾗ.X`, "アイコン登録") registers applications there, as `*.pen` →
   `ｼｬｰﾍﾟﾝ.x %` and `*.ins` → `ｲﾝｽﾄｰﾗ.x`.
 
-### 1.6 State of VMX68K
-- VMX68K.X (`guest/vmx68k/vmx68k.s`) opens a 768x512 window, `VmOpen`s, waits for events with
-  `E_USER1` in its mask, and serves bridge requests (`serve_disk`, 16 kinds). The host wakes it
-  with `E_USER1` (`X68kBus::wake_vm_windows`).
-- The host places the VM's screen at the window content's left, below the icon bar whose height
-  `VmOpen` takes in `D4.W` (`vm_window_layout`), and the app starts VMs at 10 MHz with 4 MB, in
-  shared mode unless `--vm-fd0` is given.
-- **Step 1 is built** (2026-11-12): the 24-line icon bar with the Configuration icon (a gear,
-  `'PLOT'` 1 of `VMX68K.LB`), its menu on the right button ("設定..." inactive until the dialog
-  exists, and "68000" with the speed submenu, `'MENU'` 1), and `VmSpeed` (8), which the app
-  applies with `VmThread::post`. The speed is not saved yet: that comes with the settings
-  library. `VMX68K.LB` is written by the HDD builder and `install_vmx68k`. A VM thread in Burst
-  now runs flat out until each frame is due, as the primary does. Tested in
-  `crates/msx68k-bus/tests/vmx68k.rs`.
-
+### 1.6 State of VMX68K (2026-11-13)
+- **VMX68K.X** (`guest/vmx68k/vmx68k.s`) is an R-type module, its state in the task's work area
+  (A5), so any number of VMs run, one per window. It opens a window with a 24-line icon bar
+  over the VM's screen (`VmOpen` `D4.W`), serves the VM's bridge requests when the host sends
+  `E_USER1`, and reads the VM's state with `VmStatus` (9): the access lamp, the screen's size,
+  which the window follows (`WMSize`), SRAM to save, and a redraw after the primary's screen
+  grew.
+- **Menu** (right button on the gear icon): 設定..., and the CPU's name with its speeds,
+  applied at once with `VmSpeed` (8) and saved.
+- **Setups** are `*.V68` libraries (`'V68S'` speed, CPU, RAM; `'SRAM'`; `'V68D'` drives),
+  opened from the Filer through `\SHELL\ICON.LB`, or `A:\VMX68K\DEFAULT.V68`; SRAM is saved as
+  it changes (`VmSram` 10).
+- **Configuration dialog** (4a): CPU 68000 or 68030, memory 1 to 12 MB, and the ドライブ row,
+  共有 or カスタム with 詳細... (4b), opening ドライブの詳細: 1 to 8 drives, each ファイル, 共有, or
+  パススルー with a path or drive letter. 設定 saves the setup and asks whether to restart the VM
+  now (`VmRestart` 11).
+- **The VM** starts with the setup's CPU (68030 from `IPLROM30.DAT`), RAM, speed, and SRAM, in
+  shared mode: its drives are the primary's, under the same letters, and its own floppy drives
+  get no letters. Custom mode's drives are saved but not given to the VM yet (4b-1, in
+  progress: a drive table for `VmOpen`/`VmRestart` in `A2.L`, image files on the VM's FDD and
+  SCSI read and written through the primary).
+- Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
+  VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
 ---
 
 ## 2. Proposed Implementation (not decided)
 
 ### 2.1 Order
-1. ~~Icon bar and the Configuration menu with the CPU speed submenu, applied at once.~~ Done
-   (Section 1.6).
-2. ~~The access lamp.~~ Done (2026-11-13). The floppy icons wait for custom mode, which the
-   settings library and dialog bring, as they show only there.
-3. The per-VM settings library (`.LB`) with its SRAM, written back whenever it changes, and
-   `A:\VMX68K\DEFAULT.V68` without one given; saving what is applied at once starts here.
-   Setups are `*.V68`, opened with VMX68K.SX by an `'ICN#'` entry in `\SHELL\ICON.LB`
-   (Section 1.7). Decided and built 2026-11-13 ([VMX68K.md](VMX68K.md) Section 2, "A settings
-   file per VM").
-4. In this order (decided 2026-11-13): 4a the dialog with the CPU kind and memory, saving on
-   close and the restart question (done 2026-11-13); 4b drive assignment, shared and custom mode, built in the order ファイル, 共有, パススルー; mock: [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png); 4c the boot
-   device submenu and the floppy icons, which need custom mode; 4d the menu to make a new
-   setup (moved from step 3, as it needs a path input). The configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
-   restart question (`DMError` `D_YESNO`).
+1. ~~Icon bar and the Configuration menu with the CPU speed submenu, applied at once.~~ Done.
+2. ~~The access lamp.~~ Done. The floppy icons wait for custom mode, as they show only there.
+3. ~~The per-VM setup (`*.V68`) with its SRAM, and `A:\VMX68K\DEFAULT.V68`.~~ Done
+   ([VMX68K.md](VMX68K.md) Section 2, "A settings file per VM").
+4. In this order (decided 2026-11-13):
+   - 4a ~~the configuration dialog with the CPU and memory, saving on 設定 and the restart
+     question.~~ Done.
+   - 4b drive assignment, shared and custom mode, in the order ファイル, 共有, パススルー (mock:
+     [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png)). The dialogs
+     are done; 4b-1 (image files given to the VM) is in progress, then 4b-2 (共有 drives) and
+     4b-3 (パススルー).
+   - 4c the boot device submenu and the floppy icons, which need custom mode.
+   - 4d the menu to make a new setup, which chooses the boot device it writes in the setup's
+     SRAM.
 
-### 2.2 Pieces
-- **`VMX68K.LB`** (built, `crates/msx68k-bus/src/vmx68k_library.rs`) would later also hold the
-  boot device submenu and the `'DLOG'`/`'DITL'` of the configuration dialog.
-- **Icons** of the later steps as more `'PLOT'` plot images in `VMX68K.LB` (Section 1.5).
-- **New application functions** (after `VmSpeed` 8): `VmStatus`, the VM's CPU and speed, lamp
-  states, and floppy contents, read by VMX68K.X when the host wakes it with `E_USER1` after a
-  lamp or disk change.
-- **Lamps**: the FDC finishes commands at once, so a lamp would stay lit for a short while
-  (about 0.2 s) after an access; the access lamp would light for floppy, SCSI, and bridge
-  requests.
+### 2.2 Pieces Still to Build
+- **Custom drives on the VM** (4b-1): VMX68K.X opens each ファイル drive's image and passes a
+  table of handles and sizes; floppy-sized images go on the VM's FDD (units in row order, four
+  units for three or more), read and written with the handle requests; HDD images on its SCSI,
+  which needs SCSI reads and writes through the bridge. Custom mode boots as the VM's SRAM says.
+- **共有 drives** (4b-2) as remote drives of the VM, after its floppy and SCSI drives.
+- **パススルー** (4b-3): a primary floppy drive handed to the VM sector by sector, write-
+  protected on the primary meanwhile.
+- **Floppy icons and the boot submenu** (4c), more `'PLOT'` icons in `VMX68K.LB`.
+- **New setup** (4d): a path input and the boot device to write in the new setup's SRAM.
 
 ### 2.3 Still Open
 - The resources in a VM's `.LB` and their layout, and how double-clicking one opens VMX68K.SX
