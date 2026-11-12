@@ -52,9 +52,13 @@ run in a VM of their own from the start.
     floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
     HDD image goes on the VM's SCSI and is the VM's alone. Custom mode keeps the machine's own
     limits: two or four floppy drives, and the drive letters Human68k gives them.
-  - **Floppy drives**: an icon for each floppy drive shows whether a disk is in and has an
-    access lamp. Clicking it ejects the disk, and dropping an image on it from the Filer swaps
-    it in, both at once and without a restart.
+  - **Floppy drives**: in custom mode, an icon for each floppy drive shows whether a disk is in
+    and has an access lamp. Clicking it ejects the disk, and dropping an image on it from the
+    Filer swaps it in, both at once and without a restart. Bypass mode, which leaves the VM's
+    floppy drives unused, shows none.
+  - **Access lamp**: one lamp lights whenever the VM reaches any of its drives, floppy, SCSI, or
+    remote, as the front panel's lamp of the real machine does, so that access shows in bypass
+    mode too.
 - **A settings file per VM.** Each VM setup is one resource library (`.LB`, as `MSX68K.LB`)
   holding its settings and its own SRAM, kept apart from the master's.
 - **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.
