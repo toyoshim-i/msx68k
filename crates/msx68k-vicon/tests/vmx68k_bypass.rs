@@ -178,6 +178,16 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     }
     // Its remote drives' requests count for the access lamp.
     assert!(accesses.load(Ordering::Relaxed) > 0, "the remote drive's requests must count");
+    // The VM's own floppy drives get no letters after the master's: D: is no drive.
+    type_text(&thread, &mut master, "d:\n");
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        master.run_steps(200_000);
+    }
+    let lines = thread_screen.lock().unwrap().clone();
+    let prompts: Vec<_> = lines.iter().filter(|l| l.ends_with('>')).collect();
+    assert_eq!(prompts.last().map(|l| l.as_str()), Some("A>"), "D: must not exist: {lines:#?}");
+
     // What the VM writes goes to the master's drive, through the master's Human68k, which keeps
     // names as typed.
     let dir = [short_name("vmtest", "")];

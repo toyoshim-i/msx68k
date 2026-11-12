@@ -105,8 +105,13 @@ impl Namests {
 }
 
 impl X68kBus {
-    /// Makes the VM boot from the remote drive `fs.drives[0]` and gives it the drives.
+    /// Makes the VM boot from the remote drive `fs.drives[0]` and gives it the drives. The VM's
+    /// own floppy drives, which it does not use so, are disconnected, so that its Human68k gives
+    /// them no letters after the remote drives'.
     pub fn install_remote_boot(&mut self, fs: RemoteFs) {
+        for drive in &mut self.fdc.drives {
+            *drive = crate::fdc::FloppyDrive::new(false);
+        }
         let rom = (ROM_BASE - 0x00F0_0000) as usize;
         let [hi, lo] = HYPERCALL_OPCODE.to_be_bytes();
         let mut image = Vec::new();
