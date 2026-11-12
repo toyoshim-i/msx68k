@@ -212,10 +212,6 @@ impl X68kVm {
                     now >= deadline
                 }
             }
-            FrameBudget::FastForward { deadline } => {
-                self.bus.advance_peripherals(if stopped { 64 } else { 8 });
-                frame.instructions.is_multiple_of(BURST_SYNC_INSTRUCTIONS) && Instant::now() >= deadline
-            }
             FrameBudget::Cycles(target) if running_burst => {
                 self.bus.advance_peripherals(if stopped { 64 } else { 8 });
                 frame.instructions >= target as usize
@@ -576,22 +572,20 @@ mod tests {
     }
 
     #[test]
-    fn timed_budgets_end_at_the_deadline_and_still_honor_breakpoints() {
-        for make in [
-            |deadline| FrameBudget::RealTime { deadline },
-            |deadline| FrameBudget::FastForward { deadline },
-        ] {
-            let mut vm = loop_vm(CpuSpeedMode::Burst);
-            let deadline = Instant::now() + Duration::from_millis(5);
-            assert_eq!(vm.run_debug_frame(make(deadline)), None);
-            assert!(Instant::now() >= deadline);
-            assert!(vm.cpu_state.d[0] > 0);
+    fn real_time_budget_ends_at_the_deadline_and_still_honors_breakpoints() {
+        let mut vm = loop_vm(CpuSpeedMode::Burst);
+        let deadline = Instant::now() + Duration::from_millis(5);
+        assert_eq!(vm.run_debug_frame(FrameBudget::RealTime { deadline }), None);
+        assert!(Instant::now() >= deadline);
+        assert!(vm.cpu_state.d[0] > 0);
 
-            let mut vm = loop_vm(CpuSpeedMode::Burst);
-            vm.debug.add_breakpoint(PROGRAM_PC + 2);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            assert_eq!(vm.run_debug_frame(make(deadline)), Some(DebugStop::Breakpoint));
-        }
+        let mut vm = loop_vm(CpuSpeedMode::Burst);
+        vm.debug.add_breakpoint(PROGRAM_PC + 2);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            vm.run_debug_frame(FrameBudget::RealTime { deadline }),
+            Some(DebugStop::Breakpoint)
+        );
     }
 
     #[test]

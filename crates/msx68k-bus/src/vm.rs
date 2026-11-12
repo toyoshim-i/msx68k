@@ -265,8 +265,6 @@ impl HostClock {
 pub enum FrameBudget {
     /// Burst flat out until `deadline`, with peripherals following host time.
     RealTime { deadline: Instant },
-    /// Burst flat out until `deadline`, with peripherals on virtual time to skip guest timer waits.
-    FastForward { deadline: Instant },
     /// A CPU clock cycle target ([`X68kVm::run_cycles`]).
     Cycles(u32),
 }
@@ -615,32 +613,10 @@ impl X68kVm {
         self.cpu_state = core.into_state();
     }
 
-    /// Executes Burst code as fast as the host allows until `deadline`, with peripherals on
-    /// virtual time so boot-time timer waits finish quickly.
-    pub fn run_burst_fast_forward(&mut self, deadline: Instant) {
-        with_burst_policy!(self, run_burst_fast_forward_with(deadline))
-    }
-
-    fn run_burst_fast_forward_with<P: CpuPolicy>(&mut self, deadline: Instant) {
-        let state = std::mem::take(&mut self.cpu_state);
-        let mut core = CpuCore::<P>::from_state(state);
-        let mut handler = BusTrapHandler;
-        while Instant::now() < deadline {
-            for _ in 0..BURST_SYNC_INSTRUCTIONS {
-                core.state.set_ipl(self.bus.highest_pending_ipl());
-                let out = core.step(&mut self.bus, &mut handler);
-                self.bus.advance_peripherals(if out.stopped { 64 } else { 8 });
-            }
-        }
-        core.state.set_ipl(self.bus.highest_pending_ipl());
-        self.cpu_state = core.into_state();
-    }
-
     /// Executes one host frame of guest code as described by `budget`.
     pub fn run_frame(&mut self, budget: FrameBudget) {
         match budget {
             FrameBudget::RealTime { deadline } => self.run_burst_real_time(deadline),
-            FrameBudget::FastForward { deadline } => self.run_burst_fast_forward(deadline),
             FrameBudget::Cycles(cycles) => {
                 self.run_cycles(cycles);
             }

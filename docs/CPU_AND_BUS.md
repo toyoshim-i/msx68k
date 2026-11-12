@@ -105,8 +105,8 @@ self.pages[page] as u32
 ### 3.5 Burst Execution and Guest Time
 In the desktop app, Burst has no instruction limit. Each host frame runs guest code on the main thread until a deadline just before rendering, so throughput is whatever the host can deliver.
 
-- **`FrameBudget::RealTime`** (SX-Window desktop): every 256 instructions, peripherals advance by the host time that has passed, so guest timers keep their real rates at any CPU speed. Time spent rendering is made up gradually, at most 2,000 ticks per check, and a backlog above 100 ms is dropped.
-- **`FrameBudget::FastForward`** (boot, before the desktop polls the mouse): peripherals advance a fixed 8 ticks per instruction, so timer waits finish faster than real time.
+- **`FrameBudget::RealTime`**, from power-on: every 256 instructions, peripherals advance by the host time that has passed, so guest timers keep their real rates at any CPU speed. Time spent rendering is made up gradually, at most 2,000 ticks per check, and a backlog above 100 ms is dropped.
+- Burst speeds up the CPU only. Peripherals never run ahead of host time, not even to skip boot-time timer waits: a title screen is meant to stay up for its time, and a fast-forward that ended when the desktop was recognized left every guest timer running with the CPU (double clicks, game speed) whenever the recognition failed.
 
 ---
 

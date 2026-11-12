@@ -655,16 +655,11 @@ impl Msx68kApp {
     fn frame_budget(&self) -> FrameBudget {
         match self.vm.speed_mode() {
             CpuSpeedMode::Burst => {
-                let deadline = self.next_frame_deadline - BURST_RENDER_RESERVE;
-                if self.vm.bus.is_mouse_polling_active() {
-                    // Once the desktop is up and actively polling the mouse, peripherals follow
-                    // host time so guest timers (Timer C, V-Blank, double-click speed) match
-                    // real wall-clock time.
-                    FrameBudget::RealTime { deadline }
-                } else {
-                    // Fast-forward through boot and splash screen timer waits until the
-                    // desktop starts polling the mouse.
-                    FrameBudget::FastForward { deadline }
+                // Only the CPU runs flat out: peripherals follow host time from power-on, so
+                // guest timers (title screens, Timer C, V-Blank, double-click speed) keep their
+                // real rates.
+                FrameBudget::RealTime {
+                    deadline: self.next_frame_deadline - BURST_RENDER_RESERVE,
                 }
             }
             mode => {
