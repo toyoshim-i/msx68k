@@ -49,8 +49,10 @@ run in a VM of their own from the start.
   and makes the bridged drive A: the boot drive, without sector access.
 - **A VM's own CONFIG.SYS.** A VM must not start SX-Window, which the master's `CONFIG.SYS`
   starts (`DEVICE = FSX.X`, `PROGRAM = TITLE.X`, `SHELL = SXWIN.X`). The bridge serves
-  `\VMX68K\CONFIG.SYS` when the VM opens `\CONFIG.SYS` of its boot drive. `AUTOEXEC.BAT` is
-  shared as it is, since it has no part in starting SX-Window.
+  `\VMX68K\CONFIG.SYS` when the VM opens `\CONFIG.SYS` of its boot drive, until the VM's shell
+  starts, so that afterwards the VM sees the master's file as it is. If ending it there proves
+  hard, the substitution may stay for good. `AUTOEXEC.BAT` is shared as it is, since it has no
+  part in starting SX-Window.
 - **Language.** VMX68K.SX is written in assembly, with the clean-room macros of `guest/include`
   and the in-process `rhas` / `rhlk` toolchain.
 - **Devices.** The existing device emulation is enough for the first goal.
