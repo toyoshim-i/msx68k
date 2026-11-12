@@ -33,19 +33,25 @@ run in a VM of their own from the start.
 - **Settings.** From the application's menus, graphically: drive assignments (host drives or
   virtual files such as disk images) and memory size, among others. A setup is saved as a settings
   file, and opening the file boots a VM with the same settings.
-- **Settings menus.** VMX68K.SX's window has a bar of icon menus, as `コンソール.X` and
-  `シャーペン.X` do, for:
-  - the CPU, its kind and speed;
-  - the memory size;
-  - the boot device kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets it);
-  - drive assignment, in one of two modes: bypass mode, with the path of the CONFIG.SYS the VM
-    boots with, or custom mode, where each of the VM's drives is given a floppy or HDD image
-    file or one of the primary VM's drives, and the list can be edited. An HDD image goes on
-    the VM's SCSI and is the VM's alone.
-- **Applying settings.** Saving changed settings shows a dialog saying that they take effect
-  when the VM restarts, and asks whether to restart it now or later by hand.
-- **Floppy drives.** Floppy images can be ejected and swapped without a restart: an icon for
-  each floppy drive offers eject and swap.
+- **Settings menus.** VMX68K.SX's window has a bar of icons above the VM's screen, pictures
+  rather than words, as in `シャーペン.X`. Clicking one pops up its menu. There is no Save
+  button: what takes effect at once is applied and saved when chosen, and what needs a restart
+  is changed in a dialog, saved when the dialog closes, and followed, if anything changed, by a
+  dialog saying the settings take effect when the VM restarts and asking whether to restart now
+  or later by hand.
+  - **Hardware**: "Hardware settings..." opens a dialog for the CPU's kind, the memory size, and
+    drive assignment. Drive assignment is in one of two modes: bypass mode, with the path of
+    the CONFIG.SYS the VM boots with, or custom mode, where each of the VM's drives is given a
+    floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
+    HDD image goes on the VM's SCSI and is the VM's alone. Under the dialog item, the menu
+    lists the speeds of the current CPU, applied and saved when chosen.
+  - **Boot**: the boot device kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets
+    it), written and saved when chosen and taking effect at the next reset, as on the real
+    machine. In bypass mode it stays on msx68k's boot ROM and cannot be chosen; the VM's
+    CONFIG.SYS decides what it starts.
+  - **Floppy drives**: an icon for each floppy drive shows whether a disk is in and has an
+    access lamp. Clicking it ejects the disk, and dropping an image on it from the Filer swaps
+    it in, both at once and without a restart.
 - **A settings file per VM.** Each VM setup is one resource library (`.LB`, as `MSX68K.LB`)
   holding its settings and its own SRAM, kept apart from the master's.
 - **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.
