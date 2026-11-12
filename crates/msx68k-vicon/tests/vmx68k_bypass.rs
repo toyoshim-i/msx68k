@@ -1,18 +1,76 @@
 //! In drive bypass mode, a VM boots Human68k from the master VM's own drive A:, bridged at the
-//! file level, with its own CONFIG.SYS so that SX-Window does not start again
-//! (`docs/VMX68K.md` Section 2).
+//! file level, with its own CONFIG.SYS so that SX-Window does not start again, and what it
+//! writes lands on the master's drive (`docs/VMX68K.md` Section 2).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use msx68k_bus::human_fs::{short_name, HumanVolume};
 use msx68k_bus::remote_fs::RemoteFs;
 use msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd;
 use msx68k_bus::vm_thread::{Pace, VmThread};
 use msx68k_bus::vmx68k::vm_bridge;
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
 use msx68k_vicon::decode_tvram_ank_lines;
+
+/// X68000 key codes of the characters the test types.
+fn scancodes(text: &str) -> Vec<(u8, bool)> {
+    text.chars()
+        .map(|c| match c {
+            'a'..='z' => {
+                let row = b"qwertyuiopasdfghjklzxcvbnm";
+                let codes = [
+                    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1E, 0x1F, 0x20, 0x21,
+                    0x22, 0x23, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30,
+                ];
+                (codes[row.iter().position(|&b| b == c as u8).unwrap()], false)
+            }
+            ' ' => (0x35, false),
+            '.' => (0x32, false),
+            '>' => (0x32, true),
+            '\\' => (0x0E, false),
+            '\n' => (0x1D, false),
+            _ => panic!("no key for {c:?}"),
+        })
+        .collect()
+}
+
+/// Types `text` on the VM's keyboard while the master runs, serving the VM's requests.
+fn type_text(thread: &VmThread, master: &mut X68kVm, text: &str) {
+    const SHIFT: u8 = 0x70;
+    for (code, shift) in scancodes(text) {
+        let mut bytes = Vec::new();
+        if shift {
+            bytes.push(SHIFT);
+        }
+        bytes.extend([code, code | 0x80]);
+        if shift {
+            bytes.push(SHIFT | 0x80);
+        }
+        for byte in bytes {
+            thread.post(move |vm| vm.bus.mfp.push_keyboard_byte(byte));
+            let until = Instant::now() + Duration::from_millis(15);
+            while Instant::now() < until {
+                master.run_steps(50_000);
+            }
+        }
+    }
+}
+
+/// Runs the master, serving the VM, until `done` holds of its HDD or a few seconds pass.
+fn wait_for_disk(master: &mut X68kVm, done: impl Fn(&HumanVolume) -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < until {
+        master.run_steps(500_000);
+        let mut image = master.bus.scsi_hdd_data(0).unwrap().to_vec();
+        if done(&HumanVolume::open(&mut image).unwrap()) {
+            return true;
+        }
+    }
+    false
+}
 
 fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
     vm.bus.set_host_mouse_position(Some(at));
@@ -112,6 +170,27 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
         }
         master.run_steps(200_000);
     }
+    // What the VM writes goes to the master's drive, through the master's Human68k, which keeps
+    // names as typed.
+    let dir = [short_name("vmtest", "")];
+    type_text(&thread, &mut master, "md vmtest\n");
+    assert!(
+        wait_for_disk(&mut master, |v| v.read_file(&[], &short_name("vmtest", "")).is_some()),
+        "MD must make VMTEST on the master's drive: {:#?}",
+        thread_screen.lock().unwrap()
+    );
+    type_text(&thread, &mut master, "echo hello>vmtest\\hi.txt\n");
+    assert!(
+        wait_for_disk(&mut master, |v| v.read_file(&dir, &short_name("hi", "txt")).as_deref() == Some(&b"hello\r\n"[..])),
+        "ECHO must create VMTEST\\HI.TXT on the master's drive"
+    );
+    type_text(&thread, &mut master, "ren vmtest\\hi.txt bye.txt\n");
+    assert!(
+        wait_for_disk(&mut master, |v| v.read_file(&dir, &short_name("bye", "txt")).is_some()
+            && v.read_file(&dir, &short_name("hi", "txt")).is_none()),
+        "REN must rename it on the master's drive"
+    );
+
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
     master.bus.detach_vm_bridge(id);
     drop(thread);

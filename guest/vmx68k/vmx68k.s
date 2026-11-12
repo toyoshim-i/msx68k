@@ -211,16 +211,30 @@ serve_next:
 	move.l	d1, (a1)+		; offset, attribute, or drive
 	move.l	d2, (a1)+		; length
 	move.l	d3, (a1)		; handle
-	cmpi.l	#3, d0
-	bcs.s	serve_image
-	beq	serve_open
-	cmpi.l	#5, d0
-	bcs	serve_handle_read
-	beq	serve_close
-	cmpi.l	#7, d0
-	bcs	serve_files
-	beq	serve_nfiles
-	bra	serve_dskfre
+	moveq.l	#-1, d3			; a kind it does not know fails
+	cmpi.l	#SERVE_KINDS, d0
+	bhi	serve_reply
+	add.w	d0, d0
+	move.w	serve_table-2(pc, d0.w), d0
+	jmp	serve_table(pc, d0.w)
+serve_table:
+	.dc.w	serve_image-serve_table		; 1 read drive 0's image
+	.dc.w	serve_image-serve_table		; 2 write drive 0's image
+	.dc.w	serve_open-serve_table		; 3 _OPEN
+	.dc.w	serve_handle_read-serve_table	; 4 read a handle
+	.dc.w	serve_close-serve_table		; 5 _CLOSE
+	.dc.w	serve_files-serve_table		; 6 _FILES
+	.dc.w	serve_nfiles-serve_table	; 7 _NFILES
+	.dc.w	serve_dskfre-serve_table	; 8 _DSKFRE
+	.dc.w	serve_mkdir-serve_table		; 9 _MKDIR
+	.dc.w	serve_rmdir-serve_table		; 10 _RMDIR
+	.dc.w	serve_delete-serve_table	; 11 _DELETE
+	.dc.w	serve_rename-serve_table	; 12 _RENAME
+	.dc.w	serve_chmod-serve_table		; 13 _CHMOD
+	.dc.w	serve_create-serve_table	; 14 _CREATE or _NEWFILE
+	.dc.w	serve_handle_write-serve_table	; 15 write a handle
+	.dc.w	serve_filedate-serve_table	; 16 _FILEDATE
+SERVE_KINDS	.equ	16
 
 serve_image:
 	* 1, 2: read or write drive 0's image; the reply is 0, or -1 when it fails
@@ -252,8 +266,8 @@ serve_image_moved:
 	bra	serve_reply
 
 serve_open:
-	* 3: open the path in the buffer for reading; the reply is the handle
-	clr.w	-(sp)
+	* 3: open the path in the buffer with the mode given; the reply is the handle
+	move.w	request_offset+2(pc), -(sp)
 	pea	disk_buffer(pc)
 	DOS	_OPEN
 	addq.l	#6, sp
@@ -267,20 +281,20 @@ serve_handle_read:
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
-	bmi.s	serve_result
+	bmi	serve_result
 	move.l	request_length(pc), -(sp)
 	pea	disk_buffer(pc)
 	move.w	request_handle+2(pc), -(sp)
 	DOS	_READ
 	lea	10(sp), sp
-	bra.s	serve_result
+	bra	serve_result
 
 serve_close:
 	* 5: close an open file
 	move.w	request_handle+2(pc), -(sp)
 	DOS	_CLOSE
 	addq.l	#2, sp
-	bra.s	serve_result
+	bra	serve_result
 
 serve_files:
 	* 6: _FILES for the path at +64 of the buffer, into its first 53 bytes
@@ -289,14 +303,14 @@ serve_files:
 	pea	disk_buffer(pc)
 	DOS	_FILES
 	lea	10(sp), sp
-	bra.s	serve_result
+	bra	serve_result
 
 serve_nfiles:
 	* 7: _NFILES with the search buffer the host put back
 	pea	disk_buffer(pc)
 	DOS	_NFILES
 	addq.l	#4, sp
-	bra.s	serve_result
+	bra	serve_result
 
 serve_dskfre:
 	* 8: free space of a drive (1 = A:) into the buffer
@@ -304,9 +318,95 @@ serve_dskfre:
 	move.w	request_offset+2(pc), -(sp)
 	DOS	_DSKFRE
 	addq.l	#6, sp
+	bra	serve_result
+
+serve_mkdir:
+	* 9: make the directory named in the buffer
+	pea	disk_buffer(pc)
+	DOS	_MKDIR
+	addq.l	#4, sp
+	bra	serve_result
+
+serve_rmdir:
+	* 10: remove the directory named in the buffer
+	pea	disk_buffer(pc)
+	DOS	_RMDIR
+	addq.l	#4, sp
+	bra	serve_result
+
+serve_delete:
+	* 11: delete the file named in the buffer
+	pea	disk_buffer(pc)
+	DOS	_DELETE
+	addq.l	#4, sp
+	bra	serve_result
+
+serve_rename:
+	* 12: rename the file named in the buffer to the name at +256
+	pea	disk_buffer+256(pc)
+	pea	disk_buffer(pc)
+	DOS	_RENAME
+	addq.l	#8, sp
+	bra	serve_result
+
+serve_chmod:
+	* 13: set the attribute given, or read it with -1; the reply is the attribute
+	move.w	request_offset+2(pc), -(sp)
+	pea	disk_buffer(pc)
+	DOS	_CHMOD
+	addq.l	#6, sp
+	bra	serve_result
+
+serve_create:
+	* 14: create the file named in the buffer with the attribute given, replacing one
+	* there (_CREATE) or not (_NEWFILE); the reply is the handle
+	move.w	request_offset+2(pc), -(sp)
+	pea	disk_buffer(pc)
+	tst.l	request_length(pc)
+	beq	serve_newfile
+	DOS	_CREATE
+	bra	serve_created
+serve_newfile:
+	DOS	_NEWFILE
+serve_created:
+	addq.l	#6, sp
+	bra	serve_result
+
+serve_handle_write:
+	* 15: write the buffer at an offset of an open file, or cut it there with nothing;
+	* the reply is the count
+	clr.w	-(sp)
+	move.l	request_offset(pc), -(sp)
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_SEEK
+	addq.l	#8, sp
+	tst.l	d0
+	bmi	serve_result
+	move.l	request_length(pc), -(sp)
+	pea	disk_buffer(pc)
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_WRITE
+	lea	10(sp), sp
+	bra	serve_result
+
+serve_filedate:
+	* 16: set the date and time of an open file
+	move.l	request_offset(pc), -(sp)
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_FILEDATE
+	addq.l	#6, sp
 
 serve_result:
 	move.l	d0, d3
+	* What changes the master's storage is written out at once, not left in Human68k's
+	* buffers, so nothing a VM wrote is lost if the machine stops
+	move.l	request_kind(pc), d0
+	cmpi.l	#5, d0			; _CLOSE
+	beq.s	serve_flush
+	cmpi.l	#9, d0			; _MKDIR and after
+	bcs.s	serve_reply
+serve_flush:
+	DOS	_FFLUSH
 serve_reply:
 	moveq.l	#MSX68K_FN_VM_REPLY, d0
 	move.l	vm_id(pc), d1

@@ -158,7 +158,7 @@ impl X68kBus {
         let fs = self.remote_fs.as_ref()?;
         let mut full = vec![b'@' + *fs.drives.first()? as u8, b':'];
         full.extend_from_slice(path);
-        let handle = fs.bridge.ask(BridgeOp::Open { path: full })?.result;
+        let handle = fs.bridge.ask(BridgeOp::Open { path: full, mode: 0 })?.result;
         if (handle as i32) < 0 {
             return None;
         }
@@ -270,6 +270,19 @@ impl X68kBus {
             }
             0x47 => self.remote_files(param14, param18 & 0x00FF_FFFF, mode as u32, drive),
             0x48 => self.remote_nfiles(param18 & 0x00FF_FFFF),
+            0x42 => self.remote_path_op(param14, drive, |path| BridgeOp::Mkdir { path }),
+            0x43 => self.remote_path_op(param14, drive, |path| BridgeOp::Rmdir { path }),
+            0x44 => {
+                let to = self.namests(param18).master_path(drive);
+                self.remote_path_op(param14, drive, |from| BridgeOp::Rename { from, to })
+            }
+            0x45 => self.remote_path_op(param14, drive, |path| BridgeOp::Delete { path }),
+            // CHMOD: a new attribute, or -1 to read it; the result is the attribute.
+            0x46 => {
+                let attr = if mode == 0xFF { 0xFFFF } else { mode as u32 };
+                self.remote_path_op(param14, drive, |path| BridgeOp::Chmod { path, attr })
+            }
+            0x49 => self.remote_create(param14, fcb, mode as u32, param18 != 0, drive),
             0x4A => self.remote_open(param14, fcb, drive),
             0x4B => {
                 if let Some(OpenFile::Master(handle)) =
@@ -280,6 +293,7 @@ impl X68kBus {
                 0
             }
             0x4C => self.remote_read(fcb, param14, param18),
+            0x4D => self.remote_write(fcb, param14, param18),
             0x4E => {
                 let position = self.peek_u32(fcb + 6).unwrap_or(0) as i64;
                 let size = self.peek_u32(fcb + 64).unwrap_or(0) as i64;
@@ -296,13 +310,30 @@ impl X68kBus {
                     DOS_SEEK_ERROR
                 }
             }
-            // FILEDATE: reads the date and time the FCB holds; nothing may be written yet.
+            // FILEDATE: reads the date and time the FCB holds, or sets them on the master's file.
             0x4F => {
                 if param18 == 0 {
                     (self.peek_u16(fcb + 60).unwrap_or(0) as u32) << 16
                         | self.peek_u16(fcb + 58).unwrap_or(0) as u32
                 } else {
-                    DOS_CANNOT_WRITE
+                    match self.remote_fs.as_ref().and_then(|fs| fs.files.get(&fcb)) {
+                        Some(OpenFile::Master(handle)) => {
+                            let op = BridgeOp::Filedate {
+                                handle: *handle,
+                                datetime: param18,
+                            };
+                            match self.ask(op) {
+                                Some(reply) if (reply.result as i32) >= 0 => {
+                                    self.poke_u16_be(fcb + 58, param18 as u16);
+                                    self.poke_u16_be(fcb + 60, (param18 >> 16) as u16);
+                                    reply.result
+                                }
+                                Some(reply) => reply.result,
+                                None => DOS_INVALID_ACCESS,
+                            }
+                        }
+                        _ => DOS_CANNOT_WRITE,
+                    }
                 }
             }
             0x50 => match self.ask(BridgeOp::Dskfre { drive }) {
@@ -326,10 +357,9 @@ impl X68kBus {
                 }
                 0
             }
-            // FFLUSH, and MEDIACHECK: nothing is cached, and the medium does not change.
-            0x56 | 0x57 => 0,
-            // Writing comes in a later step.
-            0x42..=0x46 | 0x49 | 0x4D | 0x53 | 0x54 | 0x58 => DOS_CANNOT_WRITE,
+            // FFLUSH and MEDIACHECK: nothing is cached, and the medium does not change. LOCK:
+            // only this VM reaches the files through the master.
+            0x56..=0x58 => 0,
             _ => return (DEV_ABORT_UNKNOWN_COMMAND, u32::MAX),
         };
         (0, result)
@@ -411,10 +441,41 @@ impl X68kBus {
         }
     }
 
+    /// Carries out a DOS call that takes one of the VM's names, made into the master's path.
+    fn remote_path_op(&mut self, namests: u32, drive: u32, op: impl FnOnce(Vec<u8>) -> BridgeOp) -> u32 {
+        let path = self.namests(namests).master_path(drive);
+        self.ask(op(path)).map_or(DOS_INVALID_ACCESS, |reply| reply.result)
+    }
+
+    /// `$49` CREATE: makes the master's file, replacing one there unless `replace` is false
+    /// (`_NEWFILE`), and fills the FCB.
+    fn remote_create(&mut self, namests: u32, fcb: u32, attr: u32, replace: bool, drive: u32) -> u32 {
+        let name = self.namests(namests);
+        let path = name.master_path(drive);
+        let handle = match self.ask(BridgeOp::Create { path: path.clone(), attr, replace }) {
+            Some(reply) if (reply.result as i32) >= 0 => reply.result,
+            Some(reply) => return reply.result,
+            None => return DOS_INVALID_ACCESS,
+        };
+        let (time, date) = match self.master_files(path, 0x27) {
+            Some((0, data)) => (
+                u16::from_be_bytes([data[22], data[23]]),
+                u16::from_be_bytes([data[24], data[25]]),
+            ),
+            _ => (0, 0),
+        };
+        self.fill_fcb(fcb, &name, attr as u8, time, date, 0);
+        if let Some(fs) = self.remote_fs.as_mut() {
+            fs.files.insert(fcb, OpenFile::Master(handle));
+        }
+        0
+    }
+
     /// `$4A` OPEN: opens the master's file and fills the FCB from its directory entry.
     fn remote_open(&mut self, namests: u32, fcb: u32, drive: u32) -> u32 {
-        if self.peek_u8(fcb + 14).unwrap_or(0) & 0x0F != 0 {
-            return DOS_CANNOT_WRITE;
+        let mode = (self.peek_u8(fcb + 14).unwrap_or(0) & 0x0F) as u32;
+        if mode > 2 {
+            return DOS_INVALID_ACCESS;
         }
         let name = self.namests(namests);
         let (own_config, boot_drive, shell) = match self.remote_fs.as_ref() {
@@ -438,10 +499,10 @@ impl X68kBus {
             name.master_path(drive)
         };
 
-        let entry = self.master_files(path.clone(), 0x21).filter(|(r, _)| *r == 0);
+        let entry = self.master_files(path.clone(), 0x27).filter(|(r, _)| *r == 0);
         let (file, attr, time, date, size) = match entry {
             Some((_, data)) => {
-                let handle = match self.ask(BridgeOp::Open { path }) {
+                let handle = match self.ask(BridgeOp::Open { path, mode }) {
                     Some(reply) if (reply.result as i32) >= 0 => reply.result,
                     Some(reply) => return reply.result,
                     None => return DOS_INVALID_ACCESS,
@@ -450,8 +511,8 @@ impl X68kBus {
                 let size = u32::from_be_bytes(data[26..30].try_into().unwrap());
                 (OpenFile::Master(handle), data[21], word(22), word(24), size)
             }
-            // The VM's own CONFIG.SYS, when the master has none for it.
-            None if own_config && is_config => {
+            // The VM's own CONFIG.SYS, when the master has none for it, which only reads.
+            None if own_config && is_config && mode == 0 => {
                 (OpenFile::Memory(DEFAULT_CONFIG.to_vec()), 0x20, 0, 0, DEFAULT_CONFIG.len() as u32)
             }
             None => return DOS_FILE_NOT_FOUND,
@@ -467,7 +528,15 @@ impl X68kBus {
             }
         }
 
-        // The FCB's copy of the directory entry, big-endian.
+        self.fill_fcb(fcb, &name, attr, time, date, size);
+        if let Some(fs) = self.remote_fs.as_mut() {
+            fs.files.insert(fcb, file);
+        }
+        0
+    }
+
+    /// Fills the FCB's copy of the directory entry, big-endian, and starts at offset 0.
+    fn fill_fcb(&mut self, fcb: u32, name: &Namests, attr: u8, time: u16, date: u16, size: u32) {
         let bytes = |v: &[u8], len: usize| -> Vec<u8> {
             let mut out = v.to_vec();
             out.resize(len, b' ');
@@ -494,10 +563,41 @@ impl X68kBus {
         self.poke_u16_be(fcb + 62, 0);
         self.poke_u32_be(fcb + 64, size);
         self.poke_u32_be(fcb + 6, 0);
-        if let Some(fs) = self.remote_fs.as_mut() {
-            fs.files.insert(fcb, file);
+    }
+
+    /// `$4D` WRITE: writes the VM's memory at `buffer` at the FCB's position, or with `len` 0
+    /// cuts the file there.
+    fn remote_write(&mut self, fcb: u32, buffer: u32, len: u32) -> u32 {
+        let handle = match self.remote_fs.as_ref().and_then(|fs| fs.files.get(&fcb)) {
+            Some(OpenFile::Master(handle)) => *handle,
+            Some(OpenFile::Memory(_)) => return DOS_CANNOT_WRITE,
+            None => return DOS_INVALID_ACCESS,
+        };
+        let position = self.peek_u32(fcb + 6).unwrap_or(0);
+        let mut done = 0u32;
+        loop {
+            let want = (len - done).min(CHUNK);
+            let data: Vec<u8> = (0..want).map(|i| self.peek_u8(buffer + done + i).unwrap_or(0)).collect();
+            let op = BridgeOp::HandleWrite {
+                handle,
+                offset: position + done,
+                data,
+            };
+            match self.ask(op) {
+                Some(reply) if (reply.result as i32) >= 0 => done += reply.result.min(want),
+                Some(reply) if done == 0 => return reply.result,
+                _ => break,
+            }
+            if done >= len || want == 0 {
+                break;
+            }
         }
-        0
+        let end = position + done;
+        let size = self.peek_u32(fcb + 64).unwrap_or(0);
+        self.poke_u32_be(fcb + 6, end);
+        // Writing past the end grows the file; writing nothing cuts it there.
+        self.poke_u32_be(fcb + 64, if len == 0 { end } else { size.max(end) });
+        done
     }
 
     /// `$4C` READ: reads from the FCB's position into the VM's memory at `buffer`.

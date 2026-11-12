@@ -47,8 +47,9 @@ pub enum BridgeOp {
     Read { offset: u32, len: u32 },
     /// 2: writes the bytes to drive 0's image at `offset`.
     Write { offset: u32, data: Vec<u8> },
-    /// 3: opens the master's file `path` for reading; the result is its handle.
-    Open { path: Vec<u8> },
+    /// 3: opens the master's file `path` with `mode` (0 read, 1 write, 2 both); the result is
+    /// its handle.
+    Open { path: Vec<u8>, mode: u32 },
     /// 4: reads `len` bytes at `offset` of the master's file `handle`; the result is the count.
     HandleRead { handle: u32, offset: u32, len: u32 },
     /// 5: closes the master's file `handle`.
@@ -59,6 +60,24 @@ pub enum BridgeOp {
     Nfiles { buffer: Vec<u8> },
     /// 8: `_DSKFRE` of `drive` (1 is A:); the data is the 8-byte buffer.
     Dskfre { drive: u32 },
+    /// 9: `_MKDIR`.
+    Mkdir { path: Vec<u8> },
+    /// 10: `_RMDIR`.
+    Rmdir { path: Vec<u8> },
+    /// 11: `_DELETE`.
+    Delete { path: Vec<u8> },
+    /// 12: `_RENAME` of `from` to `to`, which may move the file.
+    Rename { from: Vec<u8>, to: Vec<u8> },
+    /// 13: `_CHMOD` of `path` to `attr`, or reading it with `0xFFFF`; the result is the attribute.
+    Chmod { path: Vec<u8>, attr: u32 },
+    /// 14: `_CREATE` (replacing a file there) or `_NEWFILE` of `path` with `attr`; the result is
+    /// its handle.
+    Create { path: Vec<u8>, attr: u32, replace: bool },
+    /// 15: writes the bytes at `offset` of the master's file `handle`; with none, cuts the file
+    /// there. The result is the count.
+    HandleWrite { handle: u32, offset: u32, data: Vec<u8> },
+    /// 16: `_FILEDATE` setting `date << 16 | time` of the master's file `handle`.
+    Filedate { handle: u32, datetime: u32 },
 }
 
 impl BridgeOp {
@@ -72,6 +91,14 @@ impl BridgeOp {
             Self::Files { .. } => 6,
             Self::Nfiles { .. } => 7,
             Self::Dskfre { .. } => 8,
+            Self::Mkdir { .. } => 9,
+            Self::Rmdir { .. } => 10,
+            Self::Delete { .. } => 11,
+            Self::Rename { .. } => 12,
+            Self::Chmod { .. } => 13,
+            Self::Create { .. } => 14,
+            Self::HandleWrite { .. } => 15,
+            Self::Filedate { .. } => 16,
         }
     }
 }
@@ -88,6 +115,8 @@ type BufferBytes = (u32, Vec<u8>);
 
 /// Bytes of VMX68K.SX's buffer where `Files` puts the path, after the 53-byte search buffer.
 const FILES_PATH: u32 = 64;
+/// Bytes of VMX68K.SX's buffer where `Rename` puts the new name, after the old one.
+const RENAME_TO: u32 = 256;
 
 /// Returns a [`VmBridge`] and the requests it will make, for [`X68kBus::attach_vm_bridge`].
 pub fn vm_bridge() -> (VmBridge, Receiver<BridgeRequest>) {
@@ -301,7 +330,21 @@ impl X68kBus {
         let (numbers, bytes, reply_len): ([u32; 3], Vec<BufferBytes>, u32) = match &op {
             BridgeOp::Read { offset, len } => ([*offset, *len, 0], vec![], *len),
             BridgeOp::Write { offset, data } => ([*offset, data.len() as u32, 0], vec![(0, data.clone())], 0),
-            BridgeOp::Open { path } => ([0, 0, 0], vec![(0, nul_terminated(path))], 0),
+            BridgeOp::Open { path, mode } => ([*mode, 0, 0], vec![(0, nul_terminated(path))], 0),
+            BridgeOp::Mkdir { path } | BridgeOp::Rmdir { path } | BridgeOp::Delete { path } => {
+                ([0, 0, 0], vec![(0, nul_terminated(path))], 0)
+            }
+            BridgeOp::Rename { from, to } => {
+                ([0, 0, 0], vec![(0, nul_terminated(from)), (RENAME_TO, nul_terminated(to))], 0)
+            }
+            BridgeOp::Chmod { path, attr } => ([*attr, 0, 0], vec![(0, nul_terminated(path))], 0),
+            BridgeOp::Create { path, attr, replace } => {
+                ([*attr, *replace as u32, 0], vec![(0, nul_terminated(path))], 0)
+            }
+            BridgeOp::HandleWrite { handle, offset, data } => {
+                ([*offset, data.len() as u32, *handle], vec![(0, data.clone())], 0)
+            }
+            BridgeOp::Filedate { handle, datetime } => ([*datetime, 0, *handle], vec![], 0),
             BridgeOp::HandleRead { handle, offset, len } => ([*offset, *len, *handle], vec![], *len),
             BridgeOp::Close { handle } => ([0, 0, *handle], vec![], 0),
             BridgeOp::Files { attr, path } => {

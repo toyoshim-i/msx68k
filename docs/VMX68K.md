@@ -175,11 +175,16 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   would send past DISK2HD's jump table. CHDIR, FILES, NFILES, OPEN
   for reading, READ, SEEK, CLOSE, FILEDATE, DSKFRE, DRVCTRL, GETDPB, FFLUSH, and MEDIACHECK
   become the master's DOS calls (`VmPoll` kinds 3 to 8); the seek position and size live in
-  the FCB. Writing returns `-19` for now. Until the VM opens the shell named by its
+  the FCB. MKDIR, RMDIR, RENAME, DELETE, CHMOD, CREATE (and `_NEWFILE`), OPEN for writing,
+  WRITE (with 0 bytes cutting the file), and setting FILEDATE become the master's DOS calls
+  too (`VmPoll` kinds 9 to 16), and LOCK succeeds. VMX68K.X calls `_FFLUSH` after every call
+  that changes the master's storage, so nothing a VM wrote waits in the master's buffers.
+  Names keep the case they were typed in, as on Human68k's own drives. Until the VM opens the shell named by its
   CONFIG.SYS (`COMMAND.X` by default), `\CONFIG.SYS` of the boot drive opens
   `\VMX68K\CONFIG.SYS`, or, when the master has none, a CONFIG.SYS the host serves from
   memory (`FILES`, `BUFFERS`, `LASTDRIVE` only). Human68k 3.02 boots this way, runs the
-  master's `AUTOEXEC.BAT`, and reaches `A>` (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
+  master's `AUTOEXEC.BAT`, and reaches `A>`; `MD`, `ECHO` into a file, and `REN` typed in it
+  land on the master's drive (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
   The app starts VMs this way unless `--vm-fd0` names a floppy image.
 - The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
   Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests

@@ -71,3 +71,6 @@ _NFILES		.equ	$FF4F
 _SUPER_JSR	.equ	$FFF6
 _BUS_ERR	.equ	$FFF7
 _DSKFRE		.equ	$FF36
+_RENAME		.equ	$FF86
+_FILEDATE	.equ	$FF87
+_NEWFILE	.equ	$FF8B
