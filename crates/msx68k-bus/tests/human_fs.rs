@@ -65,3 +65,26 @@ fn a_full_directory_grows_by_a_cluster() {
         assert_eq!(volume.read_file(&bin, &short_name(name, "DAT")).unwrap(), [i as u8; 100]);
     }
 }
+
+#[test]
+fn directories_are_made_and_files_replaced() {
+    let Some(mut image) = image() else {
+        eprintln!("HUMAN302.XDF not found, skipping");
+        return;
+    };
+    let mut volume = HumanVolume::open(&mut image).unwrap();
+    let free = volume.free_clusters();
+    let dir = short_name("VMX68K", "");
+    volume.make_dir(&[], &dir, 0, 0).unwrap();
+    volume.make_dir(&[], &dir, 0, 0).unwrap();
+    assert_eq!(volume.free_clusters(), free - 1, "made once");
+    let name = short_name("DRIVE0", "XDF");
+    volume.add_file(&[dir], &name, &[1; 3000], 0, 0).unwrap();
+    assert_eq!(volume.free_clusters(), free - 4);
+
+    volume.replace_file(&[dir], &name, &[2; 1500], 0, 0).unwrap();
+    assert_eq!(volume.read_file(&[dir], &name).unwrap(), [2; 1500]);
+    assert_eq!(volume.free_clusters(), free - 3, "the old clusters are free again");
+    assert!(volume.replace_file(&[dir], &short_name("NONE", ""), b"", 0, 0).is_err());
+    assert!(volume.make_dir(&[dir], &name, 0, 0).is_err(), "a file is in the way");
+}

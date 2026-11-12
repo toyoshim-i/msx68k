@@ -217,6 +217,86 @@ impl<'a> HumanVolume<'a> {
         Ok(start)
     }
 
+    /// Makes the directory `name` in `path`, or does nothing if it is there already.
+    pub fn make_dir(&mut self, path: &[ShortName], name: &ShortName, time: u16, date: u16) -> Result<(), String> {
+        let parent = self.dir_at(path).ok_or("the parent directory does not exist")?;
+        if let Some(at) = self.find(parent, name) {
+            return if self.image[at + 11] & ATTR_DIRECTORY != 0 {
+                Ok(())
+            } else {
+                Err("a file of that name already exists".into())
+            };
+        }
+        if self.free_clusters() < 2 {
+            return Err("the disk is full".into());
+        }
+        let slot = self.free_slot(parent)?;
+        let [cluster] = self.allocate(1).ok_or("the disk is full")?[..] else { unreachable!() };
+        let parent_cluster = match parent {
+            Dir::Root => 0,
+            Dir::Cluster(first) => first,
+        };
+        let start = self.cluster_offset(cluster);
+        self.image[start..start + self.cluster].fill(0);
+        for (i, (dot, target)) in [(&b".       "[..], cluster), (&b"..      "[..], parent_cluster)].into_iter().enumerate() {
+            let entry = &mut self.image[start + i * ENTRY_BYTES..start + (i + 1) * ENTRY_BYTES];
+            entry[..8].copy_from_slice(dot);
+            entry[8..11].copy_from_slice(b"   ");
+            entry[11] = ATTR_DIRECTORY;
+            entry[22..24].copy_from_slice(&time.to_le_bytes());
+            entry[24..26].copy_from_slice(&date.to_le_bytes());
+            entry[26..28].copy_from_slice(&target.to_le_bytes());
+        }
+        let entry = &mut self.image[slot..slot + ENTRY_BYTES];
+        entry.fill(0);
+        entry[..8].copy_from_slice(&name.0);
+        entry[8..11].copy_from_slice(&name.1);
+        entry[11] = ATTR_DIRECTORY;
+        entry[22..24].copy_from_slice(&time.to_le_bytes());
+        entry[24..26].copy_from_slice(&date.to_le_bytes());
+        entry[26..28].copy_from_slice(&cluster.to_le_bytes());
+        Ok(())
+    }
+
+    /// Replaces the contents of the file `name` in `path`, which must exist, with `data`. Its
+    /// old clusters are freed, and nothing else on the volume changes.
+    pub fn replace_file(
+        &mut self,
+        path: &[ShortName],
+        name: &ShortName,
+        data: &[u8],
+        time: u16,
+        date: u16,
+    ) -> Result<(), String> {
+        let dir = self.dir_at(path).ok_or("the directory does not exist")?;
+        let at = self.find(dir, name).ok_or("the file does not exist")?;
+        if self.image[at + 11] & ATTR_DIRECTORY != 0 {
+            return Err("that is a directory".into());
+        }
+        let first = u16::from_le_bytes([self.image[at + 26], self.image[at + 27]]);
+        let old = if first == 0 { Vec::new() } else { self.chain(first).ok_or("the file's cluster chain is broken")? };
+        let needed = data.len().div_ceil(self.cluster);
+        if self.free_clusters() + old.len() < needed {
+            return Err("the disk is full".into());
+        }
+        for c in old {
+            self.set_fat(c, 0);
+        }
+        let clusters = self.allocate(needed).ok_or("the disk is full")?;
+        for (i, &c) in clusters.iter().enumerate() {
+            let start = self.cluster_offset(c);
+            let chunk = &data[i * self.cluster..((i + 1) * self.cluster).min(data.len())];
+            self.image[start..start + self.cluster].fill(0);
+            self.image[start..start + chunk.len()].copy_from_slice(chunk);
+        }
+        let entry = &mut self.image[at..at + ENTRY_BYTES];
+        entry[22..24].copy_from_slice(&time.to_le_bytes());
+        entry[24..26].copy_from_slice(&date.to_le_bytes());
+        entry[26..28].copy_from_slice(&clusters.first().copied().unwrap_or(0).to_le_bytes());
+        entry[28..32].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        Ok(())
+    }
+
     /// Adds the file `name` with `data` to the directory `path`, which must exist and must not
     /// hold `name` yet. Nothing else on the volume changes.
     pub fn add_file(
