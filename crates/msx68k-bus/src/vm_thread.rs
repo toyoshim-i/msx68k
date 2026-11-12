@@ -120,14 +120,17 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: Vbla
         let vblanks = vm.bus.crtc.frame_count();
         frames += 1;
         let due = start + FRAME * frames;
-        if pace == Pace::RealTime && vm.is_running_burst() {
-            // Flat out until the frame is due, as the master VM bursts, with time left to
-            // present the frame.
-            vm.run_frame(FrameBudget::RealTime {
-                deadline: due.checked_sub(BURST_RESERVE).unwrap_or(due),
-            });
+        if vm.is_running_burst() {
+            // Burst has no guest clock to follow: flat out for a frame of host time, as the
+            // master VM bursts, leaving time to present the frame when paced.
+            let deadline = match pace {
+                Pace::RealTime => due.checked_sub(BURST_RESERVE).unwrap_or(due),
+                Pace::Unthrottled => Instant::now() + FRAME,
+            };
+            vm.run_frame(FrameBudget::RealTime { deadline });
         } else {
-            run_frame(&mut vm);
+            let mhz = vm.timing_config().cpu_mhz.max(1);
+            vm.run_cycles(mhz * 1_000_000 / 60);
         }
         if vm.bus.crtc.frame_count() != vblanks {
             on_vblank(&mut vm);
@@ -137,18 +140,6 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: Vbla
                 thread::sleep(wait);
             }
         }
-    }
-}
-
-/// Runs one frame of guest time.
-fn run_frame(vm: &mut X68kVm) {
-    if vm.is_running_burst() {
-        // Burst has no guest clock to follow; a fixed share of instructions keeps the thread
-        // responsive to requests.
-        vm.run_steps(100_000);
-    } else {
-        let mhz = vm.timing_config().cpu_mhz.max(1);
-        vm.run_cycles(mhz * 1_000_000 / 60);
     }
 }
 
@@ -187,6 +178,26 @@ mod tests {
         );
         let vm = thread.stop();
         assert_eq!(vm.cpu_state.pc, 0x1000);
+    }
+
+    #[test]
+    fn a_vm_switched_to_burst_keeps_host_time_and_takes_requests() {
+        for pace in [Pace::RealTime, Pace::Unthrottled] {
+            let thread = VmThread::spawn(idle_vm(), pace);
+            thread.post(|vm| vm.set_speed_mode(CpuSpeedMode::Burst));
+            let start = thread.with_vm(|vm| vm.bus.crtc.frame_count());
+            let started = Instant::now();
+            thread::sleep(Duration::from_millis(500));
+            let frames = thread.with_vm(|vm| vm.bus.crtc.frame_count()) - start;
+            // Its peripherals follow host time: about 60 vertical blanks a second.
+            let expected = started.elapsed().as_secs_f64() * 60.0;
+            assert!(
+                (frames as f64 - expected).abs() < expected * 0.3,
+                "{pace:?}: {frames} frames in {:?}",
+                started.elapsed()
+            );
+            assert!(thread.with_vm(|vm| vm.is_running_burst()));
+        }
     }
 
     #[test]
