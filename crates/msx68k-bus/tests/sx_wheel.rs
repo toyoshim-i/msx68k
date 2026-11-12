@@ -106,3 +106,41 @@ fn wheel_scrolls_the_active_window_and_skips_windows_without_scroll_bars() {
     wheel(&mut vm, -2, true);
     assert_eq!(control_values(&mut vm), [-10, 64]);
 }
+
+fn double_click(vm: &mut X68kVm, at: (i16, i16), settle: usize) {
+    vm.bus.set_host_mouse_position(Some(at));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    vm.run_steps(200_000);
+    for _ in 0..2 {
+        set_buttons(vm, true);
+        set_buttons(vm, false);
+    }
+    vm.run_steps(settle);
+}
+
+#[test]
+fn wheel_scrolls_general_scroll_bars() {
+    let Some(mut vm) = boot() else {
+        eprintln!("ROMs or disks not found, skipping the wheel test");
+        return;
+    };
+
+    // Open \X68, go up to the root, open シャーペン, and run シャーペン.X, whose window
+    // scroll bars are general ones (CDEF 66 and 67), as are those of lists in its dialogs.
+    double_click(&mut vm, DRIVE_ICON, 3_000_000);
+    vm.bus.set_host_mouse_position(Some((398, 36)));
+    vm.bus.scc.add_mouse_delta(1, 1);
+    vm.run_steps(200_000);
+    set_buttons(&mut vm, true);
+    set_buttons(&mut vm, false);
+    vm.run_steps(3_000_000);
+    double_click(&mut vm, (376, 285), 4_000_000);
+    double_click(&mut vm, (327, 235), 15_000_000);
+    // Two hidden buttons, then the horizontal and the vertical bar, all at rest.
+    assert_eq!(control_values(&mut vm), [0, 0, 0, 0]);
+
+    // An empty document has nothing to scroll vertically, but Shift scrolls it sideways.
+    wheel(&mut vm, 2, true);
+    let values = control_values(&mut vm);
+    assert!(values[2] > 0, "the horizontal bar must move: {values:?}");
+}

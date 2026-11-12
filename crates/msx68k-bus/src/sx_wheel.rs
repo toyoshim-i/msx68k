@@ -65,9 +65,11 @@ const CONTROL_INACTIVE: u8 = 255;
 
 /// Resource type of control definitions.
 const CDEF: u32 = u32::from_be_bytes(*b"CDEF");
-/// Window scroll bars (`CI_SCLBRWH`, `CI_SCLBRWV`).
-const HORIZONTAL_SCROLL_BAR: i16 = 0x40;
-const VERTICAL_SCROLL_BAR: i16 = 0x41;
+/// Horizontal scroll bars: window (`CI_SCLBRWH`) and general (`CI_SCRLBRH`), which
+/// applications such as `シャーペン.X` use for their windows and for lists inside them.
+const HORIZONTAL_SCROLL_BARS: [i16; 2] = [0x40, 0x42];
+/// Vertical scroll bars: window (`CI_SCLBRWV`) and general (`CI_SCRLBRV`).
+const VERTICAL_SCROLL_BARS: [i16; 2] = [0x41, 0x43];
 
 /// User settings for the wheel, kept in `MSX68K.LB` ([`crate::sx_settings`]) and set by the
 /// guest settings app.
@@ -186,10 +188,10 @@ impl X68kBus {
         if window == 0 || self.peek_u8(window + WINDOW_VISIBLE)? == 0 {
             return None;
         }
-        let kind = if horizontal {
-            HORIZONTAL_SCROLL_BAR
+        let kinds = if horizontal {
+            HORIZONTAL_SCROLL_BARS
         } else {
-            VERTICAL_SCROLL_BAR
+            VERTICAL_SCROLL_BARS
         };
         // Take the outermost bar of the kind, which is the window's own.
         let mut bar = None;
@@ -204,7 +206,8 @@ impl X68kBus {
             }
             let usable = self.peek_u8(control + CONTROL_VISIBLE)? != 0
                 && self.peek_u8(control + CONTROL_HILITE)? != CONTROL_INACTIVE;
-            if usable && self.cdef_id(text_base, self.peek_u32(control + CONTROL_DEF)?) == Some(kind) {
+            let kind = self.cdef_id(text_base, self.peek_u32(control + CONTROL_DEF)?);
+            if usable && kind.is_some_and(|kind| kinds.contains(&kind)) {
                 let rect = self.peek_rect(control + CONTROL_RECT)?;
                 let outer = if horizontal { rect.bottom } else { rect.right };
                 if bar.is_none_or(|(best, _)| outer > best) {
@@ -215,8 +218,8 @@ impl X68kBus {
         }
         let (_, rect) = bar?;
 
-        // The scroll bar definitions (CDEF 64 and 65) put both arrows in a box at the middle
-        // of the bar, 51 dots long vertically and 53 horizontally, split at the middle.
+        // The scroll bar definitions (CDEF 64 to 67) put both arrows in a box at the middle of
+        // the bar, 51 dots long vertically and 53 horizontally, split at the middle.
         let (x, y) = if horizontal {
             let middle = ((rect.left as i32 + rect.right as i32) >> 1) as i16;
             (if toward_end { middle + 14 } else { middle - 13 }, rect.top + 9)

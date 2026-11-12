@@ -1196,7 +1196,9 @@ Scroll bars look the same everywhere because the Control Manager draws them with
 | :---: | :--- | :--- |
 | `0x40` (64) | `CI_SCLBRWH` | Window scroll bar, horizontal ("Real horizontal scroll bar definition function ID 64") |
 | `0x41` (65) | `CI_SCLBRWV` | Window scroll bar, vertical ("Real vertical scroll bar definition function ID 65") |
-| `0x42`, `0x43` | `CI_SCRLBRH`, `CI_SCRLBRV` | General scroll bars, as in dialogs |
+| `0x42`, `0x43` | `CI_SCRLBRH`, `CI_SCRLBRV` | General scroll bars. `シャーペン.X` uses them for its window's own bars and for the font list it draws inside the window (`フォント種類選択`). |
+
+The wheel takes all four kinds. Among the usable bars of the active window, it takes the one furthest right (vertical) or down (horizontal), which is the window's own while that is active. When a dialog drawn inside the window makes the window's bar inactive, as `フォント種類選択` does, the list's bar is the one left.
 
 - `CMOpen` (`$A289`) loads `'CDEF'` `cDefID >> 4` and stores its handle in the control's `def` (`+24`), the low four bits in `+28`. All controls of one kind share the handle, so `RMHdlToRsc` (`$A0E9`) names the kind.
 - Resource maps form chains from `text_base + 0x53B6A` and `+ 0x53B6E`, linked through `+4` of each map. A map counts its types at `+0` and lists them from `+16` as (type, ID list handle) pairs of 8 bytes; an ID list counts at `+0` and lists 16-byte entries from `+16`, with the ID at `+0` and the resource handle at `+8`.
@@ -1204,7 +1206,7 @@ Scroll bars look the same everywhere because the Control Manager draws them with
 - Records (`SXDEF2.H`, `CONTROL.H`): a window keeps its control list handle at `+98`; a control links to the next at `+0` and has its rectangle at `+8`, `visible` at `+16`, `hilite` at `+17` (255 when inactive), and `value`, `min`, `max` at `+18`, `+20`, `+22`.
 
 ### 8.2 Arrow Positions
-Unlike the Macintosh, both arrows sit in a box at the middle of the bar, not at its ends, and the thumb moves along the rest. From the part test (`CWHERE`) of CDEF 64 and 65:
+Unlike the Macintosh, both arrows sit in a box at the middle of the bar, not at its ends, and the thumb moves along the rest. From the part test (`CWHERE`) of CDEF 64 and 65, and the same on the screen for CDEF 66 and 67:
 
 | Bar | Arrow box | First arrow (part 20) | Second arrow (part 21) |
 | :--- | :--- | :--- | :--- |
