@@ -84,6 +84,8 @@ pub enum AppFunction {
     VmClose = 6,
     /// Answers the disk request `VmPoll` handed out for VM `D1.L`.
     VmReply = 7,
+    /// Sets the speed of VM `D1.L` from VMX68K.SX's menu.
+    VmSpeed = 8,
 }
 
 impl AppFunction {
@@ -97,6 +99,7 @@ impl AppFunction {
             5 => Some(Self::VmPoll),
             6 => Some(Self::VmClose),
             7 => Some(Self::VmReply),
+            8 => Some(Self::VmSpeed),
             _ => None,
         }
     }
@@ -178,6 +181,7 @@ impl X68kBus {
                 Some(AppFunction::VmPoll) => self.hypercall_vm_poll(state),
                 Some(AppFunction::VmClose) => self.hypercall_vm_close(state),
                 Some(AppFunction::VmReply) => self.hypercall_vm_reply(state),
+                Some(AppFunction::VmSpeed) => self.hypercall_vm_speed(state),
                 None => TrapResult::Unhandled,
             },
         }

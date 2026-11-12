@@ -23,6 +23,7 @@ pub mod vicon;
 pub mod vm;
 pub mod vm_thread;
 pub mod vmx68k;
+pub mod vmx68k_library;
 pub mod vram_pages;
 
 pub use msx68k_cpu::{Bus, BusFault, CpuModel, NoopTrapHandler, TrapHandler};

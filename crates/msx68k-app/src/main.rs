@@ -769,6 +769,11 @@ impl Msx68kApp {
                         self.guest_vms.push(guest);
                     }
                 }
+                VmEvent::Speed { id, mode } => {
+                    if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
+                        guest.thread.post(move |vm| vm.set_speed_mode(mode));
+                    }
+                }
                 VmEvent::Closed { id } => self.guest_vms.retain(|guest| guest.id != id),
             }
         }

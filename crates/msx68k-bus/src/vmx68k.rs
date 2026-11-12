@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use msx68k_cpu::{CpuState, TrapResult};
 
 use crate::bus::X68kBus;
+use crate::timing::CpuSpeedMode;
 
 /// `SYS/FSX.X` global holding the active window record (`WMActive`), from its text base.
 const ACTIVE_WINDOW: u32 = 0x543CA;
@@ -185,16 +186,35 @@ pub enum VmEvent {
     /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, and the
     /// master's `drives`, from A:, that it can see in bypass mode.
     Opened { id: u32, window: u32, drive0_bytes: u32, drives: u32 },
+    /// VMX68K.SX chose a speed for the VM from its menu.
+    Speed { id: u32, mode: CpuSpeedMode },
     /// The VM was closed.
     Closed { id: u32 },
+}
+
+/// Speeds `VmSpeed` takes in `D2.L`, by their order in VMX68K.SX's menu.
+const VM_SPEEDS: [CpuSpeedMode; 4] = [
+    CpuSpeedMode::Mhz10,
+    CpuSpeedMode::Mhz16,
+    CpuSpeedMode::Mhz24,
+    CpuSpeedMode::Burst,
+];
+
+/// A VM VMX68K.SX has open.
+#[derive(Debug, Clone, Copy)]
+struct OpenVm {
+    id: u32,
+    /// Its window record.
+    window: u32,
+    /// Lines of the window's content above the VM's screen, VMX68K.SX's icon bar.
+    screen_top: i16,
 }
 
 /// The VMs VMX68K.SX has open.
 #[derive(Debug, Default)]
 pub(crate) struct VmWindows {
     next_id: u32,
-    /// ID and window of each open VM.
-    open: Vec<(u32, u32)>,
+    open: Vec<OpenVm>,
     events: Vec<VmEvent>,
     /// Bridge requests of each VM, and the one VMX68K.SX is carrying out with its buffer.
     disks: Vec<(u32, VmDisk)>,
@@ -214,7 +234,7 @@ struct VmDisk {
 /// Where a VM's window shows on the master VM's screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmWindowLayout {
-    /// Screen position of the top-left of the window's content, where the VM's screen goes.
+    /// Screen position of the top-left of the VM's screen in the window's content.
     pub left: i32,
     pub top: i32,
     /// Visible parts of the content, as screen rectangles `(left, top, right, bottom)`, right
@@ -262,8 +282,8 @@ impl X68kBus {
                 disk.pending.push_back(request);
             }
             if !disk.pending.is_empty() {
-                if let Some(&(_, window)) = self.vm_windows.open.iter().find(|(open, _)| open == id) {
-                    wake.push((*id, window));
+                if let Some(open) = self.vm_windows.open.iter().find(|open| open.id == *id) {
+                    wake.push((*id, open.window));
                 }
             }
         }
@@ -282,13 +302,18 @@ impl X68kBus {
     }
 
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
-    /// VMX68K.SX serves and `D3.L` of the master's drives from A:, and returns its ID in `D0.L`.
+    /// VMX68K.SX serves, `D3.L` of the master's drives from A:, and its screen `D4.W` lines
+    /// below the top of the window's content, and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
         let id = windows.next_id;
         let window = state.d[1] & 0x00FF_FFFF;
-        windows.open.push((id, window));
+        windows.open.push(OpenVm {
+            id,
+            window,
+            screen_top: state.d[4] as i16,
+        });
         windows.events.push(VmEvent::Opened {
             id,
             window,
@@ -305,7 +330,7 @@ impl X68kBus {
     /// request stays handed out until `VmReply`.
     pub(crate) fn hypercall_vm_poll(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
-        if !self.vm_windows.open.iter().any(|&(open, _)| open == id) {
+        if !self.vm_windows.open.iter().any(|open| open.id == id) {
             state.d[0] = u32::MAX;
             return TrapResult::Handled { extra_cycles: 0 };
         }
@@ -413,7 +438,7 @@ impl X68kBus {
         let id = state.d[1];
         let windows = &mut self.vm_windows;
         let before = windows.open.len();
-        windows.open.retain(|&(open, _)| open != id);
+        windows.open.retain(|open| open.id != id);
         windows.disks.retain(|(open, _)| *open != id);
         state.d[0] = if windows.open.len() < before {
             windows.events.push(VmEvent::Closed { id });
@@ -424,13 +449,37 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Reads where the window at `window` shows its content: the content's screen position
-    /// and its visible parts. Returns `None` while the window is hidden.
+    /// `VmSpeed`: sets VM `D1.L` to the speed `D2.L` of VMX68K.SX's menu (0 10 MHz, 1 16 MHz,
+    /// 2 24 MHz, 3 Burst), which the app applies at once. Returns 0, or -1 for an unknown VM or
+    /// speed.
+    pub(crate) fn hypercall_vm_speed(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        let known = self.vm_windows.open.iter().any(|open| open.id == id);
+        state.d[0] = match VM_SPEEDS.get(state.d[2] as usize) {
+            Some(&mode) if known => {
+                self.vm_windows.events.push(VmEvent::Speed { id, mode });
+                0
+            }
+            _ => u32::MAX,
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// Reads where the window at `window` shows the VM's screen: its screen position, below
+    /// VMX68K.SX's icon bar, and the visible parts of the content there. Returns `None` while
+    /// the window is hidden.
     pub fn vm_window_layout(&self, window: u32) -> Option<VmWindowLayout> {
         if self.peek_u8(window + WINDOW_VISIBLE)? == 0 {
             return None;
         }
-        let content = self.peek_rect(window + WINDOW_RECT)?;
+        let mut content = self.peek_rect(window + WINDOW_RECT)?;
+        let screen_top = self
+            .vm_windows
+            .open
+            .iter()
+            .find(|open| open.window == window)
+            .map_or(0, |open| open.screen_top);
+        content.top = content.top.saturating_add(screen_top).min(content.bottom);
         // The bitmap's rectangle is the screen in window coordinates.
         let origin = self.peek_rect(self.peek_u32(window + WINDOW_BITMAP)? + BITMAP_RECT)?;
         let (dx, dy) = (-(origin.left as i32), -(origin.top as i32));

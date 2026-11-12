@@ -34,14 +34,18 @@ run in a VM of their own from the start.
   virtual files such as disk images) and memory size, among others. A setup is saved as a settings
   file, and opening the file boots a VM with the same settings.
 - **Settings menus.** VMX68K.SX's window has a bar of icons above the VM's screen, pictures
-  rather than words, as in `シャーペン.X`. Clicking one pops up its menu. There is no Save
-  button: what takes effect at once is applied and saved when chosen, and what needs a restart
-  is changed in a dialog, saved when the dialog closes, and followed, if anything changed, by a
-  dialog saying the settings take effect when the VM restarts and asking whether to restart now
-  or later by hand.
-  - **Configuration**: one icon whose menu has, in order: "Configuration..." to open the
+  rather than words, as in `シャーペン.X`. The right button on one pops up its menu, as
+  SX-Window's menus follow the right button (`MNSelect`). Menus are in Japanese, as
+  SX-Window is. The icons and the submenus are resources of `VMX68K.LB`, next to `VMX68K.X`,
+  since the Menu Man takes submenus only as `'MENU'` resources of an open library. There is no
+  Save button: what takes effect at once is applied and saved when chosen, and what needs a
+  restart is changed in a dialog, saved when the dialog closes, and followed, if anything
+  changed, by a dialog saying the settings take effect when the VM restarts and asking whether
+  to restart now or later by hand.
+  - **Configuration**: one icon whose menu has, in order: "設定..." to open the
     configuration dialog; the current CPU's name (such as 68000), a submenu of that CPU's
-    speeds, applied and saved when chosen; and, in custom mode only, "Boot", a submenu of the
+    speeds, applied and saved when chosen (for the 68000: 10MHz, 16MHz, 24MHz, and 最高速,
+    msx68k's Burst); and, in custom mode only, "Boot", a submenu of the
     boot devices kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets them), written
     and saved when chosen and taking effect at the next reset, as on the real machine. In bypass
     mode the boot device stays on msx68k's boot ROM and the item is not shown; the VM's
@@ -149,13 +153,15 @@ windows work the same way as the master VM.
 - **Calls.** VMX68K.SX reaches the host through msx68k's application entry
   ([HOOK_AND_SCSI_ARCHITECTURE.md](HOOK_AND_SCSI_ARCHITECTURE.md) Section 2.1): `VmOpen` (4)
   takes the window (`D1.L` = `WindowPtr`) and returns the VM's ID, `VmPoll` (5) is called on
-  every pass of the event loop, and `VmClose` (6) stops the VM.
+  every pass of the event loop, and `VmClose` (6) stops the VM. `VmOpen` also takes the
+  lines of the content above the VM's screen (`D4.W`, the icon bar), and `VmSpeed` (8) sets
+  the VM's speed from the menu.
 - **Window position and visible region.** VMX68K.SX does not report them. The host reads them
   from the window's `Graph` every frame: its rectangle, its bitmap's rectangle (which places it
   on the screen), and its visible region, which become the `VmLayer`'s position and scissor
   rectangles. So moving, covering, and uncovering the window need no code in VMX68K.SX.
-- **Window size.** The window's content is the VM's screen at its native size, fixed for now
-  (768×512 for Human68k 3.02 at boot).
+- **Window size.** The window's content is the icon bar, 24 lines, over the VM's screen at its
+  native size, fixed for now (768×512 for Human68k 3.02 at boot).
 - **First disk.** The host read the floppy image for drive 0 of new VMs itself at first, named by
   a command-line option of the app. Images come from the master VM's drives now that the VM's
   screen shows in its window (Section 2).

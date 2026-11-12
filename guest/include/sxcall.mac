@@ -18,6 +18,7 @@ MMSetHandleSize		.equ	$A026
 MMGetHandleSize		.equ	$A028
 MMLockHandle		.equ	$A02A
 MMUnlockHandle		.equ	$A02C
+MMHdlDispose		.equ	$A038	; Dispose of a handle (handle)
 
 * -----------------------------------------------------------------------------
 * Mouse Manager (MSM) APIs ($A06A..$A078)
@@ -48,7 +49,10 @@ TSGetID			.equ	$A360	; Get current task / app RefCon
 TSResNew		.equ	$A4A0	; Create an empty resource map for the task's resource chain
 TSResOpen		.equ	$A4A1	; Open a resource file for the task (name ptr) -> A0 map
 TSResClose		.equ	$A4A2	; Save the current resource map to a file and close it (name ptr)
+TSResRemove		.equ	$A4A4	; Remove the current resource map without saving it, closing its file
+TSResLoad		.equ	$A4A5	; Load all of the current resource map's resources, closing its file
 TSRscAdd		.equ	$A4AA	; Add a resource (type, id.w, handle, size)
+TSRscGet		.equ	$A4AB	; Find a resource (type, id.w) -> A0 handle
 TSRscRemove		.equ	$A4AC	; Remove a resource (type, id.w)
 GetAppRefCon		.equ	$A360	; Compatibility alias
 SXCallWindM		.equ	$A3A2	; Window drag, close-box & content event processor
@@ -129,6 +133,7 @@ GMFontInfo		.equ	$A198
 GMShadowStrZ		.equ	$A1A1
 GMShadowRect		.equ	$A1A2
 GMInvertRect		.equ	$A1A3	; Invert rectangle bits (Rect *, int mode: 6B on stack)
+GMPlotImg		.equ	$A182	; Draw a plot image into a rect (image ptr, Rect *, mode.w)
 GMCenterRect		.equ	$A1D6
 
 * -----------------------------------------------------------------------------
@@ -169,6 +174,12 @@ WSClose			.equ	$A228
 WSDispose		.equ	$A229
 WSSelect		.equ	$A22A
 WSUpdate		.equ	$A22B
+
+* -----------------------------------------------------------------------------
+* Menu Man (MN) APIs ($A266..$A26C)
+* -----------------------------------------------------------------------------
+MNSelect		.equ	$A268	; Pop up a menu (handle, global LPoint) -> D0 submenu ID.w : item.w
+MNConvert2		.equ	$A26B	; Build a menu record from a string (handle or 0, str, ID.w) -> A0
 
 * -----------------------------------------------------------------------------
 * Control Manager (CM) APIs ($A289..$A2A7)

@@ -32,6 +32,13 @@ official SX-Window programming manuals.
 - The kit's sample (dev kit pp. 89-90) pops a menu up from a click in a window: `GMGlobalToLocal`,
   `GMPtInRect` to find the area clicked, `MNConvert2(NULL, string, MI_PLN)`, `MNSelect`, then
   `MMHdlDispose` of the record.
+- **`MNSelect` follows the right button only** (tried in VMX68K.X): called on a left press, it
+  returns 0 at once and shows nothing. SX-Window's popup menus are all right-button ones.
+- The string's special characters, from the Workroom samples (`ATTRIB.C`, `TEDIT.C`): `^` before
+  a shortcut, `~` for an inactive item, `!` for a check mark, `|` to put the next byte in the
+  check field. In assembly the submenu item is `"^", $1B, "|", id` before its title, raw bytes
+  needing no `\x` escapes. `MNConvert2` given the handle of a loaded `'MENU'` resource rebuilds
+  it in place, and the submenu then shows the new check marks.
 
 ### 1.2 Dialogs and Controls (`DIALOG.H`, `CONTROL.H`)
 - Resources `'DLOG'` (bounds, `defID`, `visible`, `close`, `taskID`, `itemID`, title) and `'DITL'`
@@ -69,20 +76,39 @@ official SX-Window programming manuals.
   Section 9).
 - An application's own library sits next to it under its name (`CGビジョン.X` and
   `CGビジョン.LB`).
+- `TSResLoad` (`$A4A5`) reads all of the current map's resources and closes its file;
+  `TSResRemove` (`$A4A4`) drops the map without writing it, where `TSResClose` writes it back.
 
-### 1.5 State of VMX68K
+### 1.5 Plot Images (`GMPlotImg`, `$A182`)
+- `GMPlotImg(image, rect, mode)`: the high byte of the mode is the image's planes (0 meaning 2),
+  the low byte the style (0 plain). The image is those planes, then a mask plane, each of rows
+  of whole words (`native_gm.rs` `gm_plot_img`, which follows the guest). A `'PAT2'` icon has
+  no mask, so it is not a plot image.
+- Over SX-Window's 4-plane text screen, a two-plane image gets plane 3 set and plane 2 clear:
+  neither plane is white (8), plane 0 light gray (9), plane 1 dark gray (10), both black (11).
+
+### 1.6 State of VMX68K
 - VMX68K.X (`guest/vmx68k/vmx68k.s`) opens a 768x512 window, `VmOpen`s, waits for events with
   `E_USER1` in its mask, and serves bridge requests (`serve_disk`, 16 kinds). The host wakes it
   with `E_USER1` (`X68kBus::wake_vm_windows`).
-- The host places the VM's screen at the window content's top-left (`vm_window_layout`), and the
-  app starts VMs at 10 MHz with 4 MB, in bypass mode unless `--vm-fd0` is given.
+- The host places the VM's screen at the window content's left, below the icon bar whose height
+  `VmOpen` takes in `D4.W` (`vm_window_layout`), and the app starts VMs at 10 MHz with 4 MB, in
+  bypass mode unless `--vm-fd0` is given.
+- **Step 1 is built** (2026-11-12): the 24-line icon bar with the Configuration icon (a gear,
+  `'PLOT'` 1 of `VMX68K.LB`), its menu on the right button ("設定..." inactive until the dialog
+  exists, and "68000" with the speed submenu, `'MENU'` 1), and `VmSpeed` (8), which the app
+  applies with `VmThread::post`. The speed is not saved yet: that comes with the settings
+  library. `VMX68K.LB` is written by the HDD builder and `install_vmx68k`. A VM thread in Burst
+  now runs flat out until each frame is due, as the master does. Tested in
+  `crates/msx68k-bus/tests/vmx68k.rs`.
 
 ---
 
 ## 2. Proposed Implementation (not decided)
 
 ### 2.1 Order
-1. Icon bar and the Configuration menu with the CPU speed submenu, applied at once.
+1. ~~Icon bar and the Configuration menu with the CPU speed submenu, applied at once.~~ Done
+   (Section 1.6).
 2. Floppy icons with eject and drop (custom mode), and the access lamp.
 3. The per-VM settings library (`.LB`) with its SRAM, the boot device submenu, and the menu to
    make a new setup; saving what is applied at once starts here.
@@ -90,19 +116,12 @@ official SX-Window programming manuals.
    restart question (`DMError` `D_YESNO`).
 
 ### 2.2 Pieces
-- **`VMX68K.LB`** next to `VMX68K.X`, holding the `'MENU'` submenus (CPU speeds, boot devices)
-  and later the `'DLOG'`/`'DITL'` of the configuration dialog. The HDD builder
-  (`build_bootable_sxwin_scsi_hdd`) and `install_vmx68k` would put it in `\X68`, built with
-  `ResourceLibrary`. Check marks would be set before each `MNSelect` by rebuilding the submenu
-  record with `MNConvert2`.
-- **Icons** as bit images drawn by VMX68K.X into the bar, like the control panel item's
-  `'PAT2'` (`crates/msx68k-bus/src/sx_control_panel.rs`), with the drawing call to be chosen.
-- **New application functions** (numbers after `VmReply` 7):
-  - placing the VM's screen inside the window, below the bar (the host's layout now assumes the
-    content's top-left);
-  - setting the VM's speed, which the app applies with `VmThread::post`;
-  - `VmStatus`: the VM's CPU and speed, lamp states, and floppy contents, read by VMX68K.X when
-    the host wakes it with `E_USER1` after a lamp or disk change.
+- **`VMX68K.LB`** (built, `crates/msx68k-bus/src/vmx68k_library.rs`) would later also hold the
+  boot device submenu and the `'DLOG'`/`'DITL'` of the configuration dialog.
+- **Icons** of the later steps as more `'PLOT'` plot images in `VMX68K.LB` (Section 1.5).
+- **New application functions** (after `VmSpeed` 8): `VmStatus`, the VM's CPU and speed, lamp
+  states, and floppy contents, read by VMX68K.X when the host wakes it with `E_USER1` after a
+  lamp or disk change.
 - **Lamps**: the FDC finishes commands at once, so a lamp would stay lit for a short while
   (about 0.2 s) after an access; the access lamp would light for floppy, SCSI, and bridge
   requests.

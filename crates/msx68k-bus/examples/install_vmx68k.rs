@@ -1,6 +1,7 @@
-//! Installs or updates VMX68K.X, built from guest/vmx68k/vmx68k.s, in \X68 of an existing
-//! SX-Window HDD image in place, and gives it a drive 0 image at \VMX68K\DRIVE0.XDF, a copy of
-//! disks/HUMAN302.XDF, unless one is there already. Everything else on it stays as it is.
+//! Installs or updates VMX68K.X, built from guest/vmx68k/vmx68k.s, and its VMX68K.LB in \X68
+//! of an existing SX-Window HDD image in place, and gives it a drive 0 image at
+//! \VMX68K\DRIVE0.XDF, a copy of disks/HUMAN302.XDF, unless one is there already. Everything
+//! else on it stays as it is.
 //!
 //! cargo run -p msx68k-bus --example install_vmx68k -- <image.HDS>
 
@@ -8,6 +9,7 @@ use std::path::Path;
 
 use msx68k_bus::guest_build::build_guest_x_executable;
 use msx68k_bus::human_fs::{short_name, HumanVolume};
+use msx68k_bus::vmx68k_library::vmx68k_library;
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -26,15 +28,18 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(1);
     };
-    let (x68, name) = ([short_name("X68", "")], short_name("VMX68K", "X"));
-    if volume.read_file(&x68, &name).is_some() {
-        volume.replace_file(&x68, &name, &program, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));
-        println!("Updated \\X68\\VMX68K.X ({} bytes)", program.len());
-    } else {
-        volume.add_file(&x68, &name, &program, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));
-        println!("Added \\X68\\VMX68K.X ({} bytes)", program.len());
+    let x68 = [short_name("X68", "")];
+    for (ext, data) in [("X", program), ("LB", vmx68k_library())] {
+        let name = short_name("VMX68K", ext);
+        if volume.read_file(&x68, &name).is_some() {
+            volume.replace_file(&x68, &name, &data, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));
+            println!("Updated \\X68\\VMX68K.{ext} ({} bytes)", data.len());
+        } else {
+            volume.add_file(&x68, &name, &data, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));
+            println!("Added \\X68\\VMX68K.{ext} ({} bytes)", data.len());
+        }
+        assert_eq!(volume.read_file(&x68, &name).as_deref(), Some(&data[..]));
     }
-    assert_eq!(volume.read_file(&x68, &name).as_deref(), Some(&program[..]));
 
     let (dir, drive0) = (short_name("VMX68K", ""), short_name("DRIVE0", "XDF"));
     volume.make_dir(&[], &dir, 0x6000, 0x5821).unwrap_or_else(|e| fail(e));

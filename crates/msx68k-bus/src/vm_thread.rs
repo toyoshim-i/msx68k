@@ -9,10 +9,13 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::vm::X68kVm;
+use crate::vm::{FrameBudget, X68kVm};
 
 /// Guest time run between two looks at the request queue.
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+/// Time of each frame a VM in Burst leaves for its vertical blank hook.
+const BURST_RESERVE: Duration = Duration::from_millis(3);
 
 /// How fast the thread runs its VM.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -115,13 +118,21 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: Vbla
             }
         }
         let vblanks = vm.bus.crtc.frame_count();
-        run_frame(&mut vm);
+        frames += 1;
+        let due = start + FRAME * frames;
+        if pace == Pace::RealTime && vm.is_running_burst() {
+            // Flat out until the frame is due, as the master VM bursts, with time left to
+            // present the frame.
+            vm.run_frame(FrameBudget::RealTime {
+                deadline: due.checked_sub(BURST_RESERVE).unwrap_or(due),
+            });
+        } else {
+            run_frame(&mut vm);
+        }
         if vm.bus.crtc.frame_count() != vblanks {
             on_vblank(&mut vm);
         }
-        frames += 1;
         if pace == Pace::RealTime {
-            let due = start + FRAME * frames;
             if let Some(wait) = due.checked_duration_since(Instant::now()) {
                 thread::sleep(wait);
             }

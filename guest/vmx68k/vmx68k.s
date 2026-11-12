@@ -1,8 +1,10 @@
 * -----------------------------------------------------------------------------
 * VMX68K.X: shows a virtual X68000 in an SX-Window window (docs/VMX68K.md)
 * The host runs the VM on a thread of its own and lays its screen over the
-* window's content, so this task only opens the window, carries out the VM's
-* disk requests when the host sends E_USER1 for them, and closes the VM at the end.
+* window's content below an icon bar, so this task opens the window, draws the
+* bar and pops up its menus, carries out the VM's disk requests when the host
+* sends E_USER1 for them, and closes the VM at the end. The bar's icons and the
+* menus' submenus are resources of VMX68K.LB, next to this program.
 * Drive 0 of the VM is the image at DRIVE0_PATH, read and written through
 * Human68k here, so the VM's disks live on the master VM's drives.
 * Assembled by rhas and linked by rhlk
@@ -12,6 +14,12 @@
 	.include "iocscall.mac"
 	.include "sxcall.mac"
 	.include "msx68k.mac"
+
+BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
+SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
+CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
+G_LGRAY		.equ	9
+G_BLACK		.equ	11
 
 	.text
 	.globl	_start
@@ -56,6 +64,18 @@ gui_start:
 	move.l	a0, d0
 	beq	do_ts_exit
 
+	* Open VMX68K.LB and read all of it, leaving no file open; without it the bar
+	* stays empty
+	pea	library_path(pc)
+	SXCALL	TSResOpen		; $A4A1
+	addq.l	#4, sp
+	move.l	a0, d0
+	beq.s	no_library
+	SXCALL	TSResLoad		; $A4A5
+	lea	library_open(pc), a1
+	st	(a1)
+no_library:
+
 	* Open drive 0's image, and find its size; without it the drive stays empty
 	move.w	#2, -(sp)		; read and write
 	pea	drive0_path(pc)
@@ -95,6 +115,7 @@ drives_counted:
 	moveq.l	#MSX68K_FN_VM_OPEN, d0
 	move.l	win_ptr(pc), d1
 	move.l	drive0_size(pc), d2
+	moveq.l	#BAR_HEIGHT, d4		; the VM's screen goes below the bar
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
@@ -111,7 +132,7 @@ event_loop:
 
 	pea	event_rec(pc)
 	* The host sends E_USER1 to the window when the VM has disk requests
-	move.w	#$7282, -(sp)		; EM_USER1 | EM_MSLDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
+	move.w	#$728A, -(sp)		; EM_USER1 | EM_MSLDOWN | EM_MSRDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
 	SXCALL	TSEventAvail		; $A357
 	addq.l	#6, sp
 
@@ -121,6 +142,8 @@ event_loop:
 	move.w	event_what(pc), d0
 	cmpi.w	#1, d0			; E_MSLDOWN
 	beq.s	handle_mouse_down
+	cmpi.w	#3, d0			; E_MSRDOWN
+	beq	handle_right_down
 	cmpi.w	#7, d0			; E_UPDATE
 	beq.s	handle_update
 	cmpi.w	#9, d0			; E_ACTIVATE
@@ -144,9 +167,9 @@ handle_activate:
 handle_system:
 	move.w	event_what2(pc), d0
 	cmpi.w	#1, d0			; ENDTSK
-	beq.s	quit_app
+	beq	quit_app
 	cmpi.w	#2, d0			; CLOSEALL
-	beq.s	quit_app
+	beq	quit_app
 	cmpi.w	#32, d0			; WINDOWSELECT
 	bne.s	event_loop
 	move.l	win_ptr(pc), -(sp)
@@ -155,12 +178,13 @@ handle_system:
 	bra.s	event_loop
 
 handle_update:
-	* Nothing to draw: the host shows the VM's screen over the content
+	* Only the bar to draw: the host shows the VM's screen over the rest
 	move.l	event_win(pc), d0
 	cmp.l	win_ptr(pc), d0
 	bne	event_loop
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	WMUpdate		; $A20D
+	bsr	draw_bar
 	SXCALL	WMUpdtOver		; $A20E
 	addq.l	#4, sp
 	bra	event_loop
@@ -182,7 +206,28 @@ track_window:
 	SXCALL	SXCallWindM		; $A3A2
 	addq.l	#8, sp
 	cmpi.w	#7, d0			; W_INCLOSE
-	beq.s	quit_app
+	beq	quit_app
+	bra	event_loop
+
+handle_right_down:
+	* The right button on an icon of the bar pops up its menu, as SX-Window's menus
+	* follow the right button
+	move.l	event_win(pc), d0
+	cmp.l	win_ptr(pc), d0
+	bne	event_loop
+	move.l	win_ptr(pc), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	move.l	event_where(pc), -(sp)
+	SXCALL	GMGlobalToLocal		; $A13F
+	addq.l	#4, sp
+	move.l	d0, -(sp)
+	pea	config_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq	event_loop
+	bsr	config_menu
 	bra	event_loop
 
 quit_app:
@@ -195,6 +240,11 @@ quit_app:
 	DOS	_CLOSE
 	addq.l	#2, sp
 dispose_window:
+	* VMX68K.LB goes without being written back
+	tst.b	library_open(pc)
+	beq.s	library_closed
+	SXCALL	TSResRemove		; $A4A4
+library_closed:
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	WMDispose		; $A1FC
 	addq.l	#4, sp
@@ -203,6 +253,137 @@ do_ts_exit:
 	SXCALL	TSExit			; $A352
 	clr.w	-(sp)
 	DOS	_EXIT2
+
+* -----------------------------------------------------------------------------
+* Helper: draw_bar
+* Draws the icon bar at the top of the window's content: the button face, a line
+* under it, and the icons.
+* -----------------------------------------------------------------------------
+draw_bar:
+	movem.l	d0-d2/a0-a1, -(sp)
+	move.l	win_ptr(pc), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	move.w	#G_BLACK, -(sp)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+	move.w	#G_LGRAY, -(sp)
+	SXCALL	GMBackColor		; $A148
+	addq.l	#2, sp
+	move.w	#$0100, -(sp)		; G_BACK << 8 | G_PSET
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	bar_rect(pc)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+	clr.w	-(sp)			; G_FORE << 8 | G_PSET
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	bar_line_rect(pc)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+
+	* The Configuration icon, a plot image whose planes follow its rectangle
+	tst.b	library_open(pc)
+	beq.s	draw_bar_done
+	move.w	#CONFIG_ICON_ID, -(sp)
+	move.l	#'PLOT', -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	move.l	a0, d0
+	beq.s	draw_bar_done
+	movea.l	(a0), a0
+	clr.w	-(sp)			; two planes, plain
+	pea	config_icon_rect(pc)
+	pea	8(a0)
+	SXCALL	GMPlotImg		; $A182
+	lea	10(sp), sp
+draw_bar_done:
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: config_menu
+* Pops up the Configuration menu where the right button went down:
+* "設定...", for the configuration dialog still to come, and the CPU's name with its
+* speeds as a submenu, the current one checked. A speed chosen is applied to the
+* VM at once.
+* -----------------------------------------------------------------------------
+config_menu:
+	movem.l	d0-d3/a0-a2, -(sp)
+	tst.b	library_open(pc)
+	beq	config_menu_done
+
+	* Check the current speed: rebuild the submenu from its items, with '!' before one
+	lea	menu_string(pc), a1
+	lea	speed_items(pc), a0
+	moveq.l	#0, d1
+config_speed_item:
+	cmp.w	vm_speed(pc), d1
+	bne.s	config_speed_copy
+	move.b	#'!', (a1)+
+config_speed_copy:
+	move.b	(a0)+, d0
+	beq.s	config_speed_next
+	move.b	d0, (a1)+
+	bra.s	config_speed_copy
+config_speed_next:
+	addq.w	#1, d1
+	cmpi.w	#SPEED_COUNT, d1
+	bcc.s	config_speed_built
+	move.b	#',', (a1)+
+	bra.s	config_speed_item
+config_speed_built:
+	clr.b	(a1)
+	move.w	#SPEED_MENU_ID, -(sp)
+	move.l	#'MENU', -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	move.l	a0, d0
+	beq	config_menu_done
+	clr.w	-(sp)			; MI_PLN
+	pea	menu_string(pc)
+	move.l	a0, -(sp)
+	SXCALL	MNConvert2		; $A26B
+	lea	10(sp), sp
+
+	clr.w	-(sp)			; MI_PLN
+	pea	config_menu_string(pc)
+	clr.l	-(sp)			; a new record
+	SXCALL	MNConvert2		; $A26B
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq.s	config_menu_done
+	movea.l	a0, a2
+	move.l	event_where(pc), -(sp)
+	move.l	a2, -(sp)
+	SXCALL	MNSelect		; $A268
+	addq.l	#8, sp
+	move.l	d0, d3
+	move.l	a2, -(sp)
+	SXCALL	MMHdlDispose		; $A038
+	addq.l	#4, sp
+
+	* A speed: the submenu's ID in the high word and its item, from 1, in the low
+	move.l	d3, d0
+	swap	d0
+	cmpi.w	#SPEED_MENU_ID, d0
+	bne.s	config_menu_done
+	move.w	d3, d2
+	subq.w	#1, d2
+	cmpi.w	#SPEED_COUNT, d2
+	bcc.s	config_menu_done
+	ext.l	d2
+	moveq.l	#MSX68K_FN_VM_SPEED, d0
+	move.l	vm_id(pc), d1
+	bsr	msx68k_call
+	tst.l	d0
+	bne.s	config_menu_done
+	lea	vm_speed(pc), a1
+	move.w	d2, (a1)
+config_menu_done:
+	movem.l	(sp)+, d0-d3/a0-a2
+	rts
 
 * -----------------------------------------------------------------------------
 * Helper: serve_disk
@@ -446,9 +627,27 @@ win_title:
 	.dc.b	6, "VMX68K", 0
 drive0_path:
 	.dc.b	"A:\VMX68K\DRIVE0.XDF", 0
+library_path:
+	.dc.b	"A:\X68\VMX68K.LB", 0
+* The Configuration menu, in Shift_JIS: "設定..." for the dialog, not there yet,
+* and the CPU with its speeds, an item whose shortcut is ESC and whose check is
+* the submenu's 'MENU' ID
+config_menu_string:
+	.dc.b	"~", $90, $DD, $92, $E8, "...,^", $1B, "|", SPEED_MENU_ID, "68000", 0
+* Items of the speed submenu, in the order of MSX68K_FN_VM_SPEED's speeds; Burst
+* is "最高速"
+speed_items:
+	.dc.b	"10MHz", 0, "16MHz", 0, "24MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
+SPEED_COUNT	.equ	4
 	.even
 win_bounds:
-	.dc.w	40, 40, 808, 552	; left, top, right, bottom: 768 x 512, the VM's screen
+	.dc.w	40, 40, 808, 552+BAR_HEIGHT	; left, top, right, bottom: the bar, then the VM's 768 x 512
+bar_rect:
+	.dc.w	0, 0, 768, BAR_HEIGHT-1
+bar_line_rect:
+	.dc.w	0, BAR_HEIGHT-1, 768, BAR_HEIGHT
+config_icon_rect:
+	.dc.w	4, 2, 24, 22
 
 win_ptr:
 	.dc.l	0
@@ -472,6 +671,15 @@ request_handle:
 	.dc.l	0
 win_active:
 	.dc.b	0
+library_open:
+	.dc.b	0
+	.even
+* Speed the VM runs at, by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
+vm_speed:
+	.dc.w	0
+* The speed submenu's items as MNConvert2 takes them, each with a '!' at most
+menu_string:
+	.ds.b	64
 	.even
 
 event_rec:
@@ -480,6 +688,7 @@ event_what:
 event_win:
 	.dc.l	0			; +2: whom.win
 	.dc.l	0			; +6: when
+event_where:
 	.dc.l	0			; +10: where
 event_what2:
 	.dc.w	0			; +14: ts.what2

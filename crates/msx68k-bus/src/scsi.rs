@@ -1153,7 +1153,8 @@ pub fn build_bootable_sxwin_scsi_hdd_with_files(
         }
     }
 
-    // 4c. Build VMX68K.X from guest/vmx68k/vmx68k.s into \X68, with SX-Window's applications.
+    // 4c. Build VMX68K.X from guest/vmx68k/vmx68k.s into \X68, with SX-Window's applications,
+    // and its resource library VMX68K.LB.
     let vmx68k_src = workspace_root.join("guest/vmx68k/vmx68k.s");
     if let Ok(vmx68k_bytes) =
         crate::guest_build::build_guest_x_executable(&vmx68k_src, &[&inc_dir])
@@ -1172,6 +1173,13 @@ pub fn build_bootable_sxwin_scsi_hdd_with_files(
             date: 0x5821,
             data: vmx68k_bytes,
         };
+        // VMX68K.LB, its resources, next to it.
+        let library = ExtractedFile {
+            raw_ext: *b"LB ",
+            data: crate::vmx68k_library::vmx68k_library(),
+            ..vmx68k.clone()
+        };
+        merged_map.insert(make_file_key(&library), library);
         merged_map.insert(make_file_key(&vmx68k), vmx68k);
     }
 

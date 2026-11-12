@@ -78,9 +78,9 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     master.reset().unwrap();
     master.run_steps(30_000_000);
 
-    // \X68 lists VMX68K.X after HDフォーマット.X.
+    // \X68 lists VMX68K.X after VMX68K.LB, as the first icon of the third row.
     click(&mut master, (22, 340), 2, 3_000_000);
-    click(&mut master, (343, 175), 2, 8_000_000);
+    click(&mut master, (104, 255), 2, 8_000_000);
     let events = master.bus.take_vm_events();
     let [VmEvent::Opened { id, window, drive0_bytes, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");

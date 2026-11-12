@@ -62,6 +62,27 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
     vm.run_steps(settle);
 }
 
+/// Opens the speed submenu of VMX68K.X's Configuration icon, in the window at its first place,
+/// with the right button, and lets go on its speed `item` (from 0), or away from the menu.
+fn choose_speed(vm: &mut X68kVm, item: Option<i16>, name: &str) {
+    let point = |vm: &mut X68kVm, at: (i16, i16), steps: usize| {
+        vm.bus.set_host_mouse_position(Some(at));
+        vm.bus.scc.add_mouse_delta(1, 1);
+        vm.run_steps(steps);
+    };
+    point(vm, (56, 52), 200_000);
+    vm.bus.scc.set_mouse_buttons(false, true);
+    point(vm, (56, 52), 1_000_000);
+    // The menu shows below the point, its CPU item second; the submenu opens over it.
+    point(vm, (90, 86), 6_000_000);
+    screenshot(vm, name);
+    point(vm, (120, 86), 1_000_000);
+    let at = item.map_or((300, 300), |item| (120, 88 + item * 16));
+    point(vm, at, 1_000_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    point(vm, at, 3_000_000);
+}
+
 fn screenshot(vm: &X68kVm, name: &str) {
     let Ok(dir) = std::env::var("MSX68K_SCREENSHOT_DIR") else {
         return;
@@ -101,23 +122,33 @@ fn vmx68k_opens_a_vm_in_its_window() {
     }
     vm.run_steps(3_000_000);
 
-    // \X68 lists VMX68K.X after HDフォーマット.X, as the fourth icon of the second row.
+    // \X68 lists VMX68K.X after VMX68K.LB, as the first icon of the third row.
     click(&mut vm, DRIVE_ICON, 2, 3_000_000);
     screenshot(&vm, "x68");
-    click(&mut vm, (343, 175), 2, 8_000_000);
+    click(&mut vm, (104, 255), 2, 8_000_000);
     screenshot(&vm, "vmx68k");
 
     let events = vm.bus.take_vm_events();
     let [VmEvent::Opened { id: 1, window, drive0_bytes: 0, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
-    // The content is the VM's 768x512 screen at the window's bounds. SX-Window's icon panel
-    // at the top left of the desktop covers a corner of it.
+    // The content is VMX68K.X's icon bar over the VM's 768x512 screen, at the window's bounds.
+    // SX-Window's icon panel at the top left of the desktop covers a corner of it.
     let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
-    assert_eq!((layout.left, layout.top), (40, 40));
+    assert_eq!((layout.left, layout.top), (40, 64));
     // The new window is active, so the keyboard goes to the VM.
     assert_eq!(vm.bus.active_window(), Some(window));
-    assert_eq!(layout.visible, [(45, 40, 808, 93), (40, 93, 808, 552)]);
+    assert_eq!(layout.visible, [(45, 64, 808, 93), (40, 93, 808, 576)]);
+
+    // The right button on the Configuration icon pops up its menu, and the CPU's item its
+    // speeds; one chosen goes to the host at once. The submenu checks the current speed.
+    choose_speed(&mut vm, Some(1), "speeds");
+    assert_eq!(vm.bus.take_vm_events(), [VmEvent::Speed { id: 1, mode: CpuSpeedMode::Mhz16 }]);
+    choose_speed(&mut vm, Some(3), "speeds_16mhz");
+    assert_eq!(vm.bus.take_vm_events(), [VmEvent::Speed { id: 1, mode: CpuSpeedMode::Burst }]);
+    // Let go away from the menu, nothing is chosen.
+    choose_speed(&mut vm, None, "speeds_burst");
+    assert_eq!(vm.bus.take_vm_events(), []);
 
     // Dragging the title bar moves the content, with nothing reported by VMX68K.X.
     vm.bus.set_host_mouse_position(Some((400, 29)));
@@ -135,8 +166,8 @@ fn vmx68k_opens_a_vm_in_its_window() {
     vm.run_steps(3_000_000);
     screenshot(&vm, "moved");
     let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
-    assert_eq!((layout.left, layout.top), (140, 140));
-    assert_eq!(layout.visible, [(140, 140, 908, 652)]);
+    assert_eq!((layout.left, layout.top), (140, 164));
+    assert_eq!(layout.visible, [(140, 164, 908, 676)]);
 
     // The close box closes the VM.
     click(&mut vm, (897, 129), 1, 3_000_000);
