@@ -40,6 +40,17 @@ run in a VM of their own from the start.
 - **Host bridges.** Later, the VM's IOCS and DOS calls are hooked and carried out as calls of the
   VMX68K.SX task in the master VM, so the master VM's Human68k stays the only owner of its file
   systems.
+- **Drive bypass mode, the default.** A VM sees the master VM's storage as it is, with the same
+  drive letters, bridged at the file level: each drive is a remote drive in the VM's Human68k,
+  whose file operations VMX68K.SX carries out through the master VM's Human68k. Sector access
+  to the master's disks is not given, since two Human68ks caching one file system would break
+  it.
+- **Booting from a remote drive.** A boot routine loads `HUMAN.SYS` through the bridge
+  and makes the bridged drive A: the boot drive, without sector access.
+- **A VM's own CONFIG.SYS and AUTOEXEC.BAT.** A VM must not start SX-Window, which the master's
+  `CONFIG.SYS` starts (`DEVICE = FSX.X`, `PROGRAM = TITLE.X`, `SHELL = SXWIN.X`). The bridge serves
+  `\VMX68K\CONFIG.SYS` and `\VMX68K\AUTOEXEC.BAT` when the VM opens `\CONFIG.SYS` and
+  `\AUTOEXEC.BAT` of its boot drive.
 - **Language.** VMX68K.SX is written in assembly, with the clean-room macros of `guest/include`
   and the in-process `rhas` / `rhlk` toolchain.
 - **Devices.** The existing device emulation is enough for the first goal.
@@ -170,8 +181,6 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 
 ## 6. Open Questions
 
-- **Bridge hook point.** DOS calls (`$FFxx`) directly, or a remote drive device driver in the VM's
-  Human68k.
 - **Mouse input to VMs**: relative or absolute motion, pointer capture, and how to leave it.
 - **Settings file format** and how double-clicking a settings file opens VMX68K.SX with it.
 - **Display scaling**: how a VM screen is scaled, once windows go beyond native size.
