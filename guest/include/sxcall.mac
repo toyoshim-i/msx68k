@@ -82,6 +82,7 @@ GMGlobalToLocal		.equ	$A13F	; Point by value (4B), returns [y:w, x:w] in D0
 GMPenMode		.equ	$A144	; Set pen transfer mode (int)
 GMForeColor		.equ	$A147	; Set foreground color (int)
 GMBackColor		.equ	$A148	; Set background color (int)
+GMAPage			.equ	$A149	; Set the text planes drawing reaches (mask.w) -> D0.W the previous
 GMNullRect		.equ	$A14E
 GMSizeRect		.equ	$A14F
 GMAndRects		.equ	$A150

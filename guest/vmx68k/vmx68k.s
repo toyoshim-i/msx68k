@@ -18,6 +18,7 @@
 BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
 SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
 CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
+G_THRU		.equ	0		; Clear text, where the host shows the VM's screen
 G_LGRAY		.equ	9
 G_BLACK		.equ	11
 
@@ -178,7 +179,7 @@ handle_system:
 	bra.s	event_loop
 
 handle_update:
-	* Only the bar to draw: the host shows the VM's screen over the rest
+	* The bar, and the rest clear for the VM's screen
 	move.l	event_win(pc), d0
 	cmp.l	win_ptr(pc), d0
 	bne	event_loop
@@ -257,7 +258,9 @@ do_ts_exit:
 * -----------------------------------------------------------------------------
 * Helper: draw_bar
 * Draws the icon bar at the top of the window's content: the button face, a line
-* under it, and the icons.
+* under it, and the icons. The rest is left clear (G_THRU): the host shows the
+* VM's screen only where the text is clear, under it, so that menus and windows
+* over this one stay in front.
 * -----------------------------------------------------------------------------
 draw_bar:
 	movem.l	d0-d2/a0-a1, -(sp)
@@ -282,6 +285,23 @@ draw_bar:
 	pea	bar_line_rect(pc)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
+	* Clear in all four planes: windows draw in planes 0 and 1 over plane 3 set
+	move.w	#$000F, -(sp)		; G_ALLPAGE
+	SXCALL	GMAPage			; $A149
+	addq.l	#2, sp
+	move.w	d0, d2
+	move.w	#G_THRU, -(sp)
+	SXCALL	GMBackColor		; $A148
+	addq.l	#2, sp
+	move.w	#$0100, -(sp)		; G_BACK << 8 | G_PSET
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	pea	screen_rect(pc)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+	move.w	d2, -(sp)
+	SXCALL	GMAPage			; $A149
+	addq.l	#2, sp
 
 	* The Configuration icon, a plot image whose planes follow its rectangle
 	tst.b	library_open(pc)
@@ -646,6 +666,8 @@ bar_rect:
 	.dc.w	0, 0, 768, BAR_HEIGHT-1
 bar_line_rect:
 	.dc.w	0, BAR_HEIGHT-1, 768, BAR_HEIGHT
+screen_rect:
+	.dc.w	0, BAR_HEIGHT, 768, BAR_HEIGHT+512
 config_icon_rect:
 	.dc.w	4, 2, 24, 22
 

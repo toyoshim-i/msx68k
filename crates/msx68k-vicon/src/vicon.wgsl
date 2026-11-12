@@ -99,6 +99,15 @@ fn sample_gvram_page0_index(x: u32, y: u32) -> u32 {
     }
 }
 
+// Whether the text plane is clear (palette index 0, SX-Window's G_THRU) at (x, y), where
+// what is under the text shows: VM screens are drawn there, under the text plane.
+fn text_is_clear(x: u32, y: u32) -> bool {
+    if ((params.r2_display & 0x0020u) == 0u) {
+        return true;
+    }
+    return sample_tvram_index(x, y) == 0u;
+}
+
 // Packed RGBA8 of the pixel at (x, y).
 fn composite(x: u32, y: u32) -> u32 {
     let text_enabled = (params.r2_display & 0x0020u) != 0u;

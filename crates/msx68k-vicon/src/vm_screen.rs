@@ -347,7 +347,8 @@ pub struct ScreenRect {
     pub bottom: i32,
 }
 
-/// A VM's screen drawn over the master VM's screen, where its window shows it.
+/// A VM's screen drawn into the master VM's screen where its window shows it, under the
+/// master's text plane: only where the text is clear.
 pub struct VmLayer<'a> {
     pub output: &'a VmScreenOutput,
     /// Position of the frame's top-left pixel on the master VM's screen.
@@ -393,6 +394,8 @@ impl Placement {
 struct LayerUniforms {
     dest: [f32; 4],
     size: [u32; 2],
+    origin: [i32; 2],
+    master: [u32; 2],
     _pad: [u32; 2],
 }
 
@@ -437,6 +440,16 @@ impl LayerPipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -475,11 +488,13 @@ impl LayerPipeline {
         Self { pipeline, layout }
     }
 
-    /// Binds each layer's latest completed frame. Layers with no frame yet, or nothing
-    /// visible, are left out.
+    /// Binds each layer's latest completed frame, and the master's composited screen `master`
+    /// whose clear text it shows through. Layers with no frame yet, or nothing visible, are
+    /// left out.
     pub fn prepare(
         &self,
         device: &wgpu::Device,
+        master: &wgpu::Buffer,
         layers: &[VmLayer<'_>],
         placement: &Placement,
     ) -> Vec<PreparedLayer> {
@@ -503,6 +518,8 @@ impl LayerPipeline {
                 let uniforms = LayerUniforms {
                     dest: [x0 / tw * 2.0 - 1.0, 1.0 - y0 / th * 2.0, x1 / tw * 2.0 - 1.0, 1.0 - y1 / th * 2.0],
                     size: [frame.width, frame.height],
+                    origin: [layer.left, layer.top],
+                    master: [placement.screen.0, placement.screen.1],
                     _pad: [0; 2],
                 };
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -521,6 +538,10 @@ impl LayerPipeline {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(frame.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: master.as_entire_binding(),
                         },
                     ],
                 });

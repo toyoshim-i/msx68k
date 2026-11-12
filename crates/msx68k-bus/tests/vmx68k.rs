@@ -76,11 +76,22 @@ fn choose_speed(vm: &mut X68kVm, item: Option<i16>, name: &str) {
     // The menu shows below the point, its CPU item second; the submenu opens over it.
     point(vm, (90, 86), 6_000_000);
     screenshot(vm, name);
+    // The menus are text over the window, which the host keeps in front of the VM's screen.
+    assert_ne!(text_index(vm, (90, 86)), 0, "the CPU's item");
+    assert_ne!(text_index(vm, (120, 104)), 0, "the submenu");
     point(vm, (120, 86), 1_000_000);
     let at = item.map_or((300, 300), |item| (120, 88 + item * 16));
     point(vm, at, 1_000_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     point(vm, at, 3_000_000);
+}
+
+/// Palette index of the master's text plane at screen `(x, y)`, 0 where it is clear.
+fn text_index(vm: &X68kVm, (x, y): (usize, usize)) -> u8 {
+    let tvram = vm.bus.active_tvram().unwrap();
+    let (row, plane) = (vm.bus.active_tvram_row_bytes(), vm.bus.active_tvram_plane_bytes());
+    let (at, bit) = (y * row + x / 8, 7 - (x & 7));
+    (0..4).fold(0, |v, p| v | ((tvram[p * plane + at] >> bit) & 1) << p)
 }
 
 fn screenshot(vm: &X68kVm, name: &str) {
@@ -136,6 +147,11 @@ fn vmx68k_opens_a_vm_in_its_window() {
     // SX-Window's icon panel at the top left of the desktop covers a corner of it.
     let layout = vm.bus.vm_window_layout(window).expect("the window must be shown");
     assert_eq!((layout.left, layout.top), (40, 64));
+    // The VM's screen shows where the window leaves the text clear: below the bar.
+    assert_ne!(text_index(&vm, (300, 52)), 0, "the bar");
+    for at in [(300, 64), (400, 300), (807, 575)] {
+        assert_eq!(text_index(&vm, at), 0, "{at:?}");
+    }
     // The new window is active, so the keyboard goes to the VM.
     assert_eq!(vm.bus.active_window(), Some(window));
     assert_eq!(layout.visible, [(45, 64, 808, 93), (40, 93, 808, 576)]);

@@ -34,10 +34,11 @@ run in a VM of their own from the start.
   virtual files such as disk images) and memory size, among others. A setup is saved as a settings
   file, and opening the file boots a VM with the same settings.
 - **Settings menus.** VMX68K.SX's window has a bar of icons above the VM's screen, pictures
-  rather than words, as in `シャーペン.X`. The right button on one pops up its menu, as
-  SX-Window's menus follow the right button (`MNSelect`). Menus are in Japanese, as
-  SX-Window is. The icons and the submenus are resources of `VMX68K.LB`, next to `VMX68K.X`,
-  since the Menu Man takes submenus only as `'MENU'` resources of an open library. There is no
+  rather than words, as in `シャーペン.X`, each in the style of SX-Window's icons: a picture in
+  a rectangular recess. The right button on one pops up its menu, as SX-Window's menus follow
+  the right button (`MNSelect`). Menus are in Japanese, as SX-Window is. The icons and the
+  submenus are resources of `VMX68K.LB`, next to `VMX68K.X`, since the Menu Man takes
+  submenus only as `'MENU'` resources of an open library. There is no
   Save button: what takes effect at once is applied and saved when chosen, and what needs a
   restart is changed in a dialog, saved when the dialog closes, and followed, if anything
   changed, by a dialog saying the settings take effect when the VM restarts and asking whether
@@ -134,7 +135,10 @@ windows work the same way as the master VM.
   every frame.
 - **The final pass runs on the main thread.** It draws the master VM's screen, then each VM's
   completed texture into its window's content rectangle, clipped to the window's visible region
-  as a list of scissor rectangles, then the cursor as a layer of its own.
+  as a list of scissor rectangles, and under the master's text plane: only where the text is
+  clear (palette index 0, SX-Window's `G_THRU`), as the X68000 shows graphics under clear text.
+  VMX68K.SX clears its screen area in all four planes (`GMAPage`), so menus, other windows,
+  and the cursor that SX-Window draws in text over it stay in front.
 - **The load is bounded.** A still screen uploads a few kilobytes per frame. Even when every VRAM
   page changes every frame, the upload cannot exceed the VRAM itself, about 1 MB per frame,
   whatever speed the VM runs at.
@@ -146,8 +150,7 @@ windows work the same way as the master VM.
   rather than through SX-Window events, so the VM sees physical key information.
 - The mouse is left out of the first version: relative motion would need pointer capture and a
   way out of it, which few early uses need.
-- For now the SX-Window cursor may go under VM windows. Over a VM's screen it reads as the
-  pointer being captured by the VM, so no cursor layer is needed before VM windows appear.
+- The SX-Window cursor is text, so it shows over VM windows like the rest of SX-Window.
 
 ### 3.5 VMX68K.SX and the Host
 - **Calls.** VMX68K.SX reaches the host through msx68k's application entry

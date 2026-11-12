@@ -489,6 +489,7 @@ impl ViconGpuCompositor {
         let viewport = letterbox(uniforms.width, uniforms.height, surface_width, surface_height);
         let layers = presenter.layers.prepare(
             &self.device,
+            &self.output_buf,
             layers,
             &Placement {
                 viewport,
@@ -618,8 +619,12 @@ impl ViconGpuCompositor {
         rx.recv().unwrap().unwrap();
 
         let data = slice.get_mapped_range();
-        let rgba8 = data.to_vec();
+        let mut rgba8 = data.to_vec();
         drop(data);
+        // Alpha marks where the text plane is clear, for VM layers only: frames are opaque.
+        for pixel in rgba8.chunks_exact_mut(4) {
+            pixel[3] = 0xFF;
+        }
         self.staging_buf.unmap();
 
         RenderedFrame {

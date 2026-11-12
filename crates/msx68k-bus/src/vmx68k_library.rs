@@ -15,28 +15,30 @@ pub const CONFIGURATION_ICON_ID: u16 = 1;
 /// Items of the speed menu, in Shift_JIS as SX-Window shows them: Burst is 最高速.
 const SPEEDS: [&[u8]; 4] = [b"10MHz", b"16MHz", b"24MHz", b"\x8D\xC5\x8D\x82\x91\xAC"];
 
-/// The Configuration icon, a gear (see [`plot_image`]).
+/// The Configuration icon (see [`plot_image`]), in the style of SX-Window's icons: a picture
+/// in a rectangular recess, black at its top and left and white at its bottom and right, over
+/// dark gray, here a white gear with its shadow to the bottom right.
 const CONFIGURATION_ICON: [&str; 20] = [
-    "                    ",
-    "         ##         ",
-    "    ##  #oo#  ##    ",
-    "   #oo##oooo##oo#   ",
-    "   #oooooooooooo#   ",
-    "    #oooooooooo#    ",
-    "   #oooo####oooo#   ",
-    " ##oooo#    #oooo## ",
-    "#ooooo#      #ooooo#",
-    "#oooo#        #oooo#",
-    "#oooo#        #oooo#",
-    "#ooooo#      #ooooo#",
-    " ##oooo#    #oooo## ",
-    "   #oooo####oooo#   ",
-    "    #oooooooooo#    ",
-    "   #oooooooooooo#   ",
-    "   #oo##oooo##oo#   ",
-    "    ##  #oo#  ##    ",
-    "         ##         ",
-    "                    ",
+    "####################",
+    "#++++++++++++++++++o",
+    "#++++++++++++++++++o",
+    "#+++++++ooo++++++++o",
+    "#+++oo++ooo#+oo++++o",
+    "#+++ooooooooooo#+++o",
+    "#++++ooooooooo##+++o",
+    "#++++ooo###ooo#++++o",
+    "#++oooo##+++oooo+++o",
+    "#++oooo#++++oooo#++o",
+    "#++oooo#++++oooo#++o",
+    "#+++#ooo+++ooo###++o",
+    "#++++ooooooooo#++++o",
+    "#+++ooooooooooo++++o",
+    "#+++oo##ooo##oo#+++o",
+    "#++++##+ooo#++##+++o",
+    "#++++++++###+++++++o",
+    "#++++++++++++++++++o",
+    "#++++++++++++++++++o",
+    "#ooooooooooooooooooo",
 ];
 
 /// Encodes a picture as a plot image, which `GMPlotImg` draws with a plot mode of two pages:

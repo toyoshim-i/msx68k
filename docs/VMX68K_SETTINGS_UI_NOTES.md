@@ -86,6 +86,13 @@ official SX-Window programming manuals.
   no mask, so it is not a plot image.
 - Over SX-Window's 4-plane text screen, a two-plane image gets plane 3 set and plane 2 clear:
   neither plane is white (8), plane 0 light gray (9), plane 1 dark gray (10), both black (11).
+- Windows draw in planes 0 and 1 over plane 3 set, so a color 0 fill gives white (8), not clear
+  text. `GMAPage` (`$A149`, `G_ALLPAGE` = `$0F`) makes drawing reach all four planes, as the
+  Workroom's `SUBWIN.C` does to clear a subwindow; VMX68K.X clears its screen area so, and the
+  host shows the VM's screen only where the master's text is clear.
+- SX-Window's icons are pictures in a rectangular recess: in the Filer's, a raised plate (white
+  top and left, black bottom and right) holds a recess (black top and left, white bottom and
+  right) over dark gray, and the picture is white with a black shadow to the bottom right.
 
 ### 1.6 State of VMX68K
 - VMX68K.X (`guest/vmx68k/vmx68k.s`) opens a 768x512 window, `VmOpen`s, waits for events with
