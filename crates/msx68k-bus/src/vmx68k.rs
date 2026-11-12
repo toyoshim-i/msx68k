@@ -24,36 +24,100 @@ const WINDOW_VISIBLE_RGN: u32 = 16;
 const WINDOW_VISIBLE: u32 = 66;
 const BITMAP_RECT: u32 = 2;
 
-/// A disk image that the master VM keeps, which a VM's floppy drive reaches through requests
-/// (`docs/VMX68K.md` Section 3.1). The drive's thread waits for each reply.
+/// The channel through which a VM asks VMX68K.SX, in the master VM, to read or write the
+/// master's storage for it (`docs/VMX68K.md` Section 3.1). The asking thread waits for each
+/// reply.
+#[derive(Debug, Clone)]
+pub struct VmBridge {
+    requests: Sender<BridgeRequest>,
+}
+
+/// One request to VMX68K.SX, answered with its [`BridgeReply`], or `None` when it could not be
+/// carried out.
+#[derive(Debug)]
+pub struct BridgeRequest {
+    pub op: BridgeOp,
+    pub reply: Sender<Option<BridgeReply>>,
+}
+
+/// What VMX68K.SX does, by the kind `VmPoll` returns in `D0.L`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeOp {
+    /// 1: reads `len` bytes of drive 0's image at `offset`.
+    Read { offset: u32, len: u32 },
+    /// 2: writes the bytes to drive 0's image at `offset`.
+    Write { offset: u32, data: Vec<u8> },
+    /// 3: opens the master's file `path` for reading; the result is its handle.
+    Open { path: Vec<u8> },
+    /// 4: reads `len` bytes at `offset` of the master's file `handle`; the result is the count.
+    HandleRead { handle: u32, offset: u32, len: u32 },
+    /// 5: closes the master's file `handle`.
+    Close { handle: u32 },
+    /// 6: `_FILES` for `path` with `attr`; the data is the 53-byte buffer.
+    Files { attr: u32, path: Vec<u8> },
+    /// 7: `_NFILES` with the 53-byte buffer of an earlier search.
+    Nfiles { buffer: Vec<u8> },
+    /// 8: `_DSKFRE` of `drive` (1 is A:); the data is the 8-byte buffer.
+    Dskfre { drive: u32 },
+}
+
+impl BridgeOp {
+    fn kind(&self) -> u32 {
+        match self {
+            Self::Read { .. } => 1,
+            Self::Write { .. } => 2,
+            Self::Open { .. } => 3,
+            Self::HandleRead { .. } => 4,
+            Self::Close { .. } => 5,
+            Self::Files { .. } => 6,
+            Self::Nfiles { .. } => 7,
+            Self::Dskfre { .. } => 8,
+        }
+    }
+}
+
+/// The `D0.L` result of the DOS call VMX68K.SX made, and the bytes it read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeReply {
+    pub result: u32,
+    pub data: Vec<u8>,
+}
+
+/// Bytes for VMX68K.SX's buffer, at an offset into it.
+type BufferBytes = (u32, Vec<u8>);
+
+/// Bytes of VMX68K.SX's buffer where `Files` puts the path, after the 53-byte search buffer.
+const FILES_PATH: u32 = 64;
+
+/// Returns a [`VmBridge`] and the requests it will make, for [`X68kBus::attach_vm_bridge`].
+pub fn vm_bridge() -> (VmBridge, Receiver<BridgeRequest>) {
+    let (requests, queue) = mpsc::channel();
+    (VmBridge { requests }, queue)
+}
+
+impl VmBridge {
+    /// Asks VMX68K.SX to carry out `op` and waits for the reply.
+    pub fn ask(&self, op: BridgeOp) -> Option<BridgeReply> {
+        let (reply, answer) = mpsc::channel();
+        self.requests.send(BridgeRequest { op, reply }).ok()?;
+        // A closed VM drops its requests, and with them this reply.
+        answer.recv().ok()?
+    }
+}
+
+/// A disk image that the master VM keeps, which a VM's floppy drive reads and writes through
+/// its [`VmBridge`].
 #[derive(Debug, Clone)]
 pub struct RemoteDisk {
     len: usize,
-    requests: Sender<DiskRequest>,
-}
-
-/// One read or write of a [`RemoteDisk`], answered with the bytes read, or `Some` of nothing for
-/// a write, or `None` when it failed.
-#[derive(Debug)]
-pub struct DiskRequest {
-    pub offset: u32,
-    pub op: DiskOp,
-    pub reply: Sender<Option<Vec<u8>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiskOp {
-    Read(u32),
-    Write(Vec<u8>),
-}
-
-/// Returns a [`RemoteDisk`] of `len` bytes and the requests it will make.
-pub fn remote_disk(len: usize) -> (RemoteDisk, Receiver<DiskRequest>) {
-    let (requests, queue) = mpsc::channel();
-    (RemoteDisk { len, requests }, queue)
+    bridge: VmBridge,
 }
 
 impl RemoteDisk {
+    pub fn new(bridge: VmBridge, len: usize) -> Self {
+        Self { len, bridge }
+    }
+
     /// Size of the image.
     pub fn len(&self) -> usize {
         self.len
@@ -63,26 +127,25 @@ impl RemoteDisk {
         self.len == 0
     }
 
-    fn ask(&self, offset: usize, op: DiskOp) -> Option<Vec<u8>> {
-        let (reply, answer) = mpsc::channel();
-        let request = DiskRequest {
-            offset: offset as u32,
-            op,
-            reply,
-        };
-        self.requests.send(request).ok()?;
-        // A closed VM drops its requests, and with them this reply.
-        answer.recv().ok()?
-    }
-
     /// Reads `len` bytes at `offset`, waiting for the master VM.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        self.ask(offset, DiskOp::Read(len as u32)).filter(|data| data.len() == len)
+        let op = BridgeOp::Read {
+            offset: offset as u32,
+            len: len as u32,
+        };
+        self.bridge
+            .ask(op)
+            .filter(|reply| reply.result == 0 && reply.data.len() == len)
+            .map(|reply| reply.data)
     }
 
     /// Writes `data` at `offset`, waiting for the master VM.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
-        self.ask(offset, DiskOp::Write(data)).is_some()
+        let op = BridgeOp::Write {
+            offset: offset as u32,
+            data,
+        };
+        self.bridge.ask(op).is_some_and(|reply| reply.result == 0)
     }
 }
 
@@ -103,15 +166,15 @@ pub(crate) struct VmWindows {
     /// ID and window of each open VM.
     open: Vec<(u32, u32)>,
     events: Vec<VmEvent>,
-    /// Disk requests of each VM, and the one VMX68K.SX is carrying out with its buffer.
+    /// Bridge requests of each VM, and the one VMX68K.SX is carrying out with its buffer.
     disks: Vec<(u32, VmDisk)>,
 }
 
 #[derive(Debug)]
 struct VmDisk {
-    requests: Receiver<DiskRequest>,
+    requests: Receiver<BridgeRequest>,
     /// Requests taken from the channel and not answered yet, oldest first.
-    pending: VecDeque<DiskRequest>,
+    pending: VecDeque<BridgeRequest>,
     /// Buffer address and size that `VmPoll` was given for the request at the front.
     buffer: Option<(u32, u32)>,
     /// Whether VMX68K.SX has been sent `E_USER1` for requests it has not polled for yet.
@@ -136,8 +199,8 @@ impl X68kBus {
         (window != 0).then_some(window & 0x00FF_FFFF)
     }
 
-    /// Lets VMX68K.SX carry out the disk requests of VM `id`.
-    pub fn attach_vm_disk(&mut self, id: u32, requests: Receiver<DiskRequest>) {
+    /// Lets VMX68K.SX carry out the bridge requests of VM `id`.
+    pub fn attach_vm_bridge(&mut self, id: u32, requests: Receiver<BridgeRequest>) {
         let disk = VmDisk {
             requests,
             pending: VecDeque::new(),
@@ -148,8 +211,8 @@ impl X68kBus {
         self.vm_windows.disks.push((id, disk));
     }
 
-    /// Drops the disk requests of VM `id`, which fails the ones its thread waits for.
-    pub fn detach_vm_disk(&mut self, id: u32) {
+    /// Drops the bridge requests of VM `id`, which fails the ones its thread waits for.
+    pub fn detach_vm_bridge(&mut self, id: u32) {
         self.vm_windows.disks.retain(|(open, _)| *open != id);
     }
 
@@ -205,10 +268,10 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmPoll`: hands VMX68K.SX the next disk request of VM `D1.L`, given its buffer at `D2.L`
-    /// of `D3.L` bytes. Returns `D0.L` 0 for none, 1 to read `D2.L` bytes at offset `D1.L` of the
-    /// image into the buffer, 2 to write `D2.L` bytes from the buffer there, or -1 for an
-    /// unknown VM. A request stays handed out until `VmReply`.
+    /// `VmPoll`: hands VMX68K.SX the next bridge request of VM `D1.L`, given its buffer at `D2.L`
+    /// of `D3.L` bytes. Returns the request's kind in `D0.L` (see [`BridgeOp`]), 0 for none, or
+    /// -1 for an unknown VM, its numbers in `D1.L`..`D3.L`, and its bytes in the buffer. A
+    /// request stays handed out until `VmReply`.
     pub(crate) fn hypercall_vm_poll(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
         if !self.vm_windows.open.iter().any(|&(open, _)| open == id) {
@@ -227,19 +290,33 @@ impl X68kBus {
             }
         }
         // One request at a time: the next one waits for the reply to this.
-        let next = match disk.pending.front() {
-            Some(request) if disk.buffer.is_none() => Some((request.offset, request.op.clone())),
-            _ => None,
+        let op = match disk.pending.front() {
+            Some(request) if disk.buffer.is_none() => request.op.clone(),
+            _ => {
+                state.d[0] = 0;
+                return TrapResult::Handled { extra_cycles: 0 };
+            }
         };
-        let Some((offset, op)) = next else {
-            state.d[0] = 0;
-            return TrapResult::Handled { extra_cycles: 0 };
+        // Numbers in D1..D3, bytes for the buffer, and how many bytes the reply brings back.
+        let (numbers, bytes, reply_len): ([u32; 3], Vec<BufferBytes>, u32) = match &op {
+            BridgeOp::Read { offset, len } => ([*offset, *len, 0], vec![], *len),
+            BridgeOp::Write { offset, data } => ([*offset, data.len() as u32, 0], vec![(0, data.clone())], 0),
+            BridgeOp::Open { path } => ([0, 0, 0], vec![(0, nul_terminated(path))], 0),
+            BridgeOp::HandleRead { handle, offset, len } => ([*offset, *len, *handle], vec![], *len),
+            BridgeOp::Close { handle } => ([0, 0, *handle], vec![], 0),
+            BridgeOp::Files { attr, path } => {
+                ([*attr, 0, 0], vec![(0, vec![0; 53]), (FILES_PATH, nul_terminated(path))], 53)
+            }
+            BridgeOp::Nfiles { buffer } => ([0, 0, 0], vec![(0, buffer.clone())], 53),
+            BridgeOp::Dskfre { drive } => ([*drive, 0, 0], vec![], 8),
         };
-        let len = match &op {
-            DiskOp::Read(len) => *len,
-            DiskOp::Write(data) => data.len() as u32,
-        };
-        if len > size {
+        let needed = bytes
+            .iter()
+            .map(|(at, data)| at + data.len() as u32)
+            .chain([reply_len])
+            .max()
+            .unwrap_or(0);
+        if needed > size {
             // The buffer cannot hold it: fail the request rather than leave the VM waiting.
             if let Some(request) = disk.pending.pop_front() {
                 let _ = request.reply.send(None);
@@ -247,42 +324,41 @@ impl X68kBus {
             state.d[0] = 0;
             return TrapResult::Handled { extra_cycles: 0 };
         }
-        disk.buffer = Some((buffer, len));
-        if let DiskOp::Write(data) = &op {
+        disk.buffer = Some((buffer, reply_len));
+        for (at, data) in bytes {
             for (i, &byte) in data.iter().enumerate() {
-                self.poke_u8(buffer + i as u32, byte);
+                self.poke_u8(buffer + at + i as u32, byte);
             }
         }
-        state.d[0] = match op {
-            DiskOp::Read(_) => 1,
-            DiskOp::Write(_) => 2,
-        };
-        state.d[1] = offset;
-        state.d[2] = len;
+        state.d[0] = op.kind();
+        [state.d[1], state.d[2], state.d[3]] = numbers;
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmReply`: VMX68K.SX carried out the request `VmPoll` handed out for VM `D1.L`, which
-    /// succeeded when `D2.L` is 0. A read's bytes are in the buffer. Returns 0, or -1 when no
-    /// request was handed out.
+    /// `VmReply`: VMX68K.SX carried out the request `VmPoll` handed out for VM `D1.L`, with the
+    /// DOS result `D2.L` (0 for success of an image read or write). Bytes read are in the
+    /// buffer. Returns 0, or -1 when no request was handed out.
     pub(crate) fn hypercall_vm_reply(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
-        let ok = state.d[2] == 0;
+        let result = state.d[2];
         let taken = self
             .vm_windows
             .disks
             .iter_mut()
             .find(|(open, _)| *open == id)
             .and_then(|(_, disk)| Some((disk.buffer.take()?, disk.pending.pop_front()?)));
-        let Some(((buffer, len), request)) = taken else {
+        let Some(((buffer, reply_len), request)) = taken else {
             state.d[0] = u32::MAX;
             return TrapResult::Handled { extra_cycles: 0 };
         };
-        let answer = ok.then(|| match request.op {
-            DiskOp::Read(_) => (0..len).map(|i| self.peek_u8(buffer + i).unwrap_or(0)).collect(),
-            DiskOp::Write(_) => Vec::new(),
-        });
-        let _ = request.reply.send(answer);
+        // A handle read brings back as many bytes as it read; the others what their op says.
+        let len = match request.op {
+            BridgeOp::HandleRead { .. } if (result as i32) >= 0 => result.min(reply_len),
+            BridgeOp::HandleRead { .. } => 0,
+            _ => reply_len,
+        };
+        let data = (0..len).map(|i| self.peek_u8(buffer + i).unwrap_or(0)).collect();
+        let _ = request.reply.send(Some(BridgeReply { result, data }));
         state.d[0] = 0;
         TrapResult::Handled { extra_cycles: 0 }
     }
@@ -336,6 +412,13 @@ impl X68kBus {
             visible: rects,
         })
     }
+}
+
+/// `path` with a NUL after it, as DOS calls take names.
+fn nul_terminated(path: &[u8]) -> Vec<u8> {
+    let mut bytes = path.to_vec();
+    bytes.push(0);
+    bytes
 }
 
 #[cfg(test)]

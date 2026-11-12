@@ -165,6 +165,22 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   before the result phase. VMX68K.X carries requests out one at a time with DOS `_SEEK`,
   `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Human68k 3.02 boots from the
   master VM's HDD to `A>` this way (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
+- Drive bypass mode, first step (`crates/msx68k-bus/src/remote_fs.rs`): a VM's ROM window holds
+  a boot ROM at `$FC0000` laid out like the internal SCSI ROM (IPL boot handle, install handle
+  at the boot routine - 16, `'Human68k'`), and SRAM boots from it. The IPL boot routine reads
+  `HUMAN.SYS` from the master's `A:` through the bridge, puts its text and data at `$6800`,
+  clears its bss, and jumps there. The install routine builds a remote device (`$2000`) with
+  one unit, the master's `A:`. Its initialise command writes `$00` over its command code,
+  since Human68k reuses the request to initialise DISK2HD without setting it, which `$40`
+  would send past DISK2HD's jump table. CHDIR, FILES, NFILES, OPEN
+  for reading, READ, SEEK, CLOSE, FILEDATE, DSKFRE, DRVCTRL, GETDPB, FFLUSH, and MEDIACHECK
+  become the master's DOS calls (`VmPoll` kinds 3 to 8); the seek position and size live in
+  the FCB. Writing returns `-19` for now. Until the VM opens the shell named by its
+  CONFIG.SYS (`COMMAND.X` by default), `\CONFIG.SYS` of the boot drive opens
+  `\VMX68K\CONFIG.SYS`, or, when the master has none, a CONFIG.SYS the host serves from
+  memory (`FILES`, `BUFFERS`, `LASTDRIVE` only). Human68k 3.02 boots this way, runs the
+  master's `AUTOEXEC.BAT`, and reaches `A>` (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
+  The app starts VMs this way unless `--vm-fd0` names a floppy image.
 - The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
   Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests
   until VMX68K.X polls. SX-Window's own mask (`$03BF`) leaves user events out, so the host posts

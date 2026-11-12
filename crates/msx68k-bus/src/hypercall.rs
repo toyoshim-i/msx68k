@@ -55,6 +55,12 @@ pub enum HypercallId {
     AlertGlyphOr,
     /// The application entry at [`APP_ENTRY`], whose function `D0.L` selects.
     AppEntry,
+    /// A VM's boot ROM for its remote drives: IPL boot, driver install, and the remote
+    /// device's strategy and interrupt routines (see [`crate::remote_fs`]).
+    RemoteBoot,
+    RemoteInstall,
+    RemoteStrategy,
+    RemoteInterrupt,
 }
 
 /// Functions of the application entry, selected by `D0.L`.
@@ -127,9 +133,10 @@ impl X68kBus {
 
     /// Returns `true` if `addr` lies in the internal SCSI ROM window where nothing is mapped.
     pub(crate) fn in_absent_scsi_rom_window(&self, addr: u32) -> bool {
-        (0x00FC_0000..0x00FE_0000).contains(&addr)
-            && !self.scsi.scsi_rom_enabled
-            && !(self.app_entry_installed && addr >= APP_ENTRY_BASE)
+        let mapped = self.scsi.scsi_rom_enabled
+            || self.remote_boot_rom
+            || (self.app_entry_installed && addr >= APP_ENTRY_BASE);
+        (0x00FC_0000..0x00FE_0000).contains(&addr) && !mapped
     }
 
     /// Carries out the hypercall registered at `pc`; any other F-Line instruction goes to the
@@ -155,6 +162,10 @@ impl X68kBus {
             HypercallId::AlertRowCopy => self.hypercall_alert_row_copy(state),
             HypercallId::AlertIconCopy => self.hypercall_alert_icon_copy(state),
             HypercallId::AlertGlyphOr => self.hypercall_alert_glyph_or(state),
+            HypercallId::RemoteBoot => self.hypercall_remote_boot(state),
+            HypercallId::RemoteInstall => self.hypercall_remote_install(state),
+            HypercallId::RemoteStrategy => self.hypercall_remote_strategy(state),
+            HypercallId::RemoteInterrupt => self.hypercall_remote_interrupt(state),
             HypercallId::AppEntry => match AppFunction::from_d0(state.d[0]) {
                 Some(AppFunction::Version) => {
                     state.d[0] = APP_ENTRY_VERSION as u32;

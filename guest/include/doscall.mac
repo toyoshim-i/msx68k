@@ -70,3 +70,4 @@ _FILES		.equ	$FF4E
 _NFILES		.equ	$FF4F
 _SUPER_JSR	.equ	$FFF6
 _BUS_ERR	.equ	$FFF7
+_DSKFRE		.equ	$FF36

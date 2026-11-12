@@ -98,6 +98,10 @@ pub struct X68kBus {
     pub(crate) hypercall_sites: std::collections::HashMap<u32, crate::hypercall::HypercallId>,
     /// VMs that VMX68K.SX has opened (see [`crate::vmx68k`]).
     pub(crate) vm_windows: crate::vmx68k::VmWindows,
+    /// A VM's remote drives in drive bypass mode (see [`crate::remote_fs`]), and whether their
+    /// boot ROM is mapped in the SCSI ROM window.
+    pub(crate) remote_fs: Option<Box<crate::remote_fs::RemoteFs>>,
+    pub(crate) remote_boot_rom: bool,
     /// Whether the application entry is mapped at the end of the SCSI ROM window.
     pub(crate) app_entry_installed: bool,
     /// TVRAM and GVRAM pages written since the last [`Self::take_written_vram_pages`].
@@ -229,6 +233,8 @@ impl X68kBus {
             vram_written: DirtyVramPages::default(),
             hypercall_sites: Default::default(),
             app_entry_installed: false,
+            remote_fs: None,
+            remote_boot_rom: false,
             vm_windows: Default::default(),
             sprite_bg: None,
             sram,

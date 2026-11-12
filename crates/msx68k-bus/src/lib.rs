@@ -11,6 +11,7 @@ pub mod hypercall;
 pub mod mfp;
 pub mod native_gm;
 pub mod peripherals;
+pub mod remote_fs;
 pub mod scsi;
 pub mod sx_control_panel;
 pub mod sx_resource;

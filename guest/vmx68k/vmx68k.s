@@ -191,7 +191,9 @@ do_ts_exit:
 
 * -----------------------------------------------------------------------------
 * Helper: serve_disk
-* Carries out the VM's disk requests on drive 0's image until there are none
+* Carries out the VM's bridge requests until there are none: reads and writes of
+* drive 0's image, and the master's DOS calls a VM's remote drives need. The
+* kinds are those of BridgeOp in crates/msx68k-bus/src/vmx68k.rs.
 * -----------------------------------------------------------------------------
 serve_disk:
 	movem.l	d0-d3/a0-a1, -(sp)
@@ -203,39 +205,108 @@ serve_next:
 	move.l	#DISK_BUFFER_SIZE, d3
 	bsr	msx68k_call
 	tst.l	d0
-	ble.s	serve_done		; 0: nothing to do, -1: no such VM
+	ble	serve_done		; 0: nothing to do, -1: no such VM
 	lea	request(pc), a1
-	move.l	d0, (a1)+		; kind: 1 read, 2 write
-	move.l	d1, (a1)+		; offset in the image
-	move.l	d2, (a1)		; length
-	moveq.l	#-1, d3			; failed unless the transfer completes
-	move.w	drive0_fd(pc), d0
-	bmi.s	serve_reply
+	move.l	d0, (a1)+		; kind
+	move.l	d1, (a1)+		; offset, attribute, or drive
+	move.l	d2, (a1)+		; length
+	move.l	d3, (a1)		; handle
+	cmpi.l	#3, d0
+	bcs.s	serve_image
+	beq	serve_open
+	cmpi.l	#5, d0
+	bcs	serve_handle_read
+	beq	serve_close
+	cmpi.l	#7, d0
+	bcs	serve_files
+	beq	serve_nfiles
+	bra	serve_dskfre
 
+serve_image:
+	* 1, 2: read or write drive 0's image; the reply is 0, or -1 when it fails
+	moveq.l	#-1, d3
+	move.w	drive0_fd(pc), d0
+	bmi	serve_reply
 	clr.w	-(sp)			; from the start
 	move.l	request_offset(pc), -(sp)
 	move.w	d0, -(sp)
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
-	bmi.s	serve_reply
-
+	bmi	serve_reply
 	move.l	request_length(pc), -(sp)
 	pea	disk_buffer(pc)
 	move.w	drive0_fd(pc), -(sp)
 	move.l	request_kind(pc), d0
 	cmpi.l	#1, d0
-	bne.s	serve_write
+	bne.s	serve_image_write
 	DOS	_READ
-	bra.s	serve_moved
-serve_write:
+	bra.s	serve_image_moved
+serve_image_write:
 	DOS	_WRITE
-serve_moved:
+serve_image_moved:
 	lea	10(sp), sp
 	cmp.l	request_length(pc), d0
-	bne.s	serve_reply
+	bne	serve_reply
 	moveq.l	#0, d3
+	bra	serve_reply
 
+serve_open:
+	* 3: open the path in the buffer for reading; the reply is the handle
+	clr.w	-(sp)
+	pea	disk_buffer(pc)
+	DOS	_OPEN
+	addq.l	#6, sp
+	bra	serve_result
+
+serve_handle_read:
+	* 4: read at an offset of an open file; the reply is the count
+	clr.w	-(sp)
+	move.l	request_offset(pc), -(sp)
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_SEEK
+	addq.l	#8, sp
+	tst.l	d0
+	bmi.s	serve_result
+	move.l	request_length(pc), -(sp)
+	pea	disk_buffer(pc)
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_READ
+	lea	10(sp), sp
+	bra.s	serve_result
+
+serve_close:
+	* 5: close an open file
+	move.w	request_handle+2(pc), -(sp)
+	DOS	_CLOSE
+	addq.l	#2, sp
+	bra.s	serve_result
+
+serve_files:
+	* 6: _FILES for the path at +64 of the buffer, into its first 53 bytes
+	move.w	request_offset+2(pc), -(sp)
+	pea	disk_buffer+64(pc)
+	pea	disk_buffer(pc)
+	DOS	_FILES
+	lea	10(sp), sp
+	bra.s	serve_result
+
+serve_nfiles:
+	* 7: _NFILES with the search buffer the host put back
+	pea	disk_buffer(pc)
+	DOS	_NFILES
+	addq.l	#4, sp
+	bra.s	serve_result
+
+serve_dskfre:
+	* 8: free space of a drive (1 = A:) into the buffer
+	pea	disk_buffer(pc)
+	move.w	request_offset+2(pc), -(sp)
+	DOS	_DSKFRE
+	addq.l	#6, sp
+
+serve_result:
+	move.l	d0, d3
 serve_reply:
 	moveq.l	#MSX68K_FN_VM_REPLY, d0
 	move.l	vm_id(pc), d1
@@ -281,6 +352,8 @@ request_kind:
 request_offset:
 	.dc.l	0
 request_length:
+	.dc.l	0
+request_handle:
 	.dc.l	0
 win_active:
 	.dc.b	0

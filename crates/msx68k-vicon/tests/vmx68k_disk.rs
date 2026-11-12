@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use msx68k_bus::scsi::{build_bootable_sxwin_scsi_hdd_with_files, ExtractedFile};
 use msx68k_bus::vm_thread::{Pace, VmThread};
-use msx68k_bus::vmx68k::remote_disk;
+use msx68k_bus::vmx68k::{vm_bridge, RemoteDisk};
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
 use msx68k_vicon::decode_tvram_ank_lines;
 
@@ -91,8 +91,9 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     assert_ne!(master.bus.active_window(), Some(window));
 
     // As the app does: drive 0 of the VM is the master's image, served by VMX68K.X.
-    let (disk, requests) = remote_disk(drive0_bytes as usize);
-    master.bus.attach_vm_disk(id, requests);
+    let (bridge, requests) = vm_bridge();
+    master.bus.attach_vm_bridge(id, requests);
+    let disk = RemoteDisk::new(bridge, drive0_bytes as usize);
     let mut vm = X68kVm::new(
         VmConfig::app_vm()
             .with_speed_mode(CpuSpeedMode::Mhz10)
@@ -117,12 +118,12 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     while !prompt.load(Ordering::Relaxed) {
         if started.elapsed() > Duration::from_secs(60) {
             // Nothing may wait on the disk while the thread is dropped.
-            master.bus.detach_vm_disk(id);
+            master.bus.detach_vm_bridge(id);
             panic!("the VM must reach COMMAND.X's prompt");
         }
         master.run_steps(200_000);
     }
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
-    master.bus.detach_vm_disk(id);
+    master.bus.detach_vm_bridge(id);
     drop(thread);
 }
