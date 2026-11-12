@@ -90,6 +90,8 @@ pub enum AppFunction {
     VmStatus = 9,
     /// Hands VMX68K.SX the SRAM of VM `D1.L` to save in its setup.
     VmSram = 10,
+    /// Restarts VM `D1.L` with a new CPU, RAM, and speed from VMX68K.SX's dialog.
+    VmRestart = 11,
 }
 
 impl AppFunction {
@@ -106,6 +108,7 @@ impl AppFunction {
             8 => Some(Self::VmSpeed),
             9 => Some(Self::VmStatus),
             10 => Some(Self::VmSram),
+            11 => Some(Self::VmRestart),
             _ => None,
         }
     }
@@ -190,6 +193,7 @@ impl X68kBus {
                 Some(AppFunction::VmSpeed) => self.hypercall_vm_speed(state),
                 Some(AppFunction::VmStatus) => self.hypercall_vm_status(state),
                 Some(AppFunction::VmSram) => self.hypercall_vm_sram(state),
+                Some(AppFunction::VmRestart) => self.hypercall_vm_restart(state),
                 None => TrapResult::Unhandled,
             },
         }

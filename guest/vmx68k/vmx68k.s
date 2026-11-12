@@ -20,9 +20,19 @@
 BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
 SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
 CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
-SETUP_TYPE	.equ	'V68S'		; The setup's settings: version.w, speed.w
-SETUP_VERSION	.equ	1
-SETUP_SIZE	.equ	4
+SETUP_TYPE	.equ	'V68S'		; The setup's settings: version.w, speed.w, CPU.w, RAM MB.w
+SETUP_VERSION	.equ	2		; Version 1 had the speed only, for a 68000 with 4 MB
+SETUP_SIZE	.equ	8
+CONFIG_DIALOG_ID	.equ	1	; 'DLOG' and 'DITL' of the configuration dialog in VMX68K.LB
+ITEM_OK		.equ	1		; Its items (crates/msx68k-bus/src/vmx68k_library.rs)
+ITEM_CANCEL	.equ	2
+ITEM_68000	.equ	3
+ITEM_68030	.equ	4
+ITEM_MEMORY	.equ	5
+ITEM_MEMORY_SIZE	.equ	6
+ITEM_LABELS	.equ	7		; Static texts: the title, CPU, メモリ, 68000, 68030
+LABEL_COUNT	.equ	5
+D_YESNO		.equ	4		; DMError's はい/いいえ
 SRAM_TYPE	.equ	'SRAM'		; The VM's own SRAM
 SRAM_SIZE	.equ	16384
 G_THRU		.equ	0		; Clear text, where the host shows the VM's screen
@@ -56,8 +66,17 @@ setup_handle:	.ds.l	1		; pseudo-handles to setup_rec and sram_buffer
 sram_handle:	.ds.l	1
 screen_size:	.ds.l	1		; the VM's screen the window fits, width << 16 | height
 drive0_fd:	.ds.w	1
-vm_speed:	.ds.w	1		; by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
-setup_rec:	.ds.w	2		; version, speed
+vm_speed:	.ds.w	1		; by MSX68K_FN_VM_SPEED's numbers for run_cpu
+vm_cpu:		.ds.w	1		; the setup's CPU, 0 the 68000, 1 the 68030
+vm_ram:		.ds.w	1		; the setup's RAM in MB, 1 to 12
+run_cpu:	.ds.w	1		; the CPU the VM runs with, whose speeds the menu shows
+dlg_cpu:	.ds.w	1		; the dialog's choices
+dlg_ram:	.ds.w	1
+dlg_type:	.ds.w	1		; DIGet's item type, handle, and rectangle
+dlg_hdl:	.ds.l	1
+dlg_rect:	.ds.w	4
+dlg_ptr:	.ds.l	1		; the dialog's record
+setup_rec:	.ds.w	4		; version, speed, CPU, RAM
 event_rec:
 event_what:	.ds.w	1		; +0: what
 event_win:	.ds.l	1		; +2: whom.win
@@ -80,6 +99,8 @@ setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
 library_path:	.ds.b	PATH_MAX
 setup_path:	.ds.b	PATH_MAX
 menu_string:	.ds.b	64		; the speed submenu's items as MNConvert2 takes them
+config_string:	.ds.b	32		; the Configuration menu's
+size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
 VARS_SIZE:
 sram_buffer:	.ds.b	SRAM_SIZE	; the VM's own SRAM, kept in its setup
 disk_buffer:	.ds.b	DISK_BUFFER_SIZE
@@ -117,6 +138,7 @@ clear_work:
 	dbra	d0, clear_work
 	move.w	#-1, drive0_fd(a5)
 	move.l	#768 << 16 | 512, screen_size(a5)
+	move.w	#4, vm_ram(a5)		; what setups that do not say have
 	lea	rects_init(pc), a0
 	lea	rects(a5), a1
 	moveq.l	#RECTS_SIZE/2-1, d0
@@ -213,6 +235,10 @@ drives_counted:
 vm_open_sram:
 	move.w	vm_speed(a5), d6
 	ext.l	d6
+	move.w	vm_cpu(a5), d7
+	swap	d7
+	move.w	vm_ram(a5), d7
+	move.w	vm_cpu(a5), run_cpu(a5)
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
@@ -582,11 +608,26 @@ load_setup:
 	move.l	a0, d0
 	beq.s	load_setup_sram
 	movea.l	(a0), a0
-	move.w	2(a0), d0		; the speed
-	cmpi.w	#SPEED_COUNT, d0
-	bcc.s	load_setup_sram
-	lea	vm_speed(a5), a1
-	move.w	d0, (a1)
+	move.w	2(a0), vm_speed(a5)
+	cmpi.w	#2, (a0)		; version 2 has the CPU and the RAM
+	bcs.s	load_setup_speed
+	move.w	4(a0), d0
+	cmpi.w	#1, d0
+	bhi.s	load_setup_ram
+	move.w	d0, vm_cpu(a5)
+load_setup_ram:
+	move.w	6(a0), d0
+	beq.s	load_setup_speed
+	cmpi.w	#12, d0
+	bhi.s	load_setup_speed
+	move.w	d0, vm_ram(a5)
+load_setup_speed:
+	* A speed the CPU does not have is its first
+	move.w	vm_cpu(a5), d0
+	bsr	speed_list
+	cmp.w	vm_speed(a5), d1
+	bhi.s	load_setup_sram
+	clr.w	vm_speed(a5)
 
 load_setup_sram:
 	clr.w	-(sp)
@@ -626,6 +667,8 @@ save_setup_open:
 	lea	setup_rec(a5), a0
 	move.w	#SETUP_VERSION, (a0)
 	move.w	vm_speed(a5), 2(a0)
+	move.w	vm_cpu(a5), 4(a0)
+	move.w	vm_ram(a5), 6(a0)
 	lea	setup_handle(a5), a1	; pseudo-handles to the records
 	move.l	a0, (a1)+
 	lea	sram_buffer(a5), a0
@@ -765,19 +808,21 @@ draw_lamp_fill:
 
 * -----------------------------------------------------------------------------
 * Helper: config_menu
-* Pops up the Configuration menu where the right button went down:
-* "設定...", for the configuration dialog still to come, and the CPU's name with its
-* speeds as a submenu, the current one checked. A speed chosen is applied to the
-* VM at once.
+* Pops up the Configuration menu where the right button went down: "設定...",
+* the configuration dialog, and the name of the CPU the VM runs with, its speeds
+* as a submenu, the current one checked. A speed chosen is applied to the VM at
+* once.
 * -----------------------------------------------------------------------------
 config_menu:
-	movem.l	d0-d3/a0-a2, -(sp)
+	movem.l	d0-d4/a0-a2, -(sp)
 	tst.b	library_open(a5)
 	beq	config_menu_done
 
 	* Check the current speed: rebuild the submenu from its items, with '!' before one
+	move.w	run_cpu(a5), d0
+	bsr	speed_list
+	move.w	d1, d4			; how many
 	lea	menu_string(a5), a1
-	lea	speed_items(pc), a0
 	moveq.l	#0, d1
 config_speed_item:
 	cmp.w	vm_speed(a5), d1
@@ -790,12 +835,27 @@ config_speed_copy:
 	bra.s	config_speed_copy
 config_speed_next:
 	addq.w	#1, d1
-	cmpi.w	#SPEED_COUNT, d1
+	cmp.w	d4, d1
 	bcc.s	config_speed_built
 	move.b	#',', (a1)+
 	bra.s	config_speed_item
 config_speed_built:
 	clr.b	(a1)
+
+	* The menu: its head, then the CPU's name
+	lea	config_string(a5), a1
+	lea	config_menu_head(pc), a0
+config_head_copy:
+	move.b	(a0)+, (a1)+
+	bne.s	config_head_copy
+	subq.l	#1, a1
+	lea	cpu_names(pc), a0
+	move.w	run_cpu(a5), d0
+	mulu	#6, d0
+	adda.w	d0, a0
+config_name_copy:
+	move.b	(a0)+, (a1)+
+	bne.s	config_name_copy
 	move.w	#SPEED_MENU_ID, -(sp)
 	move.l	#'MENU', -(sp)
 	SXCALL	TSRscGet		; $A4AB
@@ -809,7 +869,7 @@ config_speed_built:
 	lea	10(sp), sp
 
 	clr.w	-(sp)			; MI_PLN
-	pea	config_menu_string(pc)
+	pea	config_string(a5)
 	clr.l	-(sp)			; a new record
 	SXCALL	MNConvert2		; $A26B
 	lea	10(sp), sp
@@ -825,6 +885,12 @@ config_speed_built:
 	SXCALL	MMHdlDispose		; $A038
 	addq.l	#4, sp
 
+	* "設定...", item 1 of the menu itself, opens the dialog
+	cmpi.l	#1, d3
+	bne.s	config_menu_speed
+	bsr	config_dialog
+	bra.s	config_menu_done
+config_menu_speed:
 	* A speed: the submenu's ID in the high word and its item, from 1, in the low
 	move.l	d3, d0
 	swap	d0
@@ -832,7 +898,7 @@ config_speed_built:
 	bne.s	config_menu_done
 	move.w	d3, d2
 	subq.w	#1, d2
-	cmpi.w	#SPEED_COUNT, d2
+	cmp.w	d4, d2
 	bcc.s	config_menu_done
 	ext.l	d2
 	moveq.l	#MSX68K_FN_VM_SPEED, d0
@@ -844,7 +910,272 @@ config_speed_built:
 	move.w	d2, (a1)
 	bsr	save_setup
 config_menu_done:
-	movem.l	(sp)+, d0-d3/a0-a2
+	movem.l	(sp)+, d0-d4/a0-a2
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: speed_list
+* For the CPU D0.W (0 the 68000, 1 the 68030), returns its speeds' names in A0
+* and how many in D1.W.
+* -----------------------------------------------------------------------------
+speed_list:
+	lea	speed_items_68000(pc), a0
+	moveq.l	#4, d1
+	tst.w	d0
+	beq.s	speed_list_done
+	lea	speed_items_68030(pc), a0
+	moveq.l	#2, d1
+speed_list_done:
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: config_dialog
+* The configuration dialog: the CPU's kind and the memory. What 設定 changes is
+* saved in the setup, and, as it takes effect when the VM restarts, an alert asks
+* whether to restart it now.
+* -----------------------------------------------------------------------------
+config_dialog:
+	movem.l	d0-d3/a0-a1, -(sp)
+	move.w	vm_cpu(a5), dlg_cpu(a5)
+	move.w	vm_ram(a5), dlg_ram(a5)
+	move.l	#-1, -(sp)		; in front
+	clr.l	-(sp)			; its record on the heap
+	move.w	#CONFIG_DIALOG_ID, -(sp)
+	SXCALL	DMRefer			; $A2C4
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq	config_dialog_done
+	move.l	a0, dlg_ptr(a5)
+	* The labels, static text items from ITEM_LABELS on
+	lea	dialog_labels(pc), a1
+	moveq.l	#ITEM_LABELS, d3
+config_dialog_label:
+	move.w	d3, d0
+	bsr	dlg_item
+	move.l	a1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	moveq.l	#0, d0
+	move.b	(a1), d0
+	lea	1(a1, d0.w), a1
+	addq.w	#1, d3
+	cmpi.w	#ITEM_LABELS+LABEL_COUNT, d3
+	bcs.s	config_dialog_label
+	bsr	dlg_show_cpu
+	moveq.l	#ITEM_MEMORY, d0
+	bsr	dlg_item
+	move.w	dlg_ram(a5), -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	bsr	dlg_show_size
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	WMShow			; $A207
+	SXCALL	GMSetGraph		; $A131
+	SXCALL	DMDraw			; $A2C8
+	addq.l	#4, sp
+
+config_dialog_loop:
+	pea	dialog_filter(pc)
+	SXCALL	DMControl		; $A2C7
+	addq.l	#4, sp
+	cmpi.w	#ITEM_OK, d0
+	beq	config_dialog_ok
+	cmpi.w	#ITEM_CANCEL, d0
+	beq	config_dialog_close
+	cmpi.w	#ITEM_68000, d0
+	beq	config_dialog_68000
+	cmpi.w	#ITEM_68030, d0
+	beq	config_dialog_68030
+	cmpi.w	#ITEM_MEMORY, d0
+	bne	config_dialog_loop
+	moveq.l	#ITEM_MEMORY, d0
+	bsr	dlg_item
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueGet		; $A291
+	addq.l	#4, sp
+	cmpi.w	#1, d0
+	bge.s	config_dialog_min
+	moveq.l	#1, d0
+config_dialog_min:
+	cmpi.w	#12, d0
+	ble.s	config_dialog_max
+	moveq.l	#12, d0
+config_dialog_max:
+	move.w	d0, dlg_ram(a5)
+	bsr	dlg_show_size
+	* DITSet does not draw the text anew
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	DMDraw			; $A2C8
+	addq.l	#4, sp
+	bra	config_dialog_loop
+config_dialog_68000:
+	clr.w	dlg_cpu(a5)
+	bsr	dlg_show_cpu
+	bra	config_dialog_loop
+config_dialog_68030:
+	move.w	#1, dlg_cpu(a5)
+	bsr	dlg_show_cpu
+	bra	config_dialog_loop
+
+config_dialog_ok:
+	bsr	dlg_dispose
+	move.w	dlg_cpu(a5), d0
+	move.w	dlg_ram(a5), d1
+	cmp.w	vm_cpu(a5), d0
+	bne.s	config_dialog_changed
+	cmp.w	vm_ram(a5), d1
+	beq	config_dialog_done
+config_dialog_changed:
+	* Another CPU starts at its first speed
+	cmp.w	vm_cpu(a5), d0
+	beq.s	config_dialog_save
+	clr.w	vm_speed(a5)
+config_dialog_save:
+	move.w	d0, vm_cpu(a5)
+	move.w	d1, vm_ram(a5)
+	bsr	save_setup
+	pea	restart_message(pc)
+	move.w	#D_YESNO, -(sp)
+	SXCALL	DMError			; $A2F6
+	addq.l	#6, sp
+	cmpi.w	#1, d0			; はい
+	bne	config_dialog_done
+	moveq.l	#MSX68K_FN_VM_RESTART, d0
+	move.l	vm_id(a5), d1
+	move.w	vm_cpu(a5), d2
+	swap	d2
+	move.w	vm_ram(a5), d2
+	move.w	vm_speed(a5), d3
+	ext.l	d3
+	bsr	msx68k_call
+	tst.l	d0
+	bne	config_dialog_done
+	move.w	vm_cpu(a5), run_cpu(a5)
+	bra	config_dialog_done
+config_dialog_close:
+	bsr	dlg_dispose
+config_dialog_done:
+	move.l	win_ptr(a5), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	movem.l	(sp)+, d0-d3/a0-a1
+	rts
+
+* Disposes of the dialog
+dlg_dispose:
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	DMDispose		; $A2C6
+	addq.l	#4, sp
+	clr.l	dlg_ptr(a5)
+	rts
+
+* Finds the dialog's item D0.W: its type, handle, and rectangle in dlg_*
+dlg_item:
+	movem.l	d0-d2/a0-a1, -(sp)
+	pea	dlg_rect(a5)
+	pea	dlg_hdl(a5)
+	pea	dlg_type(a5)
+	move.w	d0, -(sp)
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	DIGet			; $A2CF
+	lea	18(sp), sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* Sets the CPU's radio buttons to dlg_cpu
+dlg_show_cpu:
+	movem.l	d0-d2/a0-a1, -(sp)
+	moveq.l	#ITEM_68000, d0
+	bsr	dlg_item
+	moveq.l	#0, d1
+	tst.w	dlg_cpu(a5)
+	seq	d1
+	andi.w	#1, d1
+	move.w	d1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	moveq.l	#ITEM_68030, d0
+	bsr	dlg_item
+	move.w	dlg_cpu(a5), -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* Shows dlg_ram as the memory's size, " 4MB" or "12MB"
+dlg_show_size:
+	movem.l	d0-d2/a0-a1, -(sp)
+	lea	size_text(a5), a0
+	move.b	#4, (a0)+
+	moveq.l	#0, d0
+	move.w	dlg_ram(a5), d0
+	divu	#10, d0
+	move.b	#' ', d1
+	tst.w	d0
+	beq.s	dlg_size_tens
+	move.b	#'0', d1
+	add.b	d0, d1
+dlg_size_tens:
+	move.b	d1, (a0)+
+	swap	d0
+	addi.b	#'0', d0
+	move.b	d0, (a0)+
+	move.b	#'M', (a0)+
+	move.b	#'B', (a0)
+	moveq.l	#ITEM_MEMORY_SIZE, d0
+	bsr	dlg_item
+	pea	size_text(a5)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: dialog_filter (dlgPtr, eventRec on the stack), which DMControl calls
+* with each event: the VM's requests are served and the window drawn meanwhile.
+* Returns 0, the event as it is.
+* -----------------------------------------------------------------------------
+dialog_filter:
+	movem.l	d1-d7/a0-a4, -(sp)
+	movea.l	8+48(sp), a0		; the event
+	move.w	(a0), d0
+	cmpi.w	#14, d0			; E_USER1
+	bne.s	dialog_filter_update
+	bsr	serve_disk
+	bsr	update_status
+	bra.s	dialog_filter_back
+dialog_filter_update:
+	cmpi.w	#7, d0			; E_UPDATE
+	bne.s	dialog_filter_done
+	move.l	2(a0), d0		; whom
+	cmp.l	win_ptr(a5), d0
+	bne.s	dialog_filter_dialog
+	move.l	d0, -(sp)
+	SXCALL	WMUpdate		; $A20D
+	bsr	draw_bar
+	SXCALL	WMUpdtOver		; $A20E
+	addq.l	#4, sp
+	bra.s	dialog_filter_back
+dialog_filter_dialog:
+	* The dialog's own, which DMControl draws
+	move.l	d0, -(sp)
+	SXCALL	WMUpdate		; $A20D
+	SXCALL	WMUpdtOver		; $A20E
+	addq.l	#4, sp
+dialog_filter_back:
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+dialog_filter_done:
+	moveq.l	#0, d0
+	movem.l	(sp)+, d1-d7/a0-a4
 	rts
 
 * -----------------------------------------------------------------------------
@@ -1093,16 +1424,31 @@ default_setup_path:
 	.dc.b	"A:\VMX68K\DEFAULT.V68", 0
 default_setup_dir:
 	.dc.b	"A:\VMX68K", 0
-* The Configuration menu, in Shift_JIS: "設定..." for the dialog, not there yet,
-* and the CPU with its speeds, an item whose shortcut is ESC and whose check is
-* the submenu's 'MENU' ID
-config_menu_string:
-	.dc.b	"~", $90, $DD, $92, $E8, "...,^", $1B, "|", SPEED_MENU_ID, "68000", 0
-* Items of the speed submenu, in the order of MSX68K_FN_VM_SPEED's speeds; Burst
-* is "最高速"
-speed_items:
+* The Configuration menu, in Shift_JIS: "設定..." for the dialog, and the CPU with
+* its speeds, an item whose shortcut is ESC and whose check is the submenu's
+* 'MENU' ID, followed by the CPU's name
+config_menu_head:
+	.dc.b	$90, $DD, $92, $E8, "...,^", $1B, "|", SPEED_MENU_ID, 0
+* The CPUs' names, 6 bytes each
+cpu_names:
+	.dc.b	"68000", 0, "68030", 0
+* Items of the speed submenus, in the order of MSX68K_FN_VM_SPEED's speeds;
+* Burst is "最高速"
+speed_items_68000:
 	.dc.b	"10MHz", 0, "16MHz", 0, "24MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
-SPEED_COUNT	.equ	4
+speed_items_68030:
+	.dc.b	"25MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
+* The dialog's labels, Pascal strings in the order of its items from ITEM_LABELS:
+* "VMの設定", "CPU", "メモリ", "68000", "68030"
+dialog_labels:
+	.dc.b	8, $56, $4D, $82, $CC, $90, $DD, $92, $E8
+	.dc.b	3, "CPU"
+	.dc.b	6, $83, $81, $83, $82, $83, $8A
+	.dc.b	5, "68000"
+	.dc.b	5, "68030"
+* "VMの再起動で有効になります。今すぐ再起動しますか？"
+restart_message:
+	.dc.b	$56, $4D, $82, $CC, $8D, $C4, $8B, $4E, $93, $AE, $82, $C5, $97, $4C, $8C, $F8, $82, $C9, $82, $C8, $82, $E8, $82, $DC, $82, $B7, $81, $42, $8D, $A1, $82, $B7, $82, $AE, $8D, $C4, $8B, $4E, $93, $AE, $82, $B5, $82, $DC, $82, $B7, $82, $A9, $81, $48, 0
 	.even
 win_bounds:
 	.dc.w	40, 40, 808, 552+BAR_HEIGHT	; left, top, right, bottom: the bar, then the VM's 768 x 512

@@ -117,6 +117,7 @@ fn the_guest_include_matches_the_host() {
         ("MSX68K_FN_VM_SPEED", AppFunction::VmSpeed),
         ("MSX68K_FN_VM_STATUS", AppFunction::VmStatus),
         ("MSX68K_FN_VM_SRAM", AppFunction::VmSram),
+        ("MSX68K_FN_VM_RESTART", AppFunction::VmRestart),
     ] {
         assert_eq!(value(name), function as u32, "{name}");
     }

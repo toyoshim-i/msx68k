@@ -52,7 +52,16 @@ run in a VM of their own from the start.
     mode the boot device stays on msx68k's boot ROM and the item is not shown; the VM's
     CONFIG.SYS decides what it starts.
   - **The configuration dialog** sets the CPU's kind, the memory size with a slider, and drive
-    assignment. Drive assignment is in one of two modes: bypass mode, with the path of the
+    assignment. It is a dialog of SX-Window's Dialog Man, `'DLOG'`/`'DITL'` resources of
+    `VMX68K.LB` with SX-Window's own controls. The CPU is the 68000 (10, 16, 24 MHz and Burst)
+    or the 68030 (25 MHz and Burst, booting from `IPLROM30.DAT`), and the menu's CPU name and
+    speeds follow it; memory is 1 to 12 MB in 1 MB steps. 設定 saves the setup (`'V68S'` version 2: speed,
+    CPU, RAM) and, when the CPU or memory changed, an alert (`DMError`, はい/いいえ) asks
+    whether to restart the VM now; はい restarts it with `VmRestart` (11), which keeps its
+    window, drives, and SRAM, and いいえ leaves the change for the VM's next start. Radio buttons
+    are label-less switches, as in Sharp's dialogs, and static texts get their text with
+    `DITSet` when the dialog opens. While it is open, its filter serves the VM's requests, so the
+    VM does not wait for it. Drive assignment is in one of two modes: bypass mode, with the path of the
     CONFIG.SYS the VM boots with, or custom mode, where each of the VM's drives is given a
     floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
     HDD image goes on the VM's SCSI and is the VM's alone. Custom mode keeps the machine's own

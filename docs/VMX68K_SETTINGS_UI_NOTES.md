@@ -94,6 +94,16 @@ official SX-Window programming manuals.
   top and left, black bottom and right) holds a recess (black top and left, white bottom and
   right) over dark gray, and the picture is white with a black shadow to the bottom right.
 
+### 1.8 Dialog Resources, as Built for VMX68K.X
+- `'DLOG'`: rectangle, `$0240` (dialog frame), visible 0, close 0, task 0, `'DITL'` ID, empty
+  title. `'CNTL'`: rectangle, value, visibility (-1), maximum, minimum, `'CDEF'` × 16 (`$0130`
+  the slider), reference, title. `'DITL'` items: SX-Window steps to the next item past the
+  data's size, so data is padded to an even size inside it, or DMRefer faults (system error 2).
+- Type 7 items name a `'CNTL'` by its ID; radio buttons (type 5) are 33×9 switches without a
+  label; how static text (type 8) keeps its text is unknown, `DITSet` sets it.
+- `DMControl` returns a slider's item once its drag ends; `DITSet` does not draw the text anew
+  (`DMDraw` does). `DMError` with `D_YESNO` returns 1 for はい.
+
 ### 1.7 Documents and Their Applications (`\SHELL\ICON.LB`)
 - The Filer's icons and what a double-click runs come from the `'ICN#'` resources of
   `\SHELL\ICON.LB`, `IcKind` records of `TASK.H`: the icon's resource type and ID (`'PAT3'`),
@@ -140,8 +150,10 @@ official SX-Window programming manuals.
    Setups are `*.V68`, opened with VMX68K.SX by an `'ICN#'` entry in `\SHELL\ICON.LB`
    (Section 1.7). Decided and built 2026-11-13 ([VMX68K.md](VMX68K.md) Section 2, "A settings
    file per VM").
-4. The boot device submenu and the menu to make a new setup (moved from step 3, 2026-11-13,
-   as they need custom mode and a path input), and the configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
+4. In this order (decided 2026-11-13): 4a the dialog with the CPU kind and memory, saving on
+   close and the restart question (done 2026-11-13); 4b drive assignment, bypass and custom mode; 4c the boot
+   device submenu and the floppy icons, which need custom mode; 4d the menu to make a new
+   setup (moved from step 3, as it needs a path input). The configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
    restart question (`DMError` `D_YESNO`).
 
 ### 2.2 Pieces

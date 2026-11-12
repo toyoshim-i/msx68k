@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use msx68k_cpu::{CpuState, TrapResult};
+use msx68k_cpu::{CpuModel, CpuState, TrapResult};
 
 use crate::bus::X68kBus;
 use crate::timing::CpuSpeedMode;
@@ -195,20 +195,48 @@ pub enum VmEvent {
         drives: u32,
         speed: CpuSpeedMode,
         sram: Option<Vec<u8>>,
+        /// The CPU and the RAM in MB, from the setup.
+        cpu: CpuModel,
+        ram_mb: u32,
     },
+    /// VMX68K.SX set the VM up anew, to restart it at once with its CPU, RAM, and speed.
+    Restart { id: u32, cpu: CpuModel, ram_mb: u32, speed: CpuSpeedMode },
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
     /// The VM was closed.
     Closed { id: u32 },
 }
 
-/// Speeds `VmSpeed` takes in `D2.L`, by their order in VMX68K.SX's menu.
-const VM_SPEEDS: [CpuSpeedMode; 4] = [
-    CpuSpeedMode::Mhz10,
-    CpuSpeedMode::Mhz16,
-    CpuSpeedMode::Mhz24,
-    CpuSpeedMode::Burst,
-];
+/// Speeds of a VM's CPU by their order in VMX68K.SX's menu, the numbers `VmSpeed` takes.
+pub fn vm_speeds(cpu: CpuModel) -> &'static [CpuSpeedMode] {
+    match cpu {
+        CpuModel::Mc68000 => &[
+            CpuSpeedMode::Mhz10,
+            CpuSpeedMode::Mhz16,
+            CpuSpeedMode::Mhz24,
+            CpuSpeedMode::Burst,
+        ],
+        CpuModel::Mc68030 => &[CpuSpeedMode::Mhz25, CpuSpeedMode::Burst],
+    }
+}
+
+/// A setup's CPU and RAM as `VmOpen` and `VmRestart` take them: the CPU (0 the 68000, 1 the
+/// 68030) in the high word and the RAM in MB in the low, 1 to 12, 0 for the 4 MB of setups
+/// that do not say.
+fn setup_machine(word: u32) -> (CpuModel, u32) {
+    let cpu = if word >> 16 == 1 { CpuModel::Mc68030 } else { CpuModel::Mc68000 };
+    let ram_mb = match word & 0xFFFF {
+        0 => 4,
+        mb => mb.min(12),
+    };
+    (cpu, ram_mb)
+}
+
+/// The speed numbered `index` of `cpu`, or its first.
+fn vm_speed(cpu: CpuModel, index: u32) -> CpuSpeedMode {
+    let speeds = vm_speeds(cpu);
+    speeds.get(index as usize).copied().unwrap_or(speeds[0])
+}
 
 /// Bytes of a VM's SRAM, which VMX68K.SX keeps in the VM's setup.
 pub const VM_SRAM_BYTES: usize = 16 * 1024;
@@ -221,6 +249,8 @@ struct OpenVm {
     window: u32,
     /// Lines of the window's content above the VM's screen, VMX68K.SX's icon bar.
     screen_top: i16,
+    /// The VM's CPU, whose speeds `VmSpeed` numbers.
+    cpu: CpuModel,
     /// What the app reports of the VM for VMX68K.SX's window, and what `VmStatus` last told.
     status: VmStatus,
     status_told: VmStatus,
@@ -395,16 +425,19 @@ impl X68kBus {
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
     /// VMX68K.SX serves, `D3.L` of the master's drives from A:, its screen `D4.W` lines below
     /// the top of the window's content, the 16 KB of its SRAM at `D5.L` (0 for none yet), and
-    /// the speed `D6.L` (as `VmSpeed`'s), and returns its ID in `D0.L`.
+    /// the speed `D6.L` (as `VmSpeed`'s), and its CPU and RAM `D7.L` (`cpu << 16 | MB`, see
+    /// [`setup_machine`]), and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
         let id = windows.next_id;
         let window = state.d[1] & 0x00FF_FFFF;
+        let (cpu, ram_mb) = setup_machine(state.d[7]);
         windows.open.push(OpenVm {
             id,
             window,
             screen_top: state.d[4] as i16,
+            cpu,
             status: VmStatus::default(),
             status_told: VmStatus::default(),
             status_woken: false,
@@ -422,8 +455,10 @@ impl X68kBus {
             window,
             drive0_bytes: state.d[2],
             drives: state.d[3].min(26),
-            speed: VM_SPEEDS.get(state.d[6] as usize).copied().unwrap_or(CpuSpeedMode::Mhz10),
+            speed: vm_speed(cpu, state.d[6]),
             sram,
+            cpu,
+            ram_mb,
         });
         state.d[0] = id;
         TrapResult::Handled { extra_cycles: 0 }
@@ -554,18 +589,36 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmSpeed`: sets VM `D1.L` to the speed `D2.L` of VMX68K.SX's menu (0 10 MHz, 1 16 MHz,
-    /// 2 24 MHz, 3 Burst), which the app applies at once. Returns 0, or -1 for an unknown VM or
-    /// speed.
+    /// `VmSpeed`: sets VM `D1.L` to the speed `D2.L` of VMX68K.SX's menu, as [`vm_speeds`]
+    /// numbers its CPU's (for the 68000 0 10 MHz, 1 16 MHz, 2 24 MHz, 3 Burst), which the app
+    /// applies at once. Returns 0, or -1 for an unknown VM or speed.
     pub(crate) fn hypercall_vm_speed(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
-        let known = self.vm_windows.open.iter().any(|open| open.id == id);
-        state.d[0] = match VM_SPEEDS.get(state.d[2] as usize) {
-            Some(&mode) if known => {
+        let cpu = self.vm_windows.open.iter().find(|open| open.id == id).map(|open| open.cpu);
+        state.d[0] = match cpu.and_then(|cpu| vm_speeds(cpu).get(state.d[2] as usize)) {
+            Some(&mode) => {
                 self.vm_windows.events.push(VmEvent::Speed { id, mode });
                 0
             }
-            _ => u32::MAX,
+            None => u32::MAX,
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmRestart`: restarts VM `D1.L` with the CPU and RAM `D2.L` (as `VmOpen`'s `D7.L`) and
+    /// the speed `D3.L` of that CPU, keeping its window, drives, and SRAM. Returns 0, or -1 for
+    /// an unknown VM.
+    pub(crate) fn hypercall_vm_restart(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        let (cpu, ram_mb) = setup_machine(state.d[2]);
+        state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            Some(open) => {
+                open.cpu = cpu;
+                let speed = vm_speed(cpu, state.d[3]);
+                self.vm_windows.events.push(VmEvent::Restart { id, cpu, ram_mb, speed });
+                0
+            }
+            None => u32::MAX,
         };
         TrapResult::Handled { extra_cycles: 0 }
     }
@@ -700,6 +753,8 @@ mod tests {
                     drives: 0,
                     speed: CpuSpeedMode::Mhz10,
                     sram: None,
+                    cpu: CpuModel::Mc68000,
+                    ram_mb: 4,
                 },
                 VmEvent::Opened {
                     id: 2,
@@ -708,6 +763,8 @@ mod tests {
                     drives: 0,
                     speed: CpuSpeedMode::Mhz10,
                     sram: None,
+                    cpu: CpuModel::Mc68000,
+                    ram_mb: 4,
                 },
                 VmEvent::Closed { id: 1 },
             ]
@@ -750,5 +807,44 @@ mod tests {
         state.d[1] = id;
         bus.hypercall_vm_status(&mut state);
         assert_eq!(state.d[0] & STATUS_SRAM, 0, "saved once");
+    }
+
+    #[test]
+    fn a_68030_setup_numbers_its_own_speeds_and_restarts() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let mut state = CpuState::default();
+        state.d[1] = 0x0012_3456;
+        state.d[6] = 1;
+        state.d[7] = 1 << 16 | 8;
+        bus.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        let [VmEvent::Opened { cpu, ram_mb, speed, .. }] = &bus.take_vm_events()[..] else {
+            panic!("one VM");
+        };
+        assert_eq!((*cpu, *ram_mb, *speed), (CpuModel::Mc68030, 8, CpuSpeedMode::Burst));
+
+        // The 68030's speeds are 25 MHz and Burst only.
+        state.d[1] = id;
+        state.d[2] = 0;
+        bus.hypercall_vm_speed(&mut state);
+        assert_eq!(bus.take_vm_events(), [VmEvent::Speed { id, mode: CpuSpeedMode::Mhz25 }]);
+        state.d[1] = id;
+        state.d[2] = 2;
+        bus.hypercall_vm_speed(&mut state);
+        assert_eq!(state.d[0], u32::MAX);
+
+        // Restarted as a 68000 with 12 MB at 16 MHz, it numbers the 68000's speeds.
+        state.d[1] = id;
+        state.d[2] = 12;
+        state.d[3] = 1;
+        bus.hypercall_vm_restart(&mut state);
+        assert_eq!(
+            bus.take_vm_events(),
+            [VmEvent::Restart { id, cpu: CpuModel::Mc68000, ram_mb: 12, speed: CpuSpeedMode::Mhz16 }]
+        );
+        state.d[1] = id;
+        state.d[2] = 3;
+        bus.hypercall_vm_speed(&mut state);
+        assert_eq!(bus.take_vm_events(), [VmEvent::Speed { id, mode: CpuSpeedMode::Burst }]);
     }
 }

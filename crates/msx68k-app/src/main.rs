@@ -330,6 +330,17 @@ struct GuestVm {
     sram_changes: std::sync::mpsc::Receiver<Vec<u8>>,
     sram_changed: Arc<std::sync::mpsc::Sender<Vec<u8>>>,
     sram_pending: Option<(Vec<u8>, Instant)>,
+    /// The VM's SRAM as it last was, which a restart keeps, and the master's drives it sees.
+    sram: Option<Vec<u8>>,
+    drives: u32,
+}
+
+/// The machine a VM of VMX68K.X is set up as.
+#[derive(Debug, Clone, Copy)]
+struct GuestMachine {
+    cpu: CpuModel,
+    ram_mb: u32,
+    speed: CpuSpeedMode,
 }
 
 /// How long a VM's SRAM stays unchanged before VMX68K.X saves it, so that a program writing
@@ -344,6 +355,8 @@ struct Msx68kApp {
     vm: X68kVm,
     /// ROMs for VMs opened by VMX68K.X, which are MC68000 machines.
     guest_ipl: Vec<u8>,
+    /// The IPL ROM of VMs set up with a 68030, if `roms/` has one.
+    guest_ipl30: Option<Vec<u8>>,
     guest_cgrom: Vec<u8>,
     guest_vms: Vec<GuestVm>,
     /// The VM each held key went to, so its release follows it: `None` for the master VM.
@@ -543,12 +556,13 @@ impl Msx68kApp {
         );
 
         let now = Instant::now();
-        // VMs opened by VMX68K.X are MC68000 machines whatever the master VM is.
+        // VMs opened by VMX68K.X have the CPU of their setup whatever the master VM's is.
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         Self {
             args,
             vm,
             guest_ipl,
+            guest_ipl30: std::fs::read(DEFAULT_IPL30_PATH).ok(),
             guest_cgrom: cgrom,
             guest_vms: Vec::new(),
             key_targets: Default::default(),
@@ -782,8 +796,23 @@ impl Msx68kApp {
     fn update_guest_vms(&mut self) {
         for event in self.vm.bus.take_vm_events() {
             match event {
-                VmEvent::Opened { id, window, drives, speed, sram, .. } => {
-                    if let Some(guest) = self.start_guest_vm(id, window, drives, speed, sram) {
+                VmEvent::Opened { id, window, drives, speed, sram, cpu, ram_mb, .. } => {
+                    let machine = GuestMachine { cpu, ram_mb, speed };
+                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram) {
+                        self.guest_vms.push(guest);
+                    }
+                }
+                VmEvent::Restart { id, cpu, ram_mb, speed } => {
+                    let Some(at) = self.guest_vms.iter().position(|guest| guest.id == id) else {
+                        continue;
+                    };
+                    // Nothing may wait on the bridge while the old VM's thread stops.
+                    self.vm.bus.detach_vm_bridge(id);
+                    let old = self.guest_vms.remove(at);
+                    let (window, drives, sram) = (old.window, old.drives, old.sram.clone());
+                    drop(old);
+                    let machine = GuestMachine { cpu, ram_mb, speed };
+                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram) {
                         self.guest_vms.push(guest);
                     }
                 }
@@ -821,6 +850,7 @@ impl Msx68kApp {
                 }
             });
             while let Ok(sram) = guest.sram_changes.try_recv() {
+                guest.sram = Some(sram.clone());
                 guest.sram_pending = Some((sram, now));
             }
             if guest.sram_pending.as_ref().is_some_and(|(_, at)| now >= *at + SRAM_SETTLE) {
@@ -843,19 +873,29 @@ impl Msx68kApp {
         id: u32,
         window: u32,
         drives: u32,
-        speed: CpuSpeedMode,
+        machine: GuestMachine,
         sram: Option<Vec<u8>>,
     ) -> Option<GuestVm> {
-        const RAM_MB: usize = 4;
         let gpu = self.gpu.as_ref()?;
-        let mut vm = X68kVm::new(VmConfig::app_vm().with_speed_mode(speed).with_ram_mb(RAM_MB));
+        // A 68030 needs the X68030's IPL ROM.
+        let (cpu, ipl) = match (machine.cpu, &self.guest_ipl30) {
+            (CpuModel::Mc68030, Some(ipl30)) => (CpuModel::Mc68030, ipl30),
+            _ => (CpuModel::Mc68000, &self.guest_ipl),
+        };
+        let speed = if cpu == machine.cpu { machine.speed } else { CpuSpeedMode::Mhz10 };
+        let mut vm = X68kVm::new(
+            VmConfig::app_vm()
+                .with_cpu_model(cpu)
+                .with_speed_mode(speed)
+                .with_ram_mb(machine.ram_mb as usize),
+        );
         // The VM's own SRAM from its setup, with the size of its RAM as the machine has it.
-        if let Some(sram) = sram.filter(|sram| sram.len() == vm.bus.sram().len()) {
-            vm.bus.sram_mut().copy_from_slice(&sram);
-            vm.bus.sram_mut()[8..12].copy_from_slice(&((RAM_MB << 20) as u32).to_be_bytes());
+        if let Some(sram) = sram.as_ref().filter(|sram| sram.len() == vm.bus.sram().len()) {
+            vm.bus.sram_mut().copy_from_slice(sram);
+            vm.bus.sram_mut()[8..12].copy_from_slice(&(machine.ram_mb << 20).to_be_bytes());
         }
         vm.bus.load_cgrom(&self.guest_cgrom);
-        vm.bus.load_ipl_rom(&self.guest_ipl);
+        vm.bus.load_ipl_rom(ipl);
         if let Some(path) = &self.args.vm_fd0_path {
             // Write-protected, and only ever a copy: the image on the host stays as it is.
             match std::fs::read(path) {
@@ -899,6 +939,8 @@ impl Msx68kApp {
             sram_changes,
             sram_changed: Arc::new(sram_changed),
             sram_pending: None,
+            sram,
+            drives,
         })
     }
 
