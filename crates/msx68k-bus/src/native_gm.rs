@@ -46,7 +46,6 @@ const CURSOR_DRAWN_POS: u32 = 0x5CA44 + 0x1E;
 const TEXT_SPAN: u32 = 0x381FE;
 /// Its first instruction, `MOVEM.L D3-D7/A1-A4,-(SP)`, and the `TST.B 40(A0)` after it.
 const TEXT_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x1F, 0x78, 0x4A, 0x28, 0x00, 0x28];
-/// Hypercall that replaces the first instruction of the text span routine.
 
 // Text span context offsets, as the text drawing setup at `text_base + 0x39D36` fills them.
 const SPAN_ROUTINES: u32 = 4;
@@ -72,7 +71,6 @@ const SPAN_XOR: u32 = 0x386D6;
 const PEN_SPAN: u32 = 0x37212;
 /// Its first instruction, `MOVEM.L D2-D7/A1/A3/A6,-(SP)`, and the instructions after it.
 const PEN_SPAN_PROLOGUE: [u8; 8] = [0x48, 0xE7, 0x3F, 0x52, 0x2C, 0x55, 0x90, 0x6E];
-/// Hypercall that replaces the first instruction of the pen span routine.
 
 // The system error alert box draws a 384×70 box into plane 0 of TVRAM at `$E00000`, with a
 // row step of 128 bytes fixed in its code. On an extended screen, the instructions that touch
@@ -94,7 +92,6 @@ const ALERT_ICON_COPY_CODE: [u8; 8] = [0x22, 0xD8, 0x32, 0xD8, 0xD5, 0xC0, 0x51,
 /// The glyph store in the string drawing routine: `OR.B D4,(A0)+`.
 const ALERT_GLYPH_OR: u32 = 0x4C2CA;
 const ALERT_GLYPH_OR_CODE: [u8; 8] = [0x89, 0x18, 0x51, 0xC8, 0xFF, 0xF4, 0xD6, 0xBC];
-/// Hypercalls that replace those instructions.
 
 // Pen span context offsets, as the pen setup at `text_base + 0x369A6` fills them.
 const PEN_ROUTINES: u32 = 4;
@@ -1831,6 +1828,27 @@ impl X68kBus {
         let mut cursor = self.region_cursor(region, y)?;
         self.advance_region(&mut cursor, y)?;
         Some(spans(bounds, &cursor).into_iter().any(|(left, right)| (left..right).contains(&x)))
+    }
+
+    /// Returns a `Region` as rectangles `(left, top, right, bottom)`, rows with the same spans
+    /// merged into one rectangle per span.
+    pub(crate) fn region_rects(&self, region: u32) -> Option<Vec<(i16, i16, i16, i16)>> {
+        let rows = self.region_rows(region)?;
+        let mut done = Vec::new();
+        // Rectangles still growing downward, with the spans of the row that started them.
+        let mut open: Vec<(i16, i16, i16)> = Vec::new();
+        let mut previous: &[(i16, i16)] = &[];
+        for (i, row) in rows.rows.iter().enumerate() {
+            let y = rows.top + i as i16;
+            if row.as_slice() != previous {
+                done.extend(open.drain(..).map(|(left, right, top)| (left, top, right, y)));
+                open.extend(row.iter().map(|&(left, right)| (left, right, y)));
+                previous = row;
+            }
+        }
+        let bottom = rows.top + rows.rows.len() as i16;
+        done.extend(open.into_iter().map(|(left, right, top)| (left, top, right, bottom)));
+        Some(done)
     }
 
     /// Reads every row of a `Region` within its bounds.

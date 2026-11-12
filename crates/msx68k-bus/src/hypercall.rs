@@ -70,6 +70,12 @@ pub enum AppFunction {
     SetWheelConfig = 2,
     /// Queries (`D1.L = -1`) or switches the SX-Window display resolution.
     ScreenMode = 3,
+    /// Starts a VM for the window `D1.L` and returns its ID (`docs/VMX68K.md` Section 3.5).
+    VmOpen = 4,
+    /// Carries out the pending requests of VM `D1.L`, on every pass of VMX68K.SX's event loop.
+    VmPoll = 5,
+    /// Stops VM `D1.L`.
+    VmClose = 6,
 }
 
 impl AppFunction {
@@ -79,6 +85,9 @@ impl AppFunction {
             1 => Some(Self::GetWheelConfig),
             2 => Some(Self::SetWheelConfig),
             3 => Some(Self::ScreenMode),
+            4 => Some(Self::VmOpen),
+            5 => Some(Self::VmPoll),
+            6 => Some(Self::VmClose),
             _ => None,
         }
     }
@@ -151,6 +160,9 @@ impl X68kBus {
                 Some(AppFunction::GetWheelConfig) => self.hypercall_wheel_config(state, false),
                 Some(AppFunction::SetWheelConfig) => self.hypercall_wheel_config(state, true),
                 Some(AppFunction::ScreenMode) => self.hypercall_sx_set_screen_mode(state),
+                Some(AppFunction::VmOpen) => self.hypercall_vm_open(state),
+                Some(AppFunction::VmPoll) => self.hypercall_vm_poll(state),
+                Some(AppFunction::VmClose) => self.hypercall_vm_close(state),
                 None => TrapResult::Unhandled,
             },
         }

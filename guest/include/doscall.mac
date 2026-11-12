@@ -68,4 +68,5 @@ _EXEC		.equ	$FF4B
 _EXIT2		.equ	$FF4C
 _FILES		.equ	$FF4E
 _NFILES		.equ	$FF4F
+_SUPER_JSR	.equ	$FFF6
 _BUS_ERR	.equ	$FFF7

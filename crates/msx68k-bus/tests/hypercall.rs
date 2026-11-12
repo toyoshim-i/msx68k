@@ -110,6 +110,9 @@ fn the_guest_include_matches_the_host() {
         ("MSX68K_FN_GET_WHEEL", AppFunction::GetWheelConfig),
         ("MSX68K_FN_SET_WHEEL", AppFunction::SetWheelConfig),
         ("MSX68K_FN_SCREEN_MODE", AppFunction::ScreenMode),
+        ("MSX68K_FN_VM_OPEN", AppFunction::VmOpen),
+        ("MSX68K_FN_VM_POLL", AppFunction::VmPoll),
+        ("MSX68K_FN_VM_CLOSE", AppFunction::VmClose),
     ] {
         assert_eq!(value(name), function as u32, "{name}");
     }

@@ -100,6 +100,21 @@ windows work the same way as the master VM.
 - For now the SX-Window cursor may go under VM windows. Over a VM's screen it reads as the
   pointer being captured by the VM, so no cursor layer is needed before VM windows appear.
 
+### 3.5 VMX68K.SX and the Host
+- **Calls.** VMX68K.SX reaches the host through msx68k's application entry
+  ([HOOK_AND_SCSI_ARCHITECTURE.md](HOOK_AND_SCSI_ARCHITECTURE.md) Section 2.1): `VmOpen` (4)
+  takes the window (`D1.L` = `WindowPtr`) and returns the VM's ID, `VmPoll` (5) is called on
+  every pass of the event loop, and `VmClose` (6) stops the VM.
+- **Window position and visible region.** VMX68K.SX does not report them. The host reads them
+  from the window's `Graph` every frame: its rectangle, its bitmap's rectangle (which places it
+  on the screen), and its visible region, which become the `VmLayer`'s position and scissor
+  rectangles. So moving, covering, and uncovering the window need no code in VMX68K.SX.
+- **Window size.** The window's content is the VM's screen at its native size, fixed for now
+  (768×512 for Human68k 3.02 at boot).
+- **First disk.** The host reads the floppy image for drive 0 of new VMs itself, named by a
+  command-line option of the app. Images come from the master VM's drives once the VM's screen
+  shows in its window (Section 2).
+
 ## 4. First Goal
 
 Boot Human68k 3.02 from `HUMAN302.XDF` as drive A in a VM, shown in a VMX68K.SX window. The

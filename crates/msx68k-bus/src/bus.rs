@@ -96,6 +96,8 @@ pub struct X68kBus {
     pub(crate) tvram: Option<Box<[u8]>>,
     /// Addresses where a hypercall has been installed (see [`crate::hypercall`]).
     pub(crate) hypercall_sites: std::collections::HashMap<u32, crate::hypercall::HypercallId>,
+    /// VMs that VMX68K.SX has opened (see [`crate::vmx68k`]).
+    pub(crate) vm_windows: crate::vmx68k::VmWindows,
     /// Whether the application entry is mapped at the end of the SCSI ROM window.
     pub(crate) app_entry_installed: bool,
     /// TVRAM and GVRAM pages written since the last [`Self::take_written_vram_pages`].
@@ -227,6 +229,7 @@ impl X68kBus {
             vram_written: DirtyVramPages::default(),
             hypercall_sites: Default::default(),
             app_entry_installed: false,
+            vm_windows: Default::default(),
             sprite_bg: None,
             sram,
             sram_write_enabled: false,

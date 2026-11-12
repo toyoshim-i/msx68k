@@ -83,16 +83,21 @@ one opcode only, and the address it runs at decides which hypercall it is.
   reached in user mode.
 - **Calling the entry.** [`guest/include/msx68k.mac`](../guest/include/msx68k.mac) holds the
   equates and `MSX68K_CALL_ROUTINE`, which expands `msx68k_call`: it reads the signature with DOS
-  `_BUS_ERR`, so a machine without the entry reports a bus error instead of taking one, enters
-  supervisor mode with IOCS `_B_SUPER`, calls `JSR $FDFFF8` with the function in `D0.L` and
-  arguments in `D1`–`D3`, and returns to user mode. It returns `D0.L = -1` when the entry is not
-  there. A test checks the equates against the host's constants.
+  `_BUS_ERR`, so a machine without the entry reports a bus error instead of taking one, and
+  calls `$FDFFF8` in supervisor mode through DOS `_SUPER_JSR`, with the function in `D0.L` and
+  arguments in `D1`–`D3`. It returns `D0.L = -1` when the entry is not there. A test checks the
+  equates against the host's constants. Switching modes by hand failed under SX-Window: going
+  back to user mode with DOS `_SUPER` ended in a system error, and IOCS `_B_SUPER` lost `A0`,
+  `D5`, or the stacked results on the way back.
   | `D0.L` | Function | Arguments and results |
   | :---: | :--- | :--- |
   | 0 | `Version` | Returns the version in `D0.L`. |
   | 1 | `GetWheelConfig` | Returns `D1` reverse (1), `D2` arrow clicks per notch, `D3` trackpad pixels per notch. |
   | 2 | `SetWheelConfig` | Sets `D1`–`D3` and returns them as clamped. |
   | 3 | `ScreenMode` | `D1.L = -1` returns the mode, width, and height in `D0`–`D2`; otherwise switches to mode `D1` (0, 1, 2) or to the size in `D1`, `D2`. Superseded by `IOCS _CRTMOD` `$50`. |
+  | 4 | `VmOpen` | Starts a VM for the window `D1.L` (`WindowPtr`); returns its ID (1 or more) in `D0.L`. See [VMX68K.md](VMX68K.md) Section 3.5. |
+  | 5 | `VmPoll` | Called by VMX68K.SX on every pass of its event loop for VM `D1.L`; carries out the VM's pending requests. Returns 0, or -1 for an unknown VM. |
+  | 6 | `VmClose` | Stops VM `D1.L`. Returns 0, or -1 for an unknown VM. |
 - Still open: whether a full X68030 ROM image would occupy the end of the window.
 - In addition to hypercalls, resolution querying and switching is officially controlled via **`IOCS _CRTMOD` (`TRAP #15`, `D0.B == $10`, Mode `$50`)**, handled directly in `BusTrapHandler::on_trap`:
   - `D1.W == $0150, D2.L == -1`: Extended resolution query (`D0 = mode`, `D1 = (w << 16) | h`, `D2 = fullscreen_flag`, `D3 = (native_w << 16) | native_h`).
