@@ -86,6 +86,8 @@ pub enum AppFunction {
     VmReply = 7,
     /// Sets the speed of VM `D1.L` from VMX68K.SX's menu.
     VmSpeed = 8,
+    /// Returns the state of VM `D1.L`, its access lamp, for VMX68K.SX's bar.
+    VmStatus = 9,
 }
 
 impl AppFunction {
@@ -100,6 +102,7 @@ impl AppFunction {
             6 => Some(Self::VmClose),
             7 => Some(Self::VmReply),
             8 => Some(Self::VmSpeed),
+            9 => Some(Self::VmStatus),
             _ => None,
         }
     }
@@ -182,6 +185,7 @@ impl X68kBus {
                 Some(AppFunction::VmClose) => self.hypercall_vm_close(state),
                 Some(AppFunction::VmReply) => self.hypercall_vm_reply(state),
                 Some(AppFunction::VmSpeed) => self.hypercall_vm_speed(state),
+                Some(AppFunction::VmStatus) => self.hypercall_vm_status(state),
                 None => TrapResult::Unhandled,
             },
         }

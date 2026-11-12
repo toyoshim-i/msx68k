@@ -156,6 +156,18 @@ fn vmx68k_opens_a_vm_in_its_window() {
     assert_eq!(vm.bus.active_window(), Some(window));
     assert_eq!(layout.visible, [(45, 64, 808, 93), (40, 93, 808, 576)]);
 
+    // The access lamp at the right of the bar is out, and lights while the host says so.
+    const LAMP: (usize, usize) = (795, 52);
+    const G_DGRAY: u8 = 10;
+    const G_RED: u8 = 13;
+    assert_eq!(text_index(&vm, LAMP), G_DGRAY);
+    vm.bus.set_vm_lamp(1, true);
+    vm.run_steps(2_000_000);
+    assert_eq!(text_index(&vm, LAMP), G_RED);
+    vm.bus.set_vm_lamp(1, false);
+    vm.run_steps(2_000_000);
+    assert_eq!(text_index(&vm, LAMP), G_DGRAY);
+
     // The right button on the Configuration icon pops up its menu, and the CPU's item its
     // speeds; one chosen goes to the host at once. The submenu checks the current speed.
     choose_speed(&mut vm, Some(1), "speeds");

@@ -107,6 +107,7 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     // The VM's thread waits while the master serves it, so the prompt is looked for there.
     let prompt = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&prompt);
+    let accesses = vm.bus.drive_access_counter();
     let thread = VmThread::spawn_with_vblank(vm, Pace::Unthrottled, move |vm| {
         if vm.bus.crtc.frame_count() % 30 == 0
             && decode_tvram_ank_lines(&vm.bus, 96, 32).iter().any(|l| l.starts_with("A>"))
@@ -123,6 +124,8 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
         }
         master.run_steps(200_000);
     }
+    // Its floppy drive's reads count for the access lamp.
+    assert!(accesses.load(Ordering::Relaxed) > 0, "the FDC's reads must count");
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
     master.bus.detach_vm_bridge(id);
     drop(thread);

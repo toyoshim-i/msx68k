@@ -3,6 +3,9 @@
 
 use msx68k_cpu::BusFault;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use crate::dmac::Dmac;
 use crate::vmx68k::RemoteDisk;
 
@@ -385,6 +388,9 @@ pub struct Fdc {
     res_pos: usize,
     /// Standby status flag (`RESET STANDBY` / `SET STANDBY`).
     standby: bool,
+    /// The machine's drive accesses, counted for its access lamp (see
+    /// [`crate::bus::X68kBus::drive_access_counter`]).
+    pub(crate) drive_accesses: Arc<AtomicU64>,
 }
 
 impl Default for Fdc {
@@ -411,6 +417,7 @@ impl Fdc {
             res_len: 0,
             res_pos: 0,
             standby: false,
+            drive_accesses: Arc::default(),
         }
     }
 
@@ -513,6 +520,11 @@ impl Fdc {
         let op = cmd & 0x1F;
         self.cmd_len = 0;
         self.cmd_expected = 0;
+        // Commands that reach a disk light the access lamp: reads, writes, READ ID, FORMAT,
+        // and the scans.
+        if matches!(op, 0x02 | 0x05 | 0x06 | 0x09 | 0x0A | 0x0C | 0x0D | 0x11 | 0x19 | 0x1D) {
+            self.drive_accesses.fetch_add(1, Ordering::Relaxed);
+        }
 
         match op {
             0x03 => {

@@ -5,6 +5,8 @@
 //! thread of its own, and places their screens with [`X68kBus::vm_window_layout`].
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use msx68k_cpu::{CpuState, TrapResult};
@@ -208,7 +210,16 @@ struct OpenVm {
     window: u32,
     /// Lines of the window's content above the VM's screen, VMX68K.SX's icon bar.
     screen_top: i16,
+    /// Whether the VM's access lamp is lit, as the app sets it.
+    lamp: bool,
+    /// The lamp as `VmStatus` last told VMX68K.SX.
+    lamp_told: bool,
+    /// Whether VMX68K.SX has been sent `E_USER1` for a lamp it has not asked about yet.
+    lamp_woken: bool,
 }
+
+/// `VmStatus` bit of a lit access lamp.
+const STATUS_LAMP: u32 = 1;
 
 /// The VMs VMX68K.SX has open.
 #[derive(Debug, Default)]
@@ -266,13 +277,41 @@ impl X68kBus {
         self.vm_windows.disks.retain(|(open, _)| *open != id);
     }
 
+    /// The counter of this machine's drive accesses, floppy, SCSI, and remote, which the app
+    /// reads from another thread to light a VM's access lamp ([`Self::set_vm_lamp`]).
+    pub fn drive_access_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.fdc.drive_accesses)
+    }
+
+    /// Counts a drive access of this machine.
+    pub(crate) fn note_drive_access(&self) {
+        self.fdc.drive_accesses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Lights or puts out the access lamp of VM `id`, which VMX68K.SX shows on its bar. A
+    /// change wakes it with `E_USER1` to ask for it with `VmStatus`.
+    pub fn set_vm_lamp(&mut self, id: u32, lit: bool) {
+        if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            open.lamp = lit;
+        }
+    }
+
     /// Sends `E_USER1` to the window of each VM with disk requests VMX68K.SX has not polled
-    /// for, so it wakes for them rather than polling on every turn. Called when the guest is
-    /// about to take an event, when its queue is consistent.
+    /// for, or a lamp it has not asked about, so it wakes for them rather than polling on every
+    /// turn. Called when the guest is about to take an event, when its queue is consistent.
     pub(crate) fn wake_vm_windows(&mut self) {
         let Some(text_base) = self.native_gm_text_base else {
             return;
         };
+        for i in 0..self.vm_windows.open.len() {
+            let open = self.vm_windows.open[i];
+            if open.lamp != open.lamp_told
+                && !open.lamp_woken
+                && self.post_event(text_base, E_USER1, open.window, (0, 0))
+            {
+                self.vm_windows.open[i].lamp_woken = true;
+            }
+        }
         let mut wake = Vec::new();
         for (id, disk) in &mut self.vm_windows.disks {
             if disk.woken || disk.buffer.is_some() {
@@ -313,6 +352,9 @@ impl X68kBus {
             id,
             window,
             screen_top: state.d[4] as i16,
+            lamp: false,
+            lamp_told: false,
+            lamp_woken: false,
         });
         windows.events.push(VmEvent::Opened {
             id,
@@ -461,6 +503,25 @@ impl X68kBus {
                 0
             }
             _ => u32::MAX,
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L` in `D0.L`, bit 0 its access lamp, or
+    /// -1 for an unknown VM.
+    pub(crate) fn hypercall_vm_status(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            Some(open) => {
+                open.lamp_told = open.lamp;
+                open.lamp_woken = false;
+                if open.lamp {
+                    STATUS_LAMP
+                } else {
+                    0
+                }
+            }
+            None => u32::MAX,
         };
         TrapResult::Handled { extra_cycles: 0 }
     }

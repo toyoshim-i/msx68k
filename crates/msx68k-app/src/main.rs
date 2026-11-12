@@ -15,6 +15,7 @@
 //! - `F12`: Soft Reset X68000 VM
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -319,7 +320,15 @@ struct GuestVm {
     /// Stops and joins the VM's thread when dropped.
     thread: VmThread,
     output: Arc<VmScreenOutput>,
+    /// The VM's drive accesses, counted on its thread, and the count its lamp last saw.
+    accesses: Arc<AtomicU64>,
+    accesses_seen: u64,
+    /// Until when the VM's access lamp stays lit after its last access.
+    lamp_until: Option<Instant>,
 }
+
+/// How long a VM's access lamp stays lit after an access, which is over at once in emulation.
+const LAMP_AFTERGLOW: Duration = Duration::from_millis(200);
 
 struct Msx68kApp {
     args: AppArgs,
@@ -779,6 +788,20 @@ impl Msx68kApp {
         }
     }
 
+    /// Lights each VM's access lamp while it reaches its drives, and for a while after.
+    fn update_vm_lamps(&mut self) {
+        let now = Instant::now();
+        for guest in &mut self.guest_vms {
+            let accesses = guest.accesses.load(Ordering::Relaxed);
+            if accesses != guest.accesses_seen {
+                guest.accesses_seen = accesses;
+                guest.lamp_until = Some(now + LAMP_AFTERGLOW);
+            }
+            let lit = guest.lamp_until.is_some_and(|until| now < until);
+            self.vm.bus.set_vm_lamp(guest.id, lit);
+        }
+    }
+
     /// Stops every VM, detaching its disk first so its thread is not left waiting for it.
     fn stop_guest_vms(&mut self) {
         for guest in &self.guest_vms {
@@ -820,6 +843,7 @@ impl Msx68kApp {
             eprintln!("VM {id} failed to reset: {e:?}");
             return None;
         }
+        let accesses = vm.bus.drive_access_counter();
         let mut screen = VmScreen::new(gpu.compositor.device(), gpu.compositor.queue());
         let output = screen.output();
         let thread = VmThread::spawn_with_vblank(vm, Pace::RealTime, move |vm| {
@@ -831,6 +855,9 @@ impl Msx68kApp {
             window,
             thread,
             output,
+            accesses,
+            accesses_seen: 0,
+            lamp_until: None,
         })
     }
 
@@ -1130,6 +1157,7 @@ impl ApplicationHandler for Msx68kApp {
             // indefinitely, for example while the window is covered.
             self.step_vm_one_frame();
             self.update_guest_vms();
+            self.update_vm_lamps();
             self.render_frame();
         }
         // A GDB client waits for each reply, so keep round trips well below a frame.

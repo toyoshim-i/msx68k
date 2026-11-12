@@ -19,8 +19,11 @@ BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
 SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
 CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
 G_THRU		.equ	0		; Clear text, where the host shows the VM's screen
+G_WHITE		.equ	8
 G_LGRAY		.equ	9
 G_BLACK		.equ	11
+G_RED		.equ	13		; The access lamp, lit
+G_DGRAY		.equ	10		; The access lamp, out
 
 	.text
 	.globl	_start
@@ -142,7 +145,7 @@ event_loop:
 
 	move.w	event_what(pc), d0
 	cmpi.w	#1, d0			; E_MSLDOWN
-	beq.s	handle_mouse_down
+	beq	handle_mouse_down
 	cmpi.w	#3, d0			; E_MSRDOWN
 	beq	handle_right_down
 	cmpi.w	#7, d0			; E_UPDATE
@@ -153,9 +156,10 @@ event_loop:
 	beq.s	handle_system
 	cmpi.w	#13, d0			; E_SYSTEM2
 	beq.s	handle_system
-	cmpi.w	#14, d0			; E_USER1: the VM has disk requests
+	cmpi.w	#14, d0			; E_USER1: disk requests, or the lamp changed
 	bne.s	event_loop
 	bsr	serve_disk
+	bsr	update_lamp
 	bra.s	event_loop
 
 handle_activate:
@@ -176,7 +180,7 @@ handle_system:
 	move.l	win_ptr(pc), -(sp)
 	SXCALL	WMSelect		; $A1FE
 	addq.l	#4, sp
-	bra.s	event_loop
+	bra	event_loop
 
 handle_update:
 	* The bar, and the rest clear for the VM's screen
@@ -319,7 +323,73 @@ draw_bar:
 	SXCALL	GMPlotImg		; $A182
 	lea	10(sp), sp
 draw_bar_done:
+	bsr	draw_lamp
 	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: update_lamp
+* Asks the host for the VM's access lamp and draws it if it changed.
+* -----------------------------------------------------------------------------
+update_lamp:
+	movem.l	d0-d3/a1, -(sp)
+	moveq.l	#MSX68K_FN_VM_STATUS, d0
+	move.l	vm_id(pc), d1
+	bsr	msx68k_call
+	tst.l	d0
+	bmi.s	update_lamp_done
+	andi.b	#1, d0			; the lamp
+	cmp.b	lamp_lit(pc), d0
+	beq.s	update_lamp_done
+	lea	lamp_lit(pc), a1
+	move.b	d0, (a1)
+	bsr	draw_lamp
+update_lamp_done:
+	movem.l	(sp)+, d0-d3/a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: draw_lamp
+* Draws the access lamp at the right of the bar, red while lit, in a recess as
+* the icons are. The colors need all four planes.
+* -----------------------------------------------------------------------------
+draw_lamp:
+	movem.l	d0-d2/a0-a1, -(sp)
+	move.l	win_ptr(pc), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	move.w	#$000F, -(sp)		; G_ALLPAGE
+	SXCALL	GMAPage			; $A149
+	addq.l	#2, sp
+	move.w	d0, d2
+	clr.w	-(sp)			; G_FORE << 8 | G_PSET
+	SXCALL	GMPenMode		; $A144
+	addq.l	#2, sp
+	lea	lamp_rects(pc), a1
+	move.w	#G_BLACK, d0
+	bsr.s	draw_lamp_fill
+	move.w	#G_WHITE, d0
+	bsr.s	draw_lamp_fill
+	move.w	#G_DGRAY, d0
+	tst.b	lamp_lit(pc)
+	beq.s	draw_lamp_face
+	move.w	#G_RED, d0
+draw_lamp_face:
+	bsr.s	draw_lamp_fill
+	move.w	d2, -(sp)
+	SXCALL	GMAPage			; $A149
+	addq.l	#2, sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+* Fills the rectangle at A1 with color D0.W and moves A1 to the next
+draw_lamp_fill:
+	move.w	d0, -(sp)
+	SXCALL	GMForeColor		; $A147
+	addq.l	#2, sp
+	move.l	a1, -(sp)
+	SXCALL	GMFillRect		; $A173
+	addq.l	#4, sp
+	addq.l	#8, a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -668,6 +738,12 @@ bar_line_rect:
 	.dc.w	0, BAR_HEIGHT-1, 768, BAR_HEIGHT
 screen_rect:
 	.dc.w	0, BAR_HEIGHT, 768, BAR_HEIGHT+512
+* The access lamp: black at the top and left, white at the bottom and right, and
+* the lamp itself
+lamp_rects:
+	.dc.w	749, 8, 763, 16
+	.dc.w	750, 9, 763, 16
+	.dc.w	750, 9, 762, 15
 config_icon_rect:
 	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
 
@@ -695,6 +771,8 @@ win_active:
 	.dc.b	0
 library_open:
 	.dc.b	0
+lamp_lit:
+	.dc.b	0			; the access lamp as drawn
 	.even
 * Speed the VM runs at, by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
 vm_speed:

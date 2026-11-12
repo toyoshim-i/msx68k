@@ -366,6 +366,7 @@ impl X68kBus {
     }
 
     fn ask(&self, op: BridgeOp) -> Option<crate::vmx68k::BridgeReply> {
+        self.note_drive_access();
         self.remote_fs.as_ref()?.bridge.ask(op)
     }
 

@@ -156,6 +156,7 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     let seen = Arc::clone(&prompt);
     let thread_screen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let screen = Arc::clone(&thread_screen);
+    let accesses = vm.bus.drive_access_counter();
     let thread = VmThread::spawn_with_vblank(vm, Pace::Unthrottled, move |vm| {
         if vm.bus.crtc.frame_count() % 30 == 0 {
             let lines = decode_tvram_ank_lines(&vm.bus, 96, 32);
@@ -175,6 +176,8 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
         }
         master.run_steps(200_000);
     }
+    // Its remote drives' requests count for the access lamp.
+    assert!(accesses.load(Ordering::Relaxed) > 0, "the remote drive's requests must count");
     // What the VM writes goes to the master's drive, through the master's Human68k, which keeps
     // names as typed.
     let dir = [short_name("vmtest", "")];

@@ -35,8 +35,8 @@ run in a VM of their own from the start.
   file, and opening the file boots a VM with the same settings.
 - **Settings menus.** VMX68K.SX's window has a bar of icons above the VM's screen, pictures
   rather than words, as in `シャーペン.X`, each in the style of SX-Window's icons: a picture in
-  a rectangular recess, 3:2 wide. The right button on one pops up its menu, as SX-Window's menus follow
-  the right button (`MNSelect`). Menus are in Japanese, as SX-Window is. The icons and the
+  a rectangular recess, 3:2 wide. The right button on one pops up its menu, as SX-Window's
+  menus follow the right button (`MNSelect`). Menus are in Japanese, as SX-Window is. The icons and the
   submenus are resources of `VMX68K.LB`, next to `VMX68K.X`, since the Menu Man takes
   submenus only as `'MENU'` resources of an open library. There is no
   Save button: what takes effect at once is applied and saved when chosen, and what needs a
@@ -63,7 +63,10 @@ run in a VM of their own from the start.
     floppy drives unused, shows none.
   - **Access lamp**: one lamp lights whenever the VM reaches any of its drives, floppy, SCSI, or
     remote, as the front panel's lamp of the real machine does, so that access shows in bypass
-    mode too.
+    mode too. It sits at the right of the bar, red while lit, and stays lit 0.2 s after an
+    access, since emulated accesses are over at once. The app counts the VM's accesses (FDC
+    reads, writes, and READ ID; SCSI reads and writes; remote drive requests) and sets the
+    lamp on the master, which wakes VMX68K.SX with `E_USER1` to read it with `VmStatus` (9).
 - **A settings file per VM.** Each VM setup is one resource library (`.LB`, as `MSX68K.LB`)
   holding its settings and its own SRAM, kept apart from the master's.
 - **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.

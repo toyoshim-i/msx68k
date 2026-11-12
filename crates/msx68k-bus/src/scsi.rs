@@ -467,6 +467,9 @@ impl X68kBus {
         }
 
         let cmd = (state.d[1] & 0xFF) as u8;
+        if matches!(cmd, 0x21 | 0x22 | 0x26 | 0x27) {
+            self.note_drive_access();
+        }
         match cmd {
             0x00 => {
                 // _S_RESET
@@ -640,6 +643,9 @@ impl X68kBus {
         }
 
         let cmd = self.main_ram[req_ptr + 2];
+        if matches!(cmd, 4 | 8 | 9) {
+            self.note_drive_access();
+        }
         match cmd {
             0 => {
                 // INIT (Command 0)

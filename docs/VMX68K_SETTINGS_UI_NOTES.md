@@ -116,7 +116,8 @@ official SX-Window programming manuals.
 ### 2.1 Order
 1. ~~Icon bar and the Configuration menu with the CPU speed submenu, applied at once.~~ Done
    (Section 1.6).
-2. Floppy icons with eject and drop (custom mode), and the access lamp.
+2. ~~The access lamp.~~ Done (2026-11-13). The floppy icons wait for custom mode, which the
+   settings library and dialog bring, as they show only there.
 3. The per-VM settings library (`.LB`) with its SRAM, the boot device submenu, and the menu to
    make a new setup; saving what is applied at once starts here.
 4. The configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the

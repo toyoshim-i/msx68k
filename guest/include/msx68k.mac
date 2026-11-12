@@ -18,6 +18,7 @@ MSX68K_FN_VM_POLL	.equ	5	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns a disk
 MSX68K_FN_VM_CLOSE	.equ	6	; D1.L = VM ID; stops the VM
 MSX68K_FN_VM_REPLY	.equ	7	; D1.L = VM ID, D2.L = 0 when the request succeeded
 MSX68K_FN_VM_SPEED	.equ	8	; D1.L = VM ID, D2.L = speed: 0 10 MHz, 1 16 MHz, 2 24 MHz, 3 Burst
+MSX68K_FN_VM_STATUS	.equ	9	; D1.L = VM ID; returns bit 0 = access lamp lit
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the
