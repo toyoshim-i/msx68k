@@ -146,10 +146,10 @@ macro_rules! with_burst_policy {
 }
 pub(crate) use with_policy;
 
-/// Configuration for spawning a Master SX-Window VM or an Isolated Application VM.
+/// Configuration for spawning a Primary SX-Window VM or an Isolated Application VM.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct VmConfig {
-    /// VM role (`MasterSx` vs `AppVm`).
+    /// VM role (`PrimarySx` vs `AppVm`).
     pub role: VmRole,
     /// Selected CPU and System Bus speed mode.
     pub speed_mode: CpuSpeedMode,
@@ -162,14 +162,14 @@ pub struct VmConfig {
 }
 
 impl VmConfig {
-    /// Creates the default configuration for the Master SX-Window VM:
-    /// - Role: [`VmRole::MasterSx`]
+    /// Creates the default configuration for the Primary SX-Window VM:
+    /// - Role: [`VmRole::PrimarySx`]
     /// - Speed: [`CpuSpeedMode::Burst`] (uncapped CPU, zero system-bus delay)
     /// - RAM: `12 MB`
-    pub const fn master_sx() -> Self {
+    pub const fn primary_sx() -> Self {
         Self {
-            role: VmRole::MasterSx,
-            speed_mode: VmRole::MasterSx.default_speed_mode(),
+            role: VmRole::PrimarySx,
+            speed_mode: VmRole::PrimarySx.default_speed_mode(),
             ram_size_bytes: MAX_MAIN_RAM_BYTES,
             burst_on_disk_io: true,
             cpu_model: CpuModel::Mc68000,
@@ -293,11 +293,11 @@ impl X68kVm {
     pub fn new(config: VmConfig) -> Self {
         let timing = config.speed_mode.timing_config();
         let mut bus = X68kBus::new(config.ram_size_bytes, timing);
-        // Only the master SX-Window VM runs software known not to use upper address bits as
+        // Only the primary SX-Window VM runs software known not to use upper address bits as
         // flags, so other VMs keep the 68000's mirroring for compatibility.
-        bus.extensions_reserved = config.role == VmRole::MasterSx;
+        bus.extensions_reserved = config.role == VmRole::PrimarySx;
         bus.cpu_model = config.cpu_model;
-        if config.role == VmRole::MasterSx {
+        if config.role == VmRole::PrimarySx {
             bus.install_app_entry();
         }
         Self {
@@ -311,9 +311,9 @@ impl X68kVm {
         }
     }
 
-    /// Creates the Master SX-Window VM (`Burst` mode, 12 MB RAM).
-    pub fn new_master_sx() -> Self {
-        Self::new(VmConfig::master_sx())
+    /// Creates the Primary SX-Window VM (`Burst` mode, 12 MB RAM).
+    pub fn new_primary_sx() -> Self {
+        Self::new(VmConfig::primary_sx())
     }
 
     /// Creates an Isolated Application VM with the default `10 MHz` mode.

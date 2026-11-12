@@ -24,7 +24,7 @@ impl CpuPolicy for TrackedPolicy {
     const TRACK_CYCLES: bool = true;
 }
 
-/// Uncapped zero-wait execution policy used for the Master SX-Window VM and Burst mode.
+/// Uncapped zero-wait execution policy used for the Primary SX-Window VM and Burst mode.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct BurstPolicy;
 

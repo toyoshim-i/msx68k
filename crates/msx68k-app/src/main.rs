@@ -283,7 +283,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD/.DIM)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD/.DIM)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
-                           --vm-fd0 <path>      Boot VMs of VMX68K.X from this floppy image, not the master's A:\n  \
+                           --vm-fd0 <path>      Boot VMs of VMX68K.X from this floppy image, not the primary's A:\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
                            --cpu <model>        CPU: 68000 | 68030 (default: 68000)\n  \
@@ -315,7 +315,7 @@ struct GpuWindowState {
 /// A VM opened by VMX68K.X, running on a thread of its own and shown in its window.
 struct GuestVm {
     id: u32,
-    /// The master VM's window record it shows in.
+    /// The primary VM's window record it shows in.
     window: u32,
     /// Stops and joins the VM's thread when dropped.
     thread: VmThread,
@@ -330,7 +330,7 @@ struct GuestVm {
     sram_changes: std::sync::mpsc::Receiver<Vec<u8>>,
     sram_changed: Arc<std::sync::mpsc::Sender<Vec<u8>>>,
     sram_pending: Option<(Vec<u8>, Instant)>,
-    /// The VM's SRAM as it last was, which a restart keeps, and the master's drives it sees.
+    /// The VM's SRAM as it last was, which a restart keeps, and the primary's drives it sees.
     sram: Option<Vec<u8>>,
     drives: u32,
 }
@@ -359,7 +359,7 @@ struct Msx68kApp {
     guest_ipl30: Option<Vec<u8>>,
     guest_cgrom: Vec<u8>,
     guest_vms: Vec<GuestVm>,
-    /// The VM each held key went to, so its release follows it: `None` for the master VM.
+    /// The VM each held key went to, so its release follows it: `None` for the primary VM.
     key_targets: std::collections::HashMap<u8, Option<u32>>,
     gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
@@ -392,7 +392,7 @@ impl Msx68kApp {
             None => 4,
         });
         let mut vm = X68kVm::new(
-            VmConfig::master_sx()
+            VmConfig::primary_sx()
                 .with_speed_mode(args.speed_mode.unwrap_or(match args.cpu_model {
                     CpuModel::Mc68000 => CpuSpeedMode::Mhz10,
                     CpuModel::Mc68030 => CpuSpeedMode::Mhz25,
@@ -556,7 +556,7 @@ impl Msx68kApp {
         );
 
         let now = Instant::now();
-        // VMs opened by VMX68K.X have the CPU of their setup whatever the master VM's is.
+        // VMs opened by VMX68K.X have the CPU of their setup whatever the primary VM's is.
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         Self {
             args,
@@ -771,7 +771,7 @@ impl Msx68kApp {
     }
 
     /// Sends a key to the VM whose window SX-Window has active, straight into its MFP, or to
-    /// the master VM. A release goes where its press went.
+    /// the primary VM. A release goes where its press went.
     fn send_key(&mut self, scancode: u8, pressed: bool) {
         let target = if pressed {
             let active = self.vm.bus.active_window();
@@ -907,7 +907,7 @@ impl Msx68kApp {
                 Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
             }
         } else {
-            // Drive bypass mode: the VM sees the master's drives under the same letters, bridged
+            // Drive bypass mode: the VM sees the primary's drives under the same letters, bridged
             // at the file level through VMX68K.X, and boots from A:. The floppy image mode for
             // drive 0 comes with the VM's settings.
             let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();

@@ -1,5 +1,5 @@
-//! A VM opened by VMX68K.X boots Human68k 3.02 from a disk image on the master VM's HDD,
-//! which VMX68K.X reads through the master's Human68k when the host wakes it with `E_USER1`,
+//! A VM opened by VMX68K.X boots Human68k 3.02 from a disk image on the primary VM's HDD,
+//! which VMX68K.X reads through the primary's Human68k when the host wakes it with `E_USER1`,
 //! even with its window behind another (`docs/VMX68K.md` Sections 3.1 and 3.5).
 
 use std::path::Path;
@@ -28,7 +28,7 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 }
 
 #[test]
-fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
+fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -48,7 +48,7 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
 
-    // The master's HDD holds the VM's drive 0 at A:\VMX68K\DRIVE0.XDF.
+    // The primary's HDD holds the VM's drive 0 at A:\VMX68K\DRIVE0.XDF.
     let mut dir = [b' '; 8];
     dir[..6].copy_from_slice(b"VMX68K");
     let mut name = [b' '; 8];
@@ -63,36 +63,36 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
         date: 0x5821,
         data: human.clone(),
     };
-    let mut master = X68kVm::new(
-        VmConfig::master_sx()
+    let mut primary = X68kVm::new(
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
-    master.bus.load_cgrom(&cgrom);
-    master.bus.load_ipl_rom(&ipl);
-    assert!(master.bus.insert_scsi_hdd(
+    primary.bus.load_cgrom(&cgrom);
+    primary.bus.load_ipl_rom(&ipl);
+    assert!(primary.bus.insert_scsi_hdd(
         0,
         build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, vec![drive0])
     ));
-    master.bus.set_boot_from_scsi(true);
-    master.reset().unwrap();
-    master.run_steps(30_000_000);
+    primary.bus.set_boot_from_scsi(true);
+    primary.reset().unwrap();
+    primary.run_steps(30_000_000);
 
     // \X68 lists VMX68K.X after VMX68K.LB, as the first icon of the third row.
-    click(&mut master, (22, 340), 2, 3_000_000);
-    click(&mut master, (104, 255), 2, 8_000_000);
-    let events = master.bus.take_vm_events();
+    click(&mut primary, (22, 340), 2, 3_000_000);
+    click(&mut primary, (104, 255), 2, 8_000_000);
+    let events = primary.bus.take_vm_events();
     let [VmEvent::Opened { id, window, drive0_bytes, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
     assert_eq!(drive0_bytes as usize, human.len(), "VMX68K.X found the image's size");
     // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
-    click(&mut master, (22, 340), 2, 3_000_000);
-    assert_ne!(master.bus.active_window(), Some(window));
+    click(&mut primary, (22, 340), 2, 3_000_000);
+    assert_ne!(primary.bus.active_window(), Some(window));
 
-    // As the app does: drive 0 of the VM is the master's image, served by VMX68K.X.
+    // As the app does: drive 0 of the VM is the primary's image, served by VMX68K.X.
     let (bridge, requests) = vm_bridge();
-    master.bus.attach_vm_bridge(id, requests);
+    primary.bus.attach_vm_bridge(id, requests);
     let disk = RemoteDisk::new(bridge, drive0_bytes as usize);
     let mut vm = X68kVm::new(
         VmConfig::app_vm()
@@ -104,7 +104,7 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     assert!(vm.bus.fdc.insert_remote_disk(0, disk, false));
     vm.reset().unwrap();
 
-    // The VM's thread waits while the master serves it, so the prompt is looked for there.
+    // The VM's thread waits while the primary serves it, so the prompt is looked for there.
     let prompt = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&prompt);
     let accesses = vm.bus.drive_access_counter();
@@ -119,14 +119,14 @@ fn a_vm_boots_from_an_image_on_the_master_vms_drive() {
     while !prompt.load(Ordering::Relaxed) {
         if started.elapsed() > Duration::from_secs(60) {
             // Nothing may wait on the disk while the thread is dropped.
-            master.bus.detach_vm_bridge(id);
+            primary.bus.detach_vm_bridge(id);
             panic!("the VM must reach COMMAND.X's prompt");
         }
-        master.run_steps(200_000);
+        primary.run_steps(200_000);
     }
     // Its floppy drive's reads count for the access lamp.
     assert!(accesses.load(Ordering::Relaxed) > 0, "the FDC's reads must count");
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
-    master.bus.detach_vm_bridge(id);
+    primary.bus.detach_vm_bridge(id);
     drop(thread);
 }

@@ -16,7 +16,7 @@ fn boot(
     cgrom: &[u8],
 ) -> X68kVm {
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(speed)
             .with_burst_on_disk_io(false)
             .with_ram_mb(4)

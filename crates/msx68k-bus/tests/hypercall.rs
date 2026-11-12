@@ -30,7 +30,7 @@ fn call(vm: &mut X68kVm, target: u32) {
 
 #[test]
 fn the_opcode_elsewhere_is_an_ordinary_line_f_exception() {
-    let mut vm = vm(VmConfig::master_sx());
+    let mut vm = vm(VmConfig::primary_sx());
     vm.bus.write_u16(CODE, HYPERCALL_OPCODE, true).unwrap();
     vm.cpu_state.pc = CODE;
     vm.step();
@@ -39,7 +39,7 @@ fn the_opcode_elsewhere_is_an_ordinary_line_f_exception() {
 
 #[test]
 fn a_registered_address_runs_its_hypercall() {
-    let mut vm = vm(VmConfig::master_sx());
+    let mut vm = vm(VmConfig::primary_sx());
     call(&mut vm, APP_ENTRY);
     vm.cpu_state.d[0] = AppFunction::Version as u32;
     vm.step(); // The hypercall
@@ -50,7 +50,7 @@ fn a_registered_address_runs_its_hypercall() {
 
 #[test]
 fn an_unknown_function_is_a_line_f_exception() {
-    let mut vm = vm(VmConfig::master_sx());
+    let mut vm = vm(VmConfig::primary_sx());
     call(&mut vm, APP_ENTRY);
     vm.cpu_state.d[0] = 0x4D58_0000;
     vm.step();
@@ -58,18 +58,18 @@ fn an_unknown_function_is_a_line_f_exception() {
 }
 
 #[test]
-fn only_the_master_vm_has_the_entry_and_only_the_entry_shows() {
-    let mut master = vm(VmConfig::master_sx());
+fn only_the_primary_vm_has_the_entry_and_only_the_entry_shows() {
+    let mut primary = vm(VmConfig::primary_sx());
     let signature: Vec<u8> = (0..8)
-        .map(|i| master.bus.read_u8(APP_ENTRY_BASE + i, true).unwrap())
+        .map(|i| primary.bus.read_u8(APP_ENTRY_BASE + i, true).unwrap())
         .collect();
     assert_eq!(signature, b"MSX68K\x00\x01");
     // With no SCSI ROM, nothing else in the window answers, so msx68k is not taken for a
     // machine with internal SCSI.
-    assert!(master.bus.read_u8(APP_ENTRY_BASE - 1, true).is_err());
-    assert!(master.bus.read_u8(0x00FC_0024, true).is_err());
+    assert!(primary.bus.read_u8(APP_ENTRY_BASE - 1, true).is_err());
+    assert!(primary.bus.read_u8(0x00FC_0024, true).is_err());
     // User mode cannot reach it, as with the rest of the ROM.
-    assert!(master.bus.read_u8(APP_ENTRY_BASE, false).is_err());
+    assert!(primary.bus.read_u8(APP_ENTRY_BASE, false).is_err());
 
     let mut app = vm(VmConfig::app_vm());
     assert!(app.bus.read_u8(APP_ENTRY_BASE, true).is_err());
@@ -78,7 +78,7 @@ fn only_the_master_vm_has_the_entry_and_only_the_entry_shows() {
 
 #[test]
 fn a_reset_forgets_hypercalls_patched_into_ram() {
-    let mut vm = vm(VmConfig::master_sx());
+    let mut vm = vm(VmConfig::primary_sx());
     vm.bus.register_hypercall(CODE, HypercallId::GmTextSpan);
     vm.bus.soft_reset();
     assert_eq!(vm.bus.hypercall_at(CODE), None);

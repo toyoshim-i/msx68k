@@ -39,7 +39,7 @@ fn boot_with(extra: Vec<ExtractedFile>) -> Option<X68kVm> {
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
 
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
@@ -91,7 +91,7 @@ fn choose_speed(vm: &mut X68kVm, item: Option<i16>, name: &str) {
     point(vm, at, 3_000_000);
 }
 
-/// Palette index of the master's text plane at screen `(x, y)`, 0 where it is clear.
+/// Palette index of the primary's text plane at screen `(x, y)`, 0 where it is clear.
 fn text_index(vm: &X68kVm, (x, y): (usize, usize)) -> u8 {
     let tvram = vm.bus.active_tvram().unwrap();
     let (row, plane) = (vm.bus.active_tvram_row_bytes(), vm.bus.active_tvram_plane_bytes());

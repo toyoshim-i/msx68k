@@ -8,7 +8,7 @@
 * setup, its settings and its own SRAM, is a resource library too, *.V68, given on
 * the command line, as the Filer gives it (\SHELL\ICON.LB), or DEFAULT.V68.
 * Drive 0 of the VM is the image at DRIVE0_PATH, read and written through
-* Human68k here, so the VM's disks live on the master VM's drives.
+* Human68k here, so the VM's disks live on the primary VM's drives.
 * Assembled by rhas and linked by rhlk
 * -----------------------------------------------------------------------------
 
@@ -207,7 +207,7 @@ no_library:
 	move.l	d0, (a1)
 no_drive0:
 
-	* Count the master's drives from A:, which a VM in bypass mode sees as its own
+	* Count the primary's drives from A:, which a VM in bypass mode sees as its own
 	moveq.l	#0, d3
 count_drives:
 	addq.w	#1, d3
@@ -469,7 +469,7 @@ update_status:
 	beq.s	update_lamp
 	bsr	resize_window
 update_lamp:
-	btst	#2, d0			; the master's screen changed size
+	btst	#2, d0			; the primary's screen changed size
 	beq.s	update_lamp_sram
 	bsr	redraw_window
 update_lamp_sram:
@@ -490,7 +490,7 @@ update_lamp_done:
 * -----------------------------------------------------------------------------
 * Helper: redraw_window
 * Hides and shows the window again, so that SX-Window works out its visible region
-* and draws it anew, frame and content, after the master's screen changed size:
+* and draws it anew, frame and content, after the primary's screen changed size:
 * what the old screen cut off was never drawn.
 * -----------------------------------------------------------------------------
 redraw_window:
@@ -1181,7 +1181,7 @@ dialog_filter_done:
 * -----------------------------------------------------------------------------
 * Helper: serve_disk
 * Carries out the VM's bridge requests until there are none: reads and writes of
-* drive 0's image, and the master's DOS calls a VM's remote drives need. The
+* drive 0's image, and the primary's DOS calls a VM's remote drives need. The
 * kinds are those of BridgeOp in crates/msx68k-bus/src/vmx68k.rs.
 * -----------------------------------------------------------------------------
 serve_disk:
@@ -1387,7 +1387,7 @@ serve_filedate:
 
 serve_result:
 	move.l	d0, d3
-	* What changes the master's storage is written out at once, not left in Human68k's
+	* What changes the primary's storage is written out at once, not left in Human68k's
 	* buffers, so nothing a VM wrote is lost if the machine stops
 	move.l	request_kind(a5), d0
 	cmpi.l	#5, d0			; _CLOSE

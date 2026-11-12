@@ -1,7 +1,7 @@
 // VM Screen Layer Shader (WGSL)
 //
-// Draws a VM's completed screen texture as a quad over the master VM's screen, under its text
-// plane: only where the master's text is clear (alpha 0 in its composited buffer), so that
+// Draws a VM's completed screen texture as a quad over the primary VM's screen, under its text
+// plane: only where the primary's text is clear (alpha 0 in its composited buffer), so that
 // menus, windows, and the cursor drawn in text stay in front. The scissor rectangles of the
 // draw clip it to the visible region of the VM's window.
 
@@ -10,10 +10,10 @@ struct Layer {
     dest: vec4<f32>,
     // Size of the frame in the texture.
     size: vec2<u32>,
-    // Master screen position of the frame's top-left pixel.
+    // Primary screen position of the frame's top-left pixel.
     origin: vec2<i32>,
-    // Size of the master VM's screen.
-    master: vec2<u32>,
+    // Size of the primary VM's screen.
+    primary: vec2<u32>,
 };
 
 @group(0) @binding(0)
@@ -22,9 +22,9 @@ var<uniform> layer: Layer;
 @group(0) @binding(1)
 var frame: texture_2d<f32>;
 
-// The master VM's composited screen, packed RGBA8 words (shader.wgsl).
+// The primary VM's composited screen, packed RGBA8 words (shader.wgsl).
 @group(0) @binding(2)
-var<storage, read> master_rgba: array<u32>;
+var<storage, read> primary_rgba: array<u32>;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -52,10 +52,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let py = min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(size.y)), size.y - 1u);
     let mx = layer.origin.x + i32(px);
     let my = layer.origin.y + i32(py);
-    if (mx < 0 || my < 0 || u32(mx) >= layer.master.x || u32(my) >= layer.master.y) {
+    if (mx < 0 || my < 0 || u32(mx) >= layer.primary.x || u32(my) >= layer.primary.y) {
         discard;
     }
-    if ((master_rgba[u32(my) * layer.master.x + u32(mx)] >> 24u) != 0u) {
+    if ((primary_rgba[u32(my) * layer.primary.x + u32(mx)] >> 24u) != 0u) {
         discard;
     }
     return vec4<f32>(textureLoad(frame, vec2<u32>(px, py), 0).rgb, 1.0);

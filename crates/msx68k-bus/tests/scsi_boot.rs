@@ -667,7 +667,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
         build_bootable_sxwin_scsi_hdd_with_files(&human_data, &sx_refs, 32, vec![sxmode]);
 
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
@@ -1487,7 +1487,7 @@ fn test_sxwin31_scsi_boot_and_mouse_sync() {
 #[test]
 fn test_burst_frame_peripheral_timing_pacing() {
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
@@ -1523,7 +1523,7 @@ fn test_burst_frame_peripheral_timing_pacing() {
 
 #[test]
 fn test_sx_set_screen_mode_hypercall_and_resident_patch() {
-    let mut vm = X68kVm::new_master_sx();
+    let mut vm = X68kVm::new_primary_sx();
 
     // 1. Initial resolution is 768x512
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
@@ -1681,7 +1681,7 @@ fn test_sxwin31_scsi_boot_with_1024x768_initial_resolution() {
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
@@ -1821,7 +1821,7 @@ fn test_sxwin31_scsi_boot_with_1920x1080_initial_resolution() {
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
@@ -1906,7 +1906,7 @@ fn test_sxwin31_switches_to_a_1366x768_screen() {
     let hdd_image = build_bootable_sxwin_scsi_hdd(&human_data, &sx_refs, 32);
 
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );

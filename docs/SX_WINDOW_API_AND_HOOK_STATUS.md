@@ -1,4 +1,4 @@
-# SX-Window v3.1 Kernel Architecture, A-Line (`$Axxx`) API Catalog, and Master Hook Tracking Reference
+# SX-Window v3.1 Kernel Architecture, A-Line (`$Axxx`) API Catalog, and Primary Hook Tracking Reference
 
 This reference document specifies the low-level binary layout, the **Line 1010 Emulator (`Vector #10`) A-Line (`$Axxx`) Dispatcher**, the complete **SX-Window v3.1 Manager Subsystem Catalog (1,050 active APIs)**, **Screen Mode Selection & Battery-Backed SRAM Storage**, the **Sub-Window Manager (`SWM`) & Virtualized GVRAM Architecture**, and the low-level **Graph Man (`GM`) Drawing Engine Internals** inside **`SYS/FSX.X`**. It establishes the technical blueprint for **Phase 2: Decoupled High-Resolution & TrueColor Native Execution** in **msx68k**.
 
@@ -608,12 +608,12 @@ In original X68000 hardware, there is only **one hardware Graphic 0 scroll offse
 
 ---
 
-### 4.3 Master VM Architecture: Per-App / Per-Window Virtualized GVRAM
-In **msx68k**, all SX-Window applications run cooperatively within a single Master VM. To eliminate the hardware limitation where only one graphics window can be properly displayed at a time, we implement **Partial Virtualization of the Graphics Plane (`GVRAM`)**:
+### 4.3 Primary VM Architecture: Per-App / Per-Window Virtualized GVRAM
+In **msx68k**, all SX-Window applications run cooperatively within a single Primary VM. To eliminate the hardware limitation where only one graphics window can be properly displayed at a time, we implement **Partial Virtualization of the Graphics Plane (`GVRAM`)**:
 
 ```mermaid
 graph TD
-    subgraph MasterVM["Master VM (Cooperative 68000 Guest Space)"]
+    subgraph PrimaryVM["Primary VM (Cooperative 68000 Guest Space)"]
         App1["Canvas Paint (ｷｬﾝﾊﾞｽ.X)<br/>Window #1 at (100, 80)"]
         App2["Sharpen Graphics (ｼｬｰﾍﾟﾝ.X)<br/>Window #2 at (550, 200)"]
         SWM["Sub-Window Manager ($A227..$A22B)<br/>Maintains WSRecords in 0x543C6"]
@@ -740,7 +740,7 @@ There are **exactly 13 occurrences of `$00E00000`** and **3 occurrences of `$00E
 | **`text_base + 0x2F31F`** | `GMNewBits` (`0x2F1F6`) | Default TVRAM Plane 0 base pointer assigned to newly created screen BitMaps. |
 | **`text_base + 0x4C01E`** | System Error Alert Box (`0x4BFC4`) | Emergency crash dialog writer targeting Plane 0 framebuffer directly. |
 | **`text_base + 0x55282`** | `ActiveScreenModeRecord` | Mode 3 (`768×512`) active screen `baseAddr` in data segment (`0x55278 + 0x0A`). |
-| **`text_base + 0x55298`** | Default Screen `Bitmap` | Master screen BitMap template `baseAddr` (`0x5528E + 0x0A`). |
+| **`text_base + 0x55298`** | Default Screen `Bitmap` | Primary screen BitMap template `baseAddr` (`0x5528E + 0x0A`). |
 | **`text_base + 0x55300`** | Virtual Screen Mode 0 | 256×256 Low-Res TVRAM `baseAddr` in mode table (`0x552F6 + 0x0A`). |
 | **`text_base + 0x55316`** | Virtual Screen Mode 1 | 512×512 Standard TVRAM `baseAddr` in mode table (`0x5530C + 0x0A`). |
 | **`text_base + 0x5532C`** | Virtual Screen Mode 2 | 640×480 VGA TVRAM `baseAddr` in mode table (`0x55322 + 0x0A`). |
@@ -891,7 +891,7 @@ To persist display resolutions across cold boots and emulator restarts:
 
 The status of each API, the records and conventions they rely on, and how they are verified are in [NATIVE_DRAWING.md](NATIVE_DRAWING.md). Text is in [NATIVE_FONTS.md](NATIVE_FONTS.md).
 
-## 6. Master Hook & Patch Tracking Table
+## 6. Primary Hook & Patch Tracking Table
 
 This living status table tracks all active and planned Mixed Mode hypercalls, module patches, and A-Line hooks across the **msx68k** project:
 

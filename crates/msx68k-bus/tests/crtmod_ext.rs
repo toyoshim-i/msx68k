@@ -8,7 +8,7 @@ use msx68k_bus::{Bus, EXT_TVRAM_BASE, X68kVm};
 
 #[test]
 fn test_iocs_crtmod_mode_50_queries_and_mode_switches() {
-    let mut vm = X68kVm::new_master_sx();
+    let mut vm = X68kVm::new_primary_sx();
 
     // Default resolution: 768x512, extended crtmod inactive
     assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));

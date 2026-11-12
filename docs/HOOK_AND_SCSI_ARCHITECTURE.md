@@ -69,7 +69,7 @@ one opcode only, and the address it runs at decides which hypercall it is.
   | `ScsiRomBoot`, `ScsiRomdbBuild`, `ScsiIocsInstall`, `ScsiIocsDispatch`, `ScsiDriverStrategy`, `ScsiDriverInterrupt` | `$FC0050`, `$FC0060`, `$FC0064`, `$FC0068`, `$FC006C`, `$FC0070` | Virtual SCSI ROM (Section 4) |
   | `AppEntry` | `$FDFFF8` | Application entry, below |
 - **Application entry.** msx68k's own applications (`SXMODE.X`, VMX68K.SX) reach the host
-  through one entry, which only the master SX-Window VM has. It sits at the end of the internal
+  through one entry, which only the primary SX-Window VM has. It sits at the end of the internal
   SCSI ROM window (`$FC0000`–`$FDFFFF`), outside the SCSI ROM itself:
   ```text
   $FDFFF0  'MSX68K', version.w (1)   ; signature
@@ -95,7 +95,7 @@ one opcode only, and the address it runs at decides which hypercall it is.
   | 1 | `GetWheelConfig` | Returns `D1` reverse (1), `D2` arrow clicks per notch, `D3` trackpad pixels per notch. |
   | 2 | `SetWheelConfig` | Sets `D1`–`D3` and returns them as clamped. |
   | 3 | `ScreenMode` | `D1.L = -1` returns the mode, width, and height in `D0`–`D2`; otherwise switches to mode `D1` (0, 1, 2) or to the size in `D1`, `D2`. Superseded by `IOCS _CRTMOD` `$50`. |
-  | 4 | `VmOpen` | Starts a VM for the window `D1.L` (`WindowPtr`), with a drive 0 image of `D2.L` bytes that VMX68K.SX serves (0 for none) and `D3.L` of the master's drives from A: for bypass mode; returns its ID (1 or more) in `D0.L`. See [VMX68K.md](VMX68K.md) Section 3.5. |
+  | 4 | `VmOpen` | Starts a VM for the window `D1.L` (`WindowPtr`), with a drive 0 image of `D2.L` bytes that VMX68K.SX serves (0 for none) and `D3.L` of the primary's drives from A: for bypass mode; returns its ID (1 or more) in `D0.L`. See [VMX68K.md](VMX68K.md) Section 3.5. |
   | 5 | `VmPoll` | Called by VMX68K.SX for VM `D1.L` when the host wakes it with `E_USER1`, with its buffer at `D2.L` of `D3.L` bytes. Returns the kind of the next request in `D0.L`, its numbers in `D1.L`..`D3.L`, and its bytes in the buffer; 0 for nothing to do, or -1 for an unknown VM. One request is handed out at a time. Kinds (`BridgeOp`): 1 read `D2.L` bytes at offset `D1.L` of drive 0's image into the buffer, 2 write `D2.L` bytes from the buffer there, 3 `_OPEN` the path in the buffer with mode `D1.L`, 4 read `D2.L` bytes at offset `D1.L` of handle `D3.L`, 5 `_CLOSE` handle `D3.L`, 6 `_FILES` for the path at +64 of the buffer with attribute `D1.L` into its first 53 bytes, 7 `_NFILES` with the 53-byte buffer the host put back, 8 `_DSKFRE` of drive `D1.L` (1 = A:) into the buffer, 9 `_MKDIR`, 10 `_RMDIR`, 11 `_DELETE` of the path in the buffer, 12 `_RENAME` of it to the path at +256, 13 `_CHMOD` of it to attribute `D1.L` (-1 reads), 14 `_CREATE` (`D2.L` 1) or `_NEWFILE` (0) of it with attribute `D1.L`, 15 write `D2.L` bytes from the buffer at offset `D1.L` of handle `D3.L` (0 bytes cut the file there), 16 `_FILEDATE` of handle `D3.L` to `D1.L`. |
   | 6 | `VmClose` | Stops VM `D1.L`. Returns 0, or -1 for an unknown VM. |
   | 7 | `VmReply` | Answers the request `VmPoll` handed out for VM `D1.L` with the DOS result `D2.L` (0 or -1 for drive 0's image). Bytes read are in the buffer. Returns 0, or -1 when no request was handed out. |
@@ -115,7 +115,7 @@ one opcode only, and the address it runs at decides which hypercall it is.
 
 - SX-Window APIs are replaced natively through `TrapHandler::on_a_line` without patching guest memory. Drawing that `SYS/FSX.X` reaches through direct calls rather than A-Line APIs uses pattern 3 of Section 2.3. See [NATIVE_DRAWING.md](NATIVE_DRAWING.md) and [NATIVE_FONTS.md](NATIVE_FONTS.md).
 
-- Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions in the master SX-Window VM, and the extended screen uses the first 16 MB block. Partial and full VMs mirror the range to the 24-bit space as on the 68000 (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5).
+- Addresses `$F000_0000`..`$FEFF_FFFF` are reserved for msx68k extensions in the primary SX-Window VM, and the extended screen uses the first 16 MB block. Partial and full VMs mirror the range to the 24-bit space as on the 68000 (see [NATIVE_DRAWING.md](NATIVE_DRAWING.md) Section 2.5).
 
 ### 2.2 Layer 2: Relocation-Aware Declarative Module Patcher
 - In SX-Window v3.1, the entire SX-Window kernel (Drawing Manager, Window Manager, Event Manager, Resource Manager, and the Mouse Subsystem) is packaged inside **`SYS/FSX.X`** (`367,436` bytes), loaded via `CONFIG.SYS` as the character device `"SXTools"` (`SXWIN.X` is a small `26,118`-byte launcher).
@@ -195,5 +195,5 @@ Disassembly of `IPLROM.DAT` (`$FF0000`) and `HUMAN.SYS` v3.02 (`$00AC9C`) reveal
 
 ## 5. SX-Window v3.1 API Catalog & Hook Status Reference
 
-For the complete disassemblies, 16 KB A-Line dispatch table analysis, 21 manager subsystems (1,050 active APIs), TVRAM `$00E00000` / CRTC `$E80000` decoupling blueprint, and the living Master Hook & Patch Tracking Table, see:
-- [SX-Window v3.1 Kernel Architecture, A-Line ($Axxx) API Catalog, and Master Hook Tracking Reference](SX_WINDOW_API_AND_HOOK_STATUS.md)
+For the complete disassemblies, 16 KB A-Line dispatch table analysis, 21 manager subsystems (1,050 active APIs), TVRAM `$00E00000` / CRTC `$E80000` decoupling blueprint, and the living Primary Hook & Patch Tracking Table, see:
+- [SX-Window v3.1 Kernel Architecture, A-Line ($Axxx) API Catalog, and Primary Hook Tracking Reference](SX_WINDOW_API_AND_HOOK_STATUS.md)

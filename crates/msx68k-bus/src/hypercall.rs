@@ -130,7 +130,7 @@ impl X68kBus {
         self.hypercall_sites.retain(|&addr, _| addr >= 0x00F0_0000);
     }
 
-    /// Places the application entry at [`APP_ENTRY_BASE`], as the master SX-Window VM has it.
+    /// Places the application entry at [`APP_ENTRY_BASE`], as the primary SX-Window VM has it.
     pub fn install_app_entry(&mut self) {
         let base = (APP_ENTRY_BASE - 0x00F0_0000) as usize;
         let mut entry = [0u8; 16];

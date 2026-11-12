@@ -122,7 +122,7 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: Vbla
         let due = start + FRAME * frames;
         if vm.is_running_burst() {
             // Burst has no guest clock to follow: flat out for a frame of host time, as the
-            // master VM bursts, leaving time to present the frame when paced.
+            // primary VM bursts, leaving time to present the frame when paced.
             let deadline = match pace {
                 Pace::RealTime => due.checked_sub(BURST_RESERVE).unwrap_or(due),
                 Pace::Unthrottled => Instant::now() + FRAME,

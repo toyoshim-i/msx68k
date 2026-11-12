@@ -322,7 +322,7 @@ pub struct FloppyDrive {
     pub write_protected: bool,
     /// Raw disk image data (`None` if no floppy is inserted).
     pub image: Option<Vec<u8>>,
-    /// An image kept by the master VM instead (`docs/VMX68K.md` Section 3.1).
+    /// An image kept by the primary VM instead (`docs/VMX68K.md` Section 3.1).
     pub remote: Option<RemoteDisk>,
     /// Geometry of the mounted disk image.
     pub geometry: FloppyGeometry,
@@ -452,7 +452,7 @@ impl Fdc {
         true
     }
 
-    /// Inserts a disk image the master VM keeps into drive `unit`, which reads and writes it
+    /// Inserts a disk image the primary VM keeps into drive `unit`, which reads and writes it
     /// through requests. Its size must be one of a raw floppy image.
     pub fn insert_remote_disk(&mut self, unit: usize, disk: RemoteDisk, write_protected: bool) -> bool {
         let Some(geometry) = FloppyGeometry::from_image_len(disk.len()) else {

@@ -1,12 +1,12 @@
-//! A VM's remote drives in drive bypass mode (`docs/VMX68K.md` Section 2): the master VM's
+//! A VM's remote drives in drive bypass mode (`docs/VMX68K.md` Section 2): the primary VM's
 //! drives under the same letters, bridged at the file level, and booted from.
 //!
 //! The VM boots through a ROM msx68k provides at `$FC0000`, laid out like the internal SCSI ROM
 //! that Human68k already knows how to boot from: the IPL boot routine loads `HUMAN.SYS` from
-//! the master's `A:` through the [`VmBridge`], and the driver install routine builds a remote
+//! the primary's `A:` through the [`VmBridge`], and the driver install routine builds a remote
 //! device (type `$2000`). Human68k then hands the device file-level commands (`_NAMESTS` names,
-//! FCBs), which become the master's DOS calls, carried out by VMX68K.SX. Until the VM's shell
-//! starts, its `\CONFIG.SYS` is the master's `\VMX68K\CONFIG.SYS`, so that it does not start
+//! FCBs), which become the primary's DOS calls, carried out by VMX68K.SX. Until the VM's shell
+//! starts, its `\CONFIG.SYS` is the primary's `\VMX68K\CONFIG.SYS`, so that it does not start
 //! SX-Window again.
 
 use std::collections::HashMap;
@@ -42,15 +42,15 @@ const DOS_SEEK_ERROR: u32 = -25i32 as u32;
 // Device errors in the request header: abort, and the command or unit is unknown.
 const DEV_ABORT_UNKNOWN_COMMAND: u16 = 0x1003;
 
-/// The VM's `CONFIG.SYS` when the master has no `\VMX68K\CONFIG.SYS`: Human68k's own settings,
+/// The VM's `CONFIG.SYS` when the primary has no `\VMX68K\CONFIG.SYS`: Human68k's own settings,
 /// with no SX-Window and `COMMAND.X` as the shell.
 const DEFAULT_CONFIG: &[u8] = b"FILES     = 64\r\nBUFFERS   = 20 1024\r\nLASTDRIVE = Z:\r\n";
 
 /// What an FCB of the VM stands for.
 #[derive(Debug)]
 enum OpenFile {
-    /// A file the master has open, by its handle.
-    Master(u32),
+    /// A file the primary has open, by its handle.
+    Primary(u32),
     /// A file the host serves from memory.
     Memory(Vec<u8>),
 }
@@ -59,13 +59,13 @@ enum OpenFile {
 #[derive(Debug)]
 pub struct RemoteFs {
     bridge: VmBridge,
-    /// The master's drive number (1 is A:) of each unit.
+    /// The primary's drive number (1 is A:) of each unit.
     drives: Vec<u32>,
     /// Device header built by the install routine, and the request the strategy routine got.
     header: u32,
     request: u32,
     files: HashMap<u32, OpenFile>,
-    /// The master's search buffer behind each `_FILES` buffer of the VM.
+    /// The primary's search buffer behind each `_FILES` buffer of the VM.
     searches: HashMap<u32, Vec<u8>>,
     /// Whether `\CONFIG.SYS` is still the VM's own, and the shell whose start ends that.
     own_config: bool,
@@ -73,7 +73,7 @@ pub struct RemoteFs {
 }
 
 impl RemoteFs {
-    /// Remote drives for the master's drives `drives` (1 is A:), the first one booted from.
+    /// Remote drives for the primary's drives `drives` (1 is A:), the first one booted from.
     pub fn new(bridge: VmBridge, drives: Vec<u32>) -> Self {
         Self {
             bridge,
@@ -95,8 +95,8 @@ struct Namests {
 }
 
 impl Namests {
-    /// The master's path for it on drive `drive` (1 is A:).
-    fn master_path(&self, drive: u32) -> Vec<u8> {
+    /// The primary's path for it on drive `drive` (1 is A:).
+    fn primary_path(&self, drive: u32) -> Vec<u8> {
         let mut out = vec![b'@' + drive as u8, b':'];
         out.extend_from_slice(&self.path);
         out.extend_from_slice(&self.name);
@@ -140,7 +140,7 @@ impl X68kBus {
 
     /// `RemoteBoot`: loads `HUMAN.SYS` from the boot drive and runs it.
     pub(crate) fn hypercall_remote_boot(&mut self, state: &mut CpuState) -> TrapResult {
-        if let Some(human) = self.read_master_file(b"\\HUMAN.SYS") {
+        if let Some(human) = self.read_primary_file(b"\\HUMAN.SYS") {
             // An X executable based at $6800, so it runs where it lies without relocation.
             let word = |at: usize| u32::from_be_bytes(human[at..at + 4].try_into().unwrap());
             if human.len() >= 0x40 && &human[0..2] == b"HU" && word(4) == HUMAN_BASE {
@@ -159,7 +159,7 @@ impl X68kBus {
     }
 
     /// Reads a whole file of the boot drive through the bridge.
-    fn read_master_file(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+    fn read_primary_file(&mut self, path: &[u8]) -> Option<Vec<u8>> {
         let fs = self.remote_fs.as_ref()?;
         let mut full = vec![b'@' + *fs.drives.first()? as u8, b':'];
         full.extend_from_slice(path);
@@ -253,7 +253,7 @@ impl X68kBus {
         self.poke_u8(request + 22, 1);
     }
 
-    /// Carries out a command for the master's drive `drive`; returns the device error and the
+    /// Carries out a command for the primary's drive `drive`; returns the device error and the
     /// result.
     fn remote_command(&mut self, request: u32, command: u8, drive: u32) -> (u16, u32) {
         let long = |bus: &Self, at: u32| bus.peek_u32(request + at).unwrap_or(0);
@@ -263,11 +263,11 @@ impl X68kBus {
             // CHDIR: the directory must exist; Human68k keeps the current directory.
             0x41 => {
                 let name = self.namests(param14);
-                let mut path = name.master_path(drive);
+                let mut path = name.primary_path(drive);
                 if path.ends_with(b"\\") && path.len() > 3 {
                     path.pop();
                 }
-                if path.len() <= 3 || self.master_files(path, 0x10).is_some_and(|(r, _)| r == 0) {
+                if path.len() <= 3 || self.primary_files(path, 0x10).is_some_and(|(r, _)| r == 0) {
                     0
                 } else {
                     DOS_DIRECTORY_NOT_FOUND
@@ -278,7 +278,7 @@ impl X68kBus {
             0x42 => self.remote_path_op(param14, drive, |path| BridgeOp::Mkdir { path }),
             0x43 => self.remote_path_op(param14, drive, |path| BridgeOp::Rmdir { path }),
             0x44 => {
-                let to = self.namests(param18).master_path(drive);
+                let to = self.namests(param18).primary_path(drive);
                 self.remote_path_op(param14, drive, |from| BridgeOp::Rename { from, to })
             }
             0x45 => self.remote_path_op(param14, drive, |path| BridgeOp::Delete { path }),
@@ -290,7 +290,7 @@ impl X68kBus {
             0x49 => self.remote_create(param14, fcb, mode as u32, param18 != 0, drive),
             0x4A => self.remote_open(param14, fcb, drive),
             0x4B => {
-                if let Some(OpenFile::Master(handle)) =
+                if let Some(OpenFile::Primary(handle)) =
                     self.remote_fs.as_mut().and_then(|fs| fs.files.remove(&fcb))
                 {
                     self.ask(BridgeOp::Close { handle });
@@ -315,14 +315,14 @@ impl X68kBus {
                     DOS_SEEK_ERROR
                 }
             }
-            // FILEDATE: reads the date and time the FCB holds, or sets them on the master's file.
+            // FILEDATE: reads the date and time the FCB holds, or sets them on the primary's file.
             0x4F => {
                 if param18 == 0 {
                     (self.peek_u16(fcb + 60).unwrap_or(0) as u32) << 16
                         | self.peek_u16(fcb + 58).unwrap_or(0) as u32
                 } else {
                     match self.remote_fs.as_ref().and_then(|fs| fs.files.get(&fcb)) {
-                        Some(OpenFile::Master(handle)) => {
+                        Some(OpenFile::Primary(handle)) => {
                             let op = BridgeOp::Filedate {
                                 handle: *handle,
                                 datetime: param18,
@@ -363,7 +363,7 @@ impl X68kBus {
                 0
             }
             // FFLUSH and MEDIACHECK: nothing is cached, and the medium does not change. LOCK:
-            // only this VM reaches the files through the master.
+            // only this VM reaches the files through the primary.
             0x56..=0x58 => 0,
             _ => return (DEV_ABORT_UNKNOWN_COMMAND, u32::MAX),
         };
@@ -375,8 +375,8 @@ impl X68kBus {
         self.remote_fs.as_ref()?.bridge.ask(op)
     }
 
-    /// The master's `_FILES` for `path` with `attr`: its result and 53-byte buffer.
-    fn master_files(&self, path: Vec<u8>, attr: u32) -> Option<(u32, Vec<u8>)> {
+    /// The primary's `_FILES` for `path` with `attr`: its result and 53-byte buffer.
+    fn primary_files(&self, path: Vec<u8>, attr: u32) -> Option<(u32, Vec<u8>)> {
         let reply = self.ask(BridgeOp::Files { attr, path })?;
         Some((reply.result, reply.data))
     }
@@ -408,10 +408,10 @@ impl X68kBus {
         Namests { path, name }
     }
 
-    /// `$47` FILES: searches the master and fills the VM's 53-byte buffer at `buffer`.
+    /// `$47` FILES: searches the primary and fills the VM's 53-byte buffer at `buffer`.
     fn remote_files(&mut self, namests: u32, buffer: u32, attr: u32, drive: u32) -> u32 {
-        let path = self.namests(namests).master_path(drive);
-        let Some((result, data)) = self.master_files(path, attr) else {
+        let path = self.namests(namests).primary_path(drive);
+        let Some((result, data)) = self.primary_files(path, attr) else {
             return DOS_INVALID_ACCESS;
         };
         if result == 0 {
@@ -423,7 +423,7 @@ impl X68kBus {
         result
     }
 
-    /// `$48` NFILES: goes on with the master's search behind the VM's buffer.
+    /// `$48` NFILES: goes on with the primary's search behind the VM's buffer.
     fn remote_nfiles(&mut self, buffer: u32) -> u32 {
         let Some(previous) = self.remote_fs.as_ref().and_then(|fs| fs.searches.get(&buffer).cloned()) else {
             return DOS_FILE_NOT_FOUND;
@@ -447,23 +447,23 @@ impl X68kBus {
         }
     }
 
-    /// Carries out a DOS call that takes one of the VM's names, made into the master's path.
+    /// Carries out a DOS call that takes one of the VM's names, made into the primary's path.
     fn remote_path_op(&mut self, namests: u32, drive: u32, op: impl FnOnce(Vec<u8>) -> BridgeOp) -> u32 {
-        let path = self.namests(namests).master_path(drive);
+        let path = self.namests(namests).primary_path(drive);
         self.ask(op(path)).map_or(DOS_INVALID_ACCESS, |reply| reply.result)
     }
 
-    /// `$49` CREATE: makes the master's file, replacing one there unless `replace` is false
+    /// `$49` CREATE: makes the primary's file, replacing one there unless `replace` is false
     /// (`_NEWFILE`), and fills the FCB.
     fn remote_create(&mut self, namests: u32, fcb: u32, attr: u32, replace: bool, drive: u32) -> u32 {
         let name = self.namests(namests);
-        let path = name.master_path(drive);
+        let path = name.primary_path(drive);
         let handle = match self.ask(BridgeOp::Create { path: path.clone(), attr, replace }) {
             Some(reply) if (reply.result as i32) >= 0 => reply.result,
             Some(reply) => return reply.result,
             None => return DOS_INVALID_ACCESS,
         };
-        let (time, date) = match self.master_files(path, 0x27) {
+        let (time, date) = match self.primary_files(path, 0x27) {
             Some((0, data)) => (
                 u16::from_be_bytes([data[22], data[23]]),
                 u16::from_be_bytes([data[24], data[25]]),
@@ -472,12 +472,12 @@ impl X68kBus {
         };
         self.fill_fcb(fcb, &name, attr as u8, time, date, 0);
         if let Some(fs) = self.remote_fs.as_mut() {
-            fs.files.insert(fcb, OpenFile::Master(handle));
+            fs.files.insert(fcb, OpenFile::Primary(handle));
         }
         0
     }
 
-    /// `$4A` OPEN: opens the master's file and fills the FCB from its directory entry.
+    /// `$4A` OPEN: opens the primary's file and fills the FCB from its directory entry.
     fn remote_open(&mut self, namests: u32, fcb: u32, drive: u32) -> u32 {
         let mode = (self.peek_u8(fcb + 14).unwrap_or(0) & 0x0F) as u32;
         if mode > 2 {
@@ -492,7 +492,7 @@ impl X68kBus {
             && name.path == b"\\"
             && name.name.eq_ignore_ascii_case(b"CONFIG.SYS");
         if own_config && !is_config && name.name.eq_ignore_ascii_case(&shell) {
-            // The shell starts: from now on the VM sees the master's own CONFIG.SYS.
+            // The shell starts: from now on the VM sees the primary's own CONFIG.SYS.
             if let Some(fs) = self.remote_fs.as_mut() {
                 fs.own_config = false;
             }
@@ -502,10 +502,10 @@ impl X68kBus {
             own.extend_from_slice(b"\\VMX68K\\CONFIG.SYS");
             own
         } else {
-            name.master_path(drive)
+            name.primary_path(drive)
         };
 
-        let entry = self.master_files(path.clone(), 0x27).filter(|(r, _)| *r == 0);
+        let entry = self.primary_files(path.clone(), 0x27).filter(|(r, _)| *r == 0);
         let (file, attr, time, date, size) = match entry {
             Some((_, data)) => {
                 let handle = match self.ask(BridgeOp::Open { path, mode }) {
@@ -515,9 +515,9 @@ impl X68kBus {
                 };
                 let word = |at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
                 let size = u32::from_be_bytes(data[26..30].try_into().unwrap());
-                (OpenFile::Master(handle), data[21], word(22), word(24), size)
+                (OpenFile::Primary(handle), data[21], word(22), word(24), size)
             }
-            // The VM's own CONFIG.SYS, when the master has none for it, which only reads.
+            // The VM's own CONFIG.SYS, when the primary has none for it, which only reads.
             None if own_config && is_config && mode == 0 => {
                 (OpenFile::Memory(DEFAULT_CONFIG.to_vec()), 0x20, 0, 0, DEFAULT_CONFIG.len() as u32)
             }
@@ -526,9 +526,9 @@ impl X68kBus {
         if own_config && is_config {
             let contents = match &file {
                 OpenFile::Memory(data) => Some(data.clone()),
-                OpenFile::Master(_) => None,
+                OpenFile::Primary(_) => None,
             };
-            let shell = contents.or_else(|| self.read_master_file(b"\\VMX68K\\CONFIG.SYS")).and_then(|c| shell_of(&c));
+            let shell = contents.or_else(|| self.read_primary_file(b"\\VMX68K\\CONFIG.SYS")).and_then(|c| shell_of(&c));
             if let (Some(fs), Some(shell)) = (self.remote_fs.as_mut(), shell) {
                 fs.shell = shell;
             }
@@ -575,7 +575,7 @@ impl X68kBus {
     /// cuts the file there.
     fn remote_write(&mut self, fcb: u32, buffer: u32, len: u32) -> u32 {
         let handle = match self.remote_fs.as_ref().and_then(|fs| fs.files.get(&fcb)) {
-            Some(OpenFile::Master(handle)) => *handle,
+            Some(OpenFile::Primary(handle)) => *handle,
             Some(OpenFile::Memory(_)) => return DOS_CANNOT_WRITE,
             None => return DOS_INVALID_ACCESS,
         };
@@ -617,7 +617,7 @@ impl X68kBus {
             let want = (len - done).min(CHUNK);
             let data = match self.remote_fs.as_ref().and_then(|fs| fs.files.get(&fcb)) {
                 Some(OpenFile::Memory(data)) => data[at as usize..(at + want) as usize].to_vec(),
-                Some(OpenFile::Master(handle)) => {
+                Some(OpenFile::Primary(handle)) => {
                     let op = BridgeOp::HandleRead {
                         handle: *handle,
                         offset: at,

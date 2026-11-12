@@ -1,4 +1,4 @@
-//! The master VM's side of VMX68K (`docs/VMX68K.md` Section 3.5): VMX68K.SX opens and closes
+//! The primary VM's side of VMX68K (`docs/VMX68K.md` Section 3.5): VMX68K.SX opens and closes
 //! VMs through msx68k's application entry, and the host finds where each VM's window shows.
 //!
 //! The bus only keeps the record. The app starts and stops the VMs it reports, each on a
@@ -27,8 +27,8 @@ const WINDOW_VISIBLE_RGN: u32 = 16;
 const WINDOW_VISIBLE: u32 = 66;
 const BITMAP_RECT: u32 = 2;
 
-/// The channel through which a VM asks VMX68K.SX, in the master VM, to read or write the
-/// master's storage for it (`docs/VMX68K.md` Section 3.1). The asking thread waits for each
+/// The channel through which a VM asks VMX68K.SX, in the primary VM, to read or write the
+/// primary's storage for it (`docs/VMX68K.md` Section 3.1). The asking thread waits for each
 /// reply.
 #[derive(Debug, Clone)]
 pub struct VmBridge {
@@ -50,12 +50,12 @@ pub enum BridgeOp {
     Read { offset: u32, len: u32 },
     /// 2: writes the bytes to drive 0's image at `offset`.
     Write { offset: u32, data: Vec<u8> },
-    /// 3: opens the master's file `path` with `mode` (0 read, 1 write, 2 both); the result is
+    /// 3: opens the primary's file `path` with `mode` (0 read, 1 write, 2 both); the result is
     /// its handle.
     Open { path: Vec<u8>, mode: u32 },
-    /// 4: reads `len` bytes at `offset` of the master's file `handle`; the result is the count.
+    /// 4: reads `len` bytes at `offset` of the primary's file `handle`; the result is the count.
     HandleRead { handle: u32, offset: u32, len: u32 },
-    /// 5: closes the master's file `handle`.
+    /// 5: closes the primary's file `handle`.
     Close { handle: u32 },
     /// 6: `_FILES` for `path` with `attr`; the data is the 53-byte buffer.
     Files { attr: u32, path: Vec<u8> },
@@ -76,10 +76,10 @@ pub enum BridgeOp {
     /// 14: `_CREATE` (replacing a file there) or `_NEWFILE` of `path` with `attr`; the result is
     /// its handle.
     Create { path: Vec<u8>, attr: u32, replace: bool },
-    /// 15: writes the bytes at `offset` of the master's file `handle`; with none, cuts the file
+    /// 15: writes the bytes at `offset` of the primary's file `handle`; with none, cuts the file
     /// there. The result is the count.
     HandleWrite { handle: u32, offset: u32, data: Vec<u8> },
-    /// 16: `_FILEDATE` setting `date << 16 | time` of the master's file `handle`.
+    /// 16: `_FILEDATE` setting `date << 16 | time` of the primary's file `handle`.
     Filedate { handle: u32, datetime: u32 },
 }
 
@@ -137,7 +137,7 @@ impl VmBridge {
     }
 }
 
-/// A disk image that the master VM keeps, which a VM's floppy drive reads and writes through
+/// A disk image that the primary VM keeps, which a VM's floppy drive reads and writes through
 /// its [`VmBridge`].
 #[derive(Debug, Clone)]
 pub struct RemoteDisk {
@@ -159,7 +159,7 @@ impl RemoteDisk {
         self.len == 0
     }
 
-    /// Reads `len` bytes at `offset`, waiting for the master VM.
+    /// Reads `len` bytes at `offset`, waiting for the primary VM.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
         let op = BridgeOp::Read {
             offset: offset as u32,
@@ -171,7 +171,7 @@ impl RemoteDisk {
             .map(|reply| reply.data)
     }
 
-    /// Writes `data` at `offset`, waiting for the master VM.
+    /// Writes `data` at `offset`, waiting for the primary VM.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
         let op = BridgeOp::Write {
             offset: offset as u32,
@@ -186,7 +186,7 @@ impl RemoteDisk {
 pub enum VmEvent {
     /// A VM was asked for, to be shown in the window at `window`, with a disk image of
     /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, the
-    /// master's `drives`, from A:, that it can see in bypass mode, and from its setup the
+    /// primary's `drives`, from A:, that it can see in bypass mode, and from its setup the
     /// `speed` to start at and its own SRAM, if the setup has one yet.
     Opened {
         id: u32,
@@ -266,7 +266,7 @@ struct VmStatus {
     lamp: bool,
     /// Whether the VM's SRAM changed and is to be saved.
     sram: bool,
-    /// Whether the master's screen changed size, so that the window is to be drawn anew.
+    /// Whether the primary's screen changed size, so that the window is to be drawn anew.
     redraw: bool,
     /// Width and height, `(0, 0)` until the VM shows a frame.
     screen: (u16, u16),
@@ -300,7 +300,7 @@ struct VmDisk {
     woken: bool,
 }
 
-/// Where a VM's window shows on the master VM's screen.
+/// Where a VM's window shows on the primary VM's screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmWindowLayout {
     /// Screen position of the top-left of the VM's screen in the window's content.
@@ -363,7 +363,7 @@ impl X68kBus {
         }
     }
 
-    /// Has VMX68K.SX draw each of its windows anew, after the master's screen changed size:
+    /// Has VMX68K.SX draw each of its windows anew, after the primary's screen changed size:
     /// what was off the screen, which SX-Window did not draw, and its visible region, which
     /// the screen clipped, come back with them.
     pub(crate) fn redraw_vm_windows(&mut self) {
@@ -423,7 +423,7 @@ impl X68kBus {
     }
 
     /// `VmOpen`: records a VM for the window `D1.L`, with a drive 0 image of `D2.L` bytes that
-    /// VMX68K.SX serves, `D3.L` of the master's drives from A:, its screen `D4.W` lines below
+    /// VMX68K.SX serves, `D3.L` of the primary's drives from A:, its screen `D4.W` lines below
     /// the top of the window's content, the 16 KB of its SRAM at `D5.L` (0 for none yet), and
     /// the speed `D6.L` (as `VmSpeed`'s), and its CPU and RAM `D7.L` (`cpu << 16 | MB`, see
     /// [`setup_machine`]), and returns its ID in `D0.L`.

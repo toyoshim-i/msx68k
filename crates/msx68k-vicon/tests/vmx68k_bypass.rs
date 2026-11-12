@@ -1,6 +1,6 @@
-//! In drive bypass mode, a VM boots Human68k from the master VM's own drive A:, bridged at the
+//! In drive bypass mode, a VM boots Human68k from the primary VM's own drive A:, bridged at the
 //! file level, with its own CONFIG.SYS so that SX-Window does not start again, and what it
-//! writes lands on the master's drive (`docs/VMX68K.md` Section 2).
+//! writes lands on the primary's drive (`docs/VMX68K.md` Section 2).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,8 +38,8 @@ fn scancodes(text: &str) -> Vec<(u8, bool)> {
         .collect()
 }
 
-/// Types `text` on the VM's keyboard while the master runs, serving the VM's requests.
-fn type_text(thread: &VmThread, master: &mut X68kVm, text: &str) {
+/// Types `text` on the VM's keyboard while the primary runs, serving the VM's requests.
+fn type_text(thread: &VmThread, primary: &mut X68kVm, text: &str) {
     const SHIFT: u8 = 0x70;
     for (code, shift) in scancodes(text) {
         let mut bytes = Vec::new();
@@ -54,18 +54,18 @@ fn type_text(thread: &VmThread, master: &mut X68kVm, text: &str) {
             thread.post(move |vm| vm.bus.mfp.push_keyboard_byte(byte));
             let until = Instant::now() + Duration::from_millis(15);
             while Instant::now() < until {
-                master.run_steps(50_000);
+                primary.run_steps(50_000);
             }
         }
     }
 }
 
-/// Runs the master, serving the VM, until `done` holds of its HDD or a few seconds pass.
-fn wait_for_disk(master: &mut X68kVm, done: impl Fn(&HumanVolume) -> bool) -> bool {
+/// Runs the primary, serving the VM, until `done` holds of its HDD or a few seconds pass.
+fn wait_for_disk(primary: &mut X68kVm, done: impl Fn(&HumanVolume) -> bool) -> bool {
     let until = Instant::now() + Duration::from_secs(20);
     while Instant::now() < until {
-        master.run_steps(500_000);
-        let mut image = master.bus.scsi_hdd_data(0).unwrap().to_vec();
+        primary.run_steps(500_000);
+        let mut image = primary.bus.scsi_hdd_data(0).unwrap().to_vec();
         if done(&HumanVolume::open(&mut image).unwrap()) {
             return true;
         }
@@ -88,7 +88,7 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 }
 
 #[test]
-fn a_vm_boots_from_the_master_vms_drive_a() {
+fn a_vm_boots_from_the_primary_vms_drive_a() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -108,39 +108,39 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
 
-    let mut master = X68kVm::new(
-        VmConfig::master_sx()
+    let mut primary = X68kVm::new(
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );
-    master.bus.load_cgrom(&cgrom);
-    master.bus.load_ipl_rom(&ipl);
-    assert!(master.bus.insert_scsi_hdd(
+    primary.bus.load_cgrom(&cgrom);
+    primary.bus.load_ipl_rom(&ipl);
+    assert!(primary.bus.insert_scsi_hdd(
         0,
         build_bootable_sxwin_scsi_hdd(&human, &sx_refs, 32)
     ));
-    master.bus.set_boot_from_scsi(true);
-    master.reset().unwrap();
-    master.run_steps(30_000_000);
-    // B:, the master's first floppy drive, holds a disk for the VM to read, put in after the
-    // master booted from its HDD rather than from it.
-    assert!(master.bus.insert_floppy(0, human.clone(), true));
+    primary.bus.set_boot_from_scsi(true);
+    primary.reset().unwrap();
+    primary.run_steps(30_000_000);
+    // B:, the primary's first floppy drive, holds a disk for the VM to read, put in after the
+    // primary booted from its HDD rather than from it.
+    assert!(primary.bus.insert_floppy(0, human.clone(), true));
 
     // \X68 lists VMX68K.X after VMX68K.LB, as the first icon of the third row.
-    click(&mut master, (22, 340), 2, 3_000_000);
-    click(&mut master, (104, 255), 2, 8_000_000);
-    let events = master.bus.take_vm_events();
+    click(&mut primary, (22, 340), 2, 3_000_000);
+    click(&mut primary, (104, 255), 2, 8_000_000);
+    let events = primary.bus.take_vm_events();
     let [VmEvent::Opened { id, window, drives, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
-    assert_eq!(drives, 3, "the master has A: and the floppy drives B: and C:");
+    assert_eq!(drives, 3, "the primary has A: and the floppy drives B: and C:");
     // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
-    click(&mut master, (22, 340), 2, 3_000_000);
-    assert_ne!(master.bus.active_window(), Some(window));
+    click(&mut primary, (22, 340), 2, 3_000_000);
+    assert_ne!(primary.bus.active_window(), Some(window));
 
-    // The VM's A: is the master's A:, which it boots from.
+    // The VM's A: is the primary's A:, which it boots from.
     let (bridge, requests) = vm_bridge();
-    master.bus.attach_vm_bridge(id, requests);
+    primary.bus.attach_vm_bridge(id, requests);
     let mut vm = X68kVm::new(
         VmConfig::app_vm()
             .with_speed_mode(CpuSpeedMode::Mhz10)
@@ -151,7 +151,7 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     vm.bus.install_remote_boot(RemoteFs::new(bridge, (1..=drives).collect()));
     vm.reset().unwrap();
 
-    // The VM's thread waits while the master serves it, so the prompt is looked for there.
+    // The VM's thread waits while the primary serves it, so the prompt is looked for there.
     let prompt = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&prompt);
     let thread_screen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -170,62 +170,62 @@ fn a_vm_boots_from_the_master_vms_drive_a() {
     while !prompt.load(Ordering::Relaxed) {
         if started.elapsed() > Duration::from_secs(60) {
             // Nothing may wait on the disk while the thread is dropped.
-            master.bus.detach_vm_bridge(id);
+            primary.bus.detach_vm_bridge(id);
             let lines = thread_screen.lock().unwrap().clone();
             panic!("the VM must reach COMMAND.X's prompt: {lines:#?}");
         }
-        master.run_steps(200_000);
+        primary.run_steps(200_000);
     }
     // Its remote drives' requests count for the access lamp.
     assert!(accesses.load(Ordering::Relaxed) > 0, "the remote drive's requests must count");
-    // The VM's own floppy drives get no letters after the master's: D: is no drive.
-    type_text(&thread, &mut master, "d:\n");
+    // The VM's own floppy drives get no letters after the primary's: D: is no drive.
+    type_text(&thread, &mut primary, "d:\n");
     let until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < until {
-        master.run_steps(200_000);
+        primary.run_steps(200_000);
     }
     let lines = thread_screen.lock().unwrap().clone();
     let prompts: Vec<_> = lines.iter().filter(|l| l.ends_with('>')).collect();
     assert_eq!(prompts.last().map(|l| l.as_str()), Some("A>"), "D: must not exist: {lines:#?}");
 
-    // What the VM writes goes to the master's drive, through the master's Human68k, which keeps
+    // What the VM writes goes to the primary's drive, through the primary's Human68k, which keeps
     // names as typed.
     let dir = [short_name("vmtest", "")];
-    type_text(&thread, &mut master, "md vmtest\n");
+    type_text(&thread, &mut primary, "md vmtest\n");
     assert!(
-        wait_for_disk(&mut master, |v| v.read_file(&[], &short_name("vmtest", "")).is_some()),
-        "MD must make VMTEST on the master's drive: {:#?}",
+        wait_for_disk(&mut primary, |v| v.read_file(&[], &short_name("vmtest", "")).is_some()),
+        "MD must make VMTEST on the primary's drive: {:#?}",
         thread_screen.lock().unwrap()
     );
-    type_text(&thread, &mut master, "echo hello>vmtest\\hi.txt\n");
+    type_text(&thread, &mut primary, "echo hello>vmtest\\hi.txt\n");
     assert!(
-        wait_for_disk(&mut master, |v| v.read_file(&dir, &short_name("hi", "txt")).as_deref() == Some(&b"hello\r\n"[..])),
-        "ECHO must create VMTEST\\HI.TXT on the master's drive"
+        wait_for_disk(&mut primary, |v| v.read_file(&dir, &short_name("hi", "txt")).as_deref() == Some(&b"hello\r\n"[..])),
+        "ECHO must create VMTEST\\HI.TXT on the primary's drive"
     );
-    type_text(&thread, &mut master, "ren vmtest\\hi.txt bye.txt\n");
+    type_text(&thread, &mut primary, "ren vmtest\\hi.txt bye.txt\n");
     assert!(
-        wait_for_disk(&mut master, |v| v.read_file(&dir, &short_name("bye", "txt")).is_some()
+        wait_for_disk(&mut primary, |v| v.read_file(&dir, &short_name("bye", "txt")).is_some()
             && v.read_file(&dir, &short_name("hi", "txt")).is_none()),
-        "REN must rename it on the master's drive"
+        "REN must rename it on the primary's drive"
     );
 
-    // B: is the master's B:: a listing of its floppy, by its volume name and files (HUMAN.SYS
+    // B: is the primary's B:: a listing of its floppy, by its volume name and files (HUMAN.SYS
     // is a system file DIR leaves out), written to A:.
-    type_text(&thread, &mut master, "dir b: >dirb.txt\n");
+    type_text(&thread, &mut primary, "dir b: >dirb.txt\n");
     assert!(
-        wait_for_disk(&mut master, |v| v
+        wait_for_disk(&mut primary, |v| v
             .read_file(&[], &short_name("dirb", "txt"))
             .is_some_and(|listing| listing.windows(15).any(|w| w == b"Human68k_Ver3  ")
                 && listing.windows(7).any(|w| w == b"COMMAND"))),
-        "DIR B: must list the master's floppy: {:?}",
+        "DIR B: must list the primary's floppy: {:?}",
         {
-            let mut image = master.bus.scsi_hdd_data(0).unwrap().to_vec();
+            let mut image = primary.bus.scsi_hdd_data(0).unwrap().to_vec();
             let file = HumanVolume::open(&mut image).unwrap().read_file(&[], &short_name("dirb", "txt"));
             file.map(|f| String::from_utf8_lossy(&f).into_owned())
         }
     );
 
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
-    master.bus.detach_vm_bridge(id);
+    primary.bus.detach_vm_bridge(id);
     drop(thread);
 }

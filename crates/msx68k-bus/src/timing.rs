@@ -10,8 +10,8 @@ pub const PAGE_SHIFT_4K: u32 = 12;
 /// Role of a virtual machine instance within the hybrid environment.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum VmRole {
-    /// Master SX-Window environment (defaults to [`CpuSpeedMode::Burst`]).
-    MasterSx,
+    /// Primary SX-Window environment (defaults to [`CpuSpeedMode::Burst`]).
+    PrimarySx,
     /// Isolated application VM (defaults to [`CpuSpeedMode::Mhz10`], selectable per application).
     AppVm,
 }
@@ -21,7 +21,7 @@ impl VmRole {
     #[inline]
     pub const fn default_speed_mode(self) -> CpuSpeedMode {
         match self {
-            Self::MasterSx => CpuSpeedMode::Burst,
+            Self::PrimarySx => CpuSpeedMode::Burst,
             Self::AppVm => CpuSpeedMode::Mhz10,
         }
     }

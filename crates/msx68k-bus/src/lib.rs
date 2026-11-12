@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(bus.read_u16(EXT_TVRAM_BASE + 0x0400, true).unwrap(), 0x1234);
         assert_eq!(bus.read_u16(MSX68K_RESERVED_END - 0x0100_0000 + 0x0400, true).unwrap(), 0x1234);
 
-        // The master SX-Window VM reserves it, and guest access to it is detected.
+        // The primary SX-Window VM reserves it, and guest access to it is detected.
         bus.extensions_reserved = true;
         assert!(is_ext_screen_addr(EXT_TVRAM_BASE));
         assert!(is_ext_screen_addr(EXT_TVRAM_BASE + EXT_TVRAM_WINDOW - 1));
@@ -120,21 +120,21 @@ mod tests {
     }
 
     #[test]
-    fn test_only_the_master_sx_vm_reserves_the_extension_range() {
-        assert!(X68kVm::new_master_sx().bus.extensions_reserved);
+    fn test_only_the_primary_sx_vm_reserves_the_extension_range() {
+        assert!(X68kVm::new_primary_sx().bus.extensions_reserved);
         assert!(!X68kVm::new_app_vm().bus.extensions_reserved);
     }
 
     #[test]
     fn test_vm_role_defaults_and_app_speed_selection() {
-        // Master VM defaults to Burst (0 delay)
-        let master = X68kVm::new_master_sx();
-        assert_eq!(master.role(), VmRole::MasterSx);
-        assert_eq!(master.speed_mode(), CpuSpeedMode::Burst);
-        assert!(master.is_running_burst());
-        assert_eq!(master.timing_config().cpu_mhz, 0);
-        assert_eq!(master.timing_config().system_bus_mhz, 0);
-        assert!(!master.timing_config().wait_enabled);
+        // Primary VM defaults to Burst (0 delay)
+        let primary = X68kVm::new_primary_sx();
+        assert_eq!(primary.role(), VmRole::PrimarySx);
+        assert_eq!(primary.speed_mode(), CpuSpeedMode::Burst);
+        assert!(primary.is_running_burst());
+        assert_eq!(primary.timing_config().cpu_mhz, 0);
+        assert_eq!(primary.timing_config().system_bus_mhz, 0);
+        assert!(!primary.timing_config().wait_enabled);
 
         // App VM defaults to 10MHz (CPU 10MHz, System Bus 10MHz)
         let app_default = X68kVm::new_app_vm();

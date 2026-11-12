@@ -338,7 +338,7 @@ impl VmScreen {
     }
 }
 
-/// A rectangle of the master VM's screen in its pixels, right and bottom exclusive.
+/// A rectangle of the primary VM's screen in its pixels, right and bottom exclusive.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ScreenRect {
     pub left: i32,
@@ -347,23 +347,23 @@ pub struct ScreenRect {
     pub bottom: i32,
 }
 
-/// A VM's screen drawn into the master VM's screen where its window shows it, under the
-/// master's text plane: only where the text is clear.
+/// A VM's screen drawn into the primary VM's screen where its window shows it, under the
+/// primary's text plane: only where the text is clear.
 pub struct VmLayer<'a> {
     pub output: &'a VmScreenOutput,
-    /// Position of the frame's top-left pixel on the master VM's screen.
+    /// Position of the frame's top-left pixel on the primary VM's screen.
     pub left: i32,
     pub top: i32,
     /// Visible region of the window's content rectangle.
     pub visible: &'a [ScreenRect],
 }
 
-/// Where the master VM's screen lands on the render target.
+/// Where the primary VM's screen lands on the render target.
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct Placement {
     /// Viewport `x, y, width, height` on the target.
     pub viewport: [f32; 4],
-    /// Size of the master VM's screen.
+    /// Size of the primary VM's screen.
     pub screen: (u32, u32),
     /// Size of the render target.
     pub target: (u32, u32),
@@ -395,7 +395,7 @@ struct LayerUniforms {
     dest: [f32; 4],
     size: [u32; 2],
     origin: [i32; 2],
-    master: [u32; 2],
+    primary: [u32; 2],
     _pad: [u32; 2],
 }
 
@@ -488,13 +488,13 @@ impl LayerPipeline {
         Self { pipeline, layout }
     }
 
-    /// Binds each layer's latest completed frame, and the master's composited screen `master`
+    /// Binds each layer's latest completed frame, and the primary's composited screen `primary`
     /// whose clear text it shows through. Layers with no frame yet, or nothing visible, are
     /// left out.
     pub fn prepare(
         &self,
         device: &wgpu::Device,
-        master: &wgpu::Buffer,
+        primary: &wgpu::Buffer,
         layers: &[VmLayer<'_>],
         placement: &Placement,
     ) -> Vec<PreparedLayer> {
@@ -519,7 +519,7 @@ impl LayerPipeline {
                     dest: [x0 / tw * 2.0 - 1.0, 1.0 - y0 / th * 2.0, x1 / tw * 2.0 - 1.0, 1.0 - y1 / th * 2.0],
                     size: [frame.width, frame.height],
                     origin: [layer.left, layer.top],
-                    master: [placement.screen.0, placement.screen.1],
+                    primary: [placement.screen.0, placement.screen.1],
                     _pad: [0; 2],
                 };
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -541,7 +541,7 @@ impl LayerPipeline {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: master.as_entire_binding(),
+                            resource: primary.as_entire_binding(),
                         },
                     ],
                 });

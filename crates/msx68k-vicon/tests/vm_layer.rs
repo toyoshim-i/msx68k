@@ -1,6 +1,6 @@
 //! The final pass draws a VM's completed screen into its window's content rectangle on the
-//! master VM's screen, clipped to the window's visible region (`docs/VMX68K.md` Section 3.3),
-//! and under the master's text plane, so that what SX-Window draws there, such as menus, stays
+//! primary VM's screen, clipped to the window's visible region (`docs/VMX68K.md` Section 3.3),
+//! and under the primary's text plane, so that what SX-Window draws there, such as menus, stays
 //! in front.
 
 use msx68k_bus::{Bus, X68kVm};
@@ -31,17 +31,17 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
         return;
     };
 
-    // The master VM's screen is its red backdrop, with green text dots, as a menu would be,
+    // The primary VM's screen is its red backdrop, with green text dots, as a menu would be,
     // over part of the VM's window.
-    let master = X68kVm::new_app_vm();
-    let mut master_bus = master.bus;
-    master_bus.write_u16(0x00E8_2200, 0x07C0, true).unwrap();
-    master_bus.write_u16(0x00E8_2202, 0xF800, true).unwrap();
-    master_bus.write_u16(0x00E8_2600, 0x0020, true).unwrap();
+    let primary = X68kVm::new_app_vm();
+    let mut primary_bus = primary.bus;
+    primary_bus.write_u16(0x00E8_2200, 0x07C0, true).unwrap();
+    primary_bus.write_u16(0x00E8_2202, 0xF800, true).unwrap();
+    primary_bus.write_u16(0x00E8_2600, 0x0020, true).unwrap();
     let text_dot = |x: i32, y: i32| (120..200).contains(&x) && (60..90).contains(&y) && x % 2 == 0;
     for y in 60..90u32 {
         for byte in 15..25u32 {
-            master_bus.write_u8(0x00E0_0000 + y * 128 + byte, 0b1010_1010, true).unwrap();
+            primary_bus.write_u8(0x00E0_0000 + y * 128 + byte, 0b1010_1010, true).unwrap();
         }
     }
 
@@ -69,10 +69,10 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
             && x - left < vm_frame.width as i32
             && y - top < vm_frame.height as i32
     };
-    let master_frame = render_bus_frame_cpu(&master_bus);
-    let red = pixel(&master_frame, 0, 0);
+    let primary_frame = render_bus_frame_cpu(&primary_bus);
+    let red = pixel(&primary_frame, 0, 0);
     assert_eq!(red[1..3], [0, 0]);
-    let green = pixel(&master_frame, 120, 60);
+    let green = pixel(&primary_frame, 120, 60);
     assert_ne!(green, red);
 
     for scale in [1u32, 2] {
@@ -93,7 +93,7 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
         });
         let view = target.create_view(&Default::default());
         gpu.render_bus_to_surface_view(
-            &master_bus,
+            &primary_bus,
             &presenter,
             &view,
             width,

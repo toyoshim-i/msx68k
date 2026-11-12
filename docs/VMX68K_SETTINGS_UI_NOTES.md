@@ -89,7 +89,7 @@ official SX-Window programming manuals.
 - Windows draw in planes 0 and 1 over plane 3 set, so a color 0 fill gives white (8), not clear
   text. `GMAPage` (`$A149`, `G_ALLPAGE` = `$0F`) makes drawing reach all four planes, as the
   Workroom's `SUBWIN.C` does to clear a subwindow; VMX68K.X clears its screen area so, and the
-  host shows the VM's screen only where the master's text is clear.
+  host shows the VM's screen only where the primary's text is clear.
 - SX-Window's icons are pictures in a rectangular recess: in the Filer's, a raised plate (white
   top and left, black bottom and right) holds a recess (black top and left, white bottom and
   right) over dark gray, and the picture is white with a black shadow to the bottom right.
@@ -133,7 +133,7 @@ official SX-Window programming manuals.
   exists, and "68000" with the speed submenu, `'MENU'` 1), and `VmSpeed` (8), which the app
   applies with `VmThread::post`. The speed is not saved yet: that comes with the settings
   library. `VMX68K.LB` is written by the HDD builder and `install_vmx68k`. A VM thread in Burst
-  now runs flat out until each frame is due, as the master does. Tested in
+  now runs flat out until each frame is due, as the primary does. Tested in
   `crates/msx68k-bus/tests/vmx68k.rs`.
 
 ---

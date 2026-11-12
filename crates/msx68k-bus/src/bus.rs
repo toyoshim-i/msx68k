@@ -60,7 +60,7 @@ pub const ROM_WINDOW_BYTES: usize = 1024 * 1024;
 ///
 /// Used by the multi-VM manager to decide when a console process inside `コマンド.SX`
 /// should be detached into an isolated X68000 VM window (video hardware touched) versus
-/// kept in the Master SX-Window VM (only DOS/text or sound I/O touched).
+/// kept in the Primary SX-Window VM (only DOS/text or sound I/O touched).
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub struct HardwareAccessFlags {
     pub gvram_accessed: bool,
@@ -174,7 +174,7 @@ pub struct X68kBus {
     pub native_gm_enabled: bool,
     /// Number of Graph Manager calls completed natively.
     pub native_gm_calls: u64,
-    /// Whether the reserved range serves msx68k extensions, as in the master SX-Window VM,
+    /// Whether the reserved range serves msx68k extensions, as in the primary SX-Window VM,
     /// whose `HUMAN.SYS` and `SYS/FSX.X` use no address bits above 24 as flags. Otherwise the
     /// range mirrors the 24-bit space like every other address above it, for compatibility.
     pub extensions_reserved: bool,

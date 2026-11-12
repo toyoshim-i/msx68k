@@ -15,7 +15,7 @@ This document describes the design and implementation of the `msx68k-cpu` and `m
 
 ## 2. Monomorphized Execution Policies (`CpuPolicy`)
 
-A central requirement of **msx68k** is that cycle-accurate bus contention and wait-state calculations for legacy games must impose **zero runtime overhead** on the Master SX-Window environment running in `Burst` mode.
+A central requirement of **msx68k** is that cycle-accurate bus contention and wait-state calculations for legacy games must impose **zero runtime overhead** on the Primary SX-Window environment running in `Burst` mode.
 
 ### 2.1 Compile-Time Specialization
 `CpuCore<P: CpuPolicy>` is parameterized over the `CpuPolicy` trait (`crates/msx68k-cpu/src/policy.rs`):
@@ -32,7 +32,7 @@ pub trait CpuPolicy: Copy + Clone + Default + Send + Sync + 'static {
   - Accumulates standard Motorola MC68000 base instruction cycles plus per-transfer bus wait states (`Bus::wait_cycles_16`) on every instruction fetch, extension word fetch, and effective address read/write.
   - 32-bit (`Long`) memory accesses are split into two 16-bit bus transfers (`addr` and `addr + 2`), accumulating wait states for both words.
 - **`BurstPolicy` (`TRACK_CYCLES = false`)**:
-  - Used for the Master SX-Window VM and temporary fast-load boosts (`burst_on_disk_io`).
+  - Used for the Primary SX-Window VM and temporary fast-load boosts (`burst_on_disk_io`).
   - Because `P::TRACK_CYCLES` is a compile-time constant, Rust's dead-code elimination removes all cycle additions and `wait_cycles_16` lookups from the generated machine code.
 - **`Tracked030Policy` (`TRACK_CYCLES = true`, `MC68030 = true`)**:
   - The 25 MHz X68030 (`CpuSpeedMode::Mhz25`). Instruction timing follows the MC68030 User's Manual rather than the MC68000 counts, which this policy ignores (Section 7.4).
@@ -56,7 +56,7 @@ On real X68000 hardware, instruction execution speed is determined not only by t
 | **`CpuSpeedMode::Mhz16`** | `16 MHz` | `16 MHz` | **X68000 XVI**. Main RAM and the system bus run at 16 MHz (`0` wait on Main RAM), while 10 MHz video/peripheral accesses incur asymmetric synchronization waits. |
 | **`CpuSpeedMode::Mhz24`** | `24 MHz` | `16 MHz` | **X68000 XVI RedZone**. A 24 MHz CPU coupled to a 16 MHz system bus (`+2` CPU wait cycles per 16-bit system bus transfer, plus scaled peripheral/VRAM wait cycles). |
 | **`CpuSpeedMode::Mhz25`** | `25 MHz` | `25 MHz` | **X68030**, with an MC68030 (`VmConfig::with_cpu_model`). Bus waits come from the X68030 table in Section 7.4 instead of Sections 3.2 to 3.4. |
-| **`CpuSpeedMode::Burst`** | Uncapped | Zero Delay | **Default for Master SX-Window VM (`VmRole::MasterSx`)**. Zero wait states (`wait_enabled = false`); selectable per application for tools and compilers. |
+| **`CpuSpeedMode::Burst`** | Uncapped | Zero Delay | **Default for Primary SX-Window VM (`VmRole::PrimarySx`)**. Zero wait states (`wait_enabled = false`); selectable per application for tools and compilers. |
 | **`CpuSpeedMode::Custom`** | Configurable | Configurable | Arbitrary `(cpu_mhz, system_bus_mhz, wait_enabled)` combinations. |
 
 ### 3.2 Physical Wait-State Formula
@@ -128,7 +128,7 @@ To allow isolated VMs and console processes to spawn in microseconds:
 - `X68kBus` allocates only `MainRam`, `Sram`, and `Rom` upfront; `Gvram` (512 KB), `Tvram` (512 KB), `SpriteBg` (64 KB), and `io_space` (128 KB) are initialized to `None` and allocated on first write.
 - Accesses to unmapped Main RAM (`main_ram.len()..$C00000`) or unpopulated Expansion I/O (`$EA0000`, `$EC0000`) raise hardware `BusFault::BusError` (Vector 2), allowing unmodified Human68k/IPLROM startup probes to detect installed RAM size and expansion boards accurately.
 - User mode raises `BusFault::BusError` for everything from `$C00000` up (GVRAM, TVRAM, all I/O, SRAM, and ROM) and for Main RAM below the area set boundary (`($E86001 + 1) * 8192`, `$2000` after reset).
-- `HardwareAccessFlags` tracks accessed subsystems so the hypervisor can automatically detach a console process into an isolated display VM when it touches `Gvram`, `Tvram`, `Crtc`, `PaletteVicon`, or `SpriteBg` (`requires_isolated_display_vm() == true`), while keeping resident sound drivers (`Opm`, `Adpcm`) inside the shared Master VM.
+- `HardwareAccessFlags` tracks accessed subsystems so the hypervisor can automatically detach a console process into an isolated display VM when it touches `Gvram`, `Tvram`, `Crtc`, `PaletteVicon`, or `SpriteBg` (`requires_isolated_display_vm() == true`), while keeping resident sound drivers (`Opm`, `Adpcm`) inside the shared Primary VM.
 
 ---
 

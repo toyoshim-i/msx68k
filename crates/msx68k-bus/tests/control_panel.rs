@@ -73,7 +73,7 @@ fn settings_item_sets_the_wheel_and_saves_it() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
     let mut vm = X68kVm::new(
-        VmConfig::master_sx()
+        VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
             .with_ram_mb(4),
     );

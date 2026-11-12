@@ -8,8 +8,8 @@ Rather than stopping at traditional cycle-accurate hardware emulation, **msx68k*
 
 ## 1. Core Architecture & Design Principles
 
-### 1.1 Dual Execution Model: Shared Master SX-Window + Isolated VMs
-- **Master SX-Window Environment**: Well-behaved SX-Window applications (`.SX`), command-line tools (`HAS.X`, `GCC`, `LHA.X`), and shared resident drivers (`MXDRV.X`, `ZMUSIC.X`) run cooperatively inside a single shared SX-Window environment at native host speeds (`burst` mode).
+### 1.1 Dual Execution Model: Shared Primary SX-Window + Isolated VMs
+- **Primary SX-Window Environment**: Well-behaved SX-Window applications (`.SX`), command-line tools (`HAS.X`, `GCC`, `LHA.X`), and shared resident drivers (`MXDRV.X`, `ZMUSIC.X`) run cooperatively inside a single shared SX-Window environment at native host speeds (`burst` mode).
 - **On-Demand Isolated VMs**: Applications that directly manipulate CRTC registers, GVRAM/TVRAM, or hardware sprites—or trigger a transition to full-screen Human68k mode (`_CRTMOD`)—are seamlessly spun out into dedicated, cycle-accurate X68000 virtual machine instances rendered as individual windows on the SX-Window desktop (or native host OS windows in Rootless mode).
 
 ### 1.2 Breaking the 1024×1024 TVRAM Barrier
@@ -27,11 +27,11 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 | `68000_10mhz` | 10 MHz | 10 MHz | **Original X68000 / ACE / PRO / SUPER (Default for App VMs)**. Full cycle accuracy with 10 MHz system bus, per-region device wait states (GVRAM, TVRAM, Palette, MFP, SCC, DMAC, OPM, ROM/SRAM), and VICON display contention. |
 | `68000_16mhz` | 16 MHz | 16 MHz | **X68000 XVI**. 0-wait 16 MHz Main RAM and 16 MHz system bus with asymmetric synchronization waits when accessing 10 MHz video/peripheral domains. |
 | `68000_24mhz` | 24 MHz | 16 MHz | **X68000 XVI RedZone**. 24 MHz CPU coupled to a 16 MHz system bus (+2 CPU wait states per 16-bit system bus transaction, plus scaled peripheral/VRAM wait states). |
-| `burst` | Uncapped | Zero Delay | **Master SX-Window VM Default**. Zero wait-state/cycle accounting overhead (`TRACK_CYCLES = false`). Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
+| `burst` | Uncapped | Zero Delay | **Primary SX-Window VM Default**. Zero wait-state/cycle accounting overhead (`TRACK_CYCLES = false`). Hardware timers (MFP, OPM, V-Blank/H-Blank) remain strictly locked to wall-clock time. |
 
-- **Per-Application Speed Selection**: The Master SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
+- **Per-Application Speed Selection**: The Primary SX-Window VM always runs in `burst` mode, while isolated application VMs default to `68000_10mhz` and can be configured per application (`10MHz`, `16MHz`, `24MHz`, `burst`, or custom CPU/system bus clock pairs). See [docs/CPU_AND_BUS.md](docs/CPU_AND_BUS.md) for the detailed CPU core and bus wait-state specification.
 
-- **Mixed Mode (`68k` ⇄ `ARM`)**: A-Line (`$Axxx`) APIs and one F-Line hypercall opcode (`$FBFF`, recognized by the address it runs at) trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 4-byte native stubs (`[$FBFF, $4E75]`), relocation-aware module patching (`SYS/FSX.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification, and [docs/SX_WINDOW_API_AND_HOOK_STATUS.md](docs/SX_WINDOW_API_AND_HOOK_STATUS.md) for the complete SX-Window v3.1 A-Line API catalog (1,050 calls) and Master Hook Tracking Reference.
+- **Mixed Mode (`68k` ⇄ `ARM`)**: A-Line (`$Axxx`) APIs and one F-Line hypercall opcode (`$FBFF`, recognized by the address it runs at) trap directly into the Rust/ARM native dispatcher without traversing 68k exception vectors, enabling 4-byte native stubs (`[$FBFF, $4E75]`), relocation-aware module patching (`SYS/FSX.X`), and FAT `.X` / `.SX` binaries. See [docs/HOOK_AND_SCSI_ARCHITECTURE.md](docs/HOOK_AND_SCSI_ARCHITECTURE.md) for the Mixed Mode hook architecture and Virtual SCSI (`IOCS $F5`) specification, and [docs/SX_WINDOW_API_AND_HOOK_STATUS.md](docs/SX_WINDOW_API_AND_HOOK_STATUS.md) for the complete SX-Window v3.1 A-Line API catalog (1,050 calls) and Primary Hook Tracking Reference.
 
 ### 1.4 Full `wgpu` VICON / CYNTHIA Shader Pipeline
 For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
@@ -40,12 +40,12 @@ For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing
 
 ### 1.5 Lazy I/O Instantiation & 3-Tier Straight Storage Bridge
 - **Zero-Device Fast VM Spawn**: VMs boot in microseconds via a custom IPL with all peripheral slots initialized to `None`. Chips (CRTC, OPM, ADPCM, MFP, SCC, DMAC, Sprite) and their cycle timers are instantiated only when their memory-mapped I/O ports (`$E80000`–`$EFFFFF`) are first accessed.
-- **3-Tier Straight Storage Bridge**: To prevent FAT/directory cache corruption across concurrent VMs without fragile cross-layer translation, disk operations from sub-VMs are forwarded at their exact abstraction level—(1) Human68k DOS calls (`$FFxx`), (2) Disk IOCS (`$40`–`$4F`), or (3) SCSI IOCS (`$F5` `_SCSIDRV`)—directly to the Master SX-Window VM's corresponding layer with zero-copy DMA buffer mapping.
+- **3-Tier Straight Storage Bridge**: To prevent FAT/directory cache corruption across concurrent VMs without fragile cross-layer translation, disk operations from sub-VMs are forwarded at their exact abstraction level—(1) Human68k DOS calls (`$FFxx`), (2) Disk IOCS (`$40`–`$4F`), or (3) SCSI IOCS (`$F5` `_SCSIDRV`)—directly to the Primary SX-Window VM's corresponding layer with zero-copy DMA buffer mapping.
 
 ### 1.6 Audio Sharing & Selective Native TSRs
-- **Master Audio Sharing**: Sound I/O accesses (`OPM`, `ADPCM`, `MIDI`) do not trigger VM isolation, allowing resident music drivers (`MXDRV.X`, `ZMUSIC.X`, `MCDRV.X`) to remain as authentic 68000 binaries inside the Master VM (preserving undocumented work-area compatibility with external spectrum analyzers and players).
+- **Audio Sharing in the Primary VM**: Sound I/O accesses (`OPM`, `ADPCM`, `MIDI`) do not trigger VM isolation, allowing resident music drivers (`MXDRV.X`, `ZMUSIC.X`, `MCDRV.X`) to remain as authentic 68000 binaries inside the Primary VM (preserving undocumented work-area compatibility with external spectrum analyzers and players).
 - **High-Definition Native TSRs**: Pure compute or hardware-bottlenecked TSRs are replaced by 32-byte 68k header stubs backed by native Rust implementations:
-  - `PCM8` / `PCM8A` / `PCM8PP`: Bypasses the 15.6 kHz 4-bit ADPCM bottleneck and streams 48/96 kHz 32-bit float multi-channel audio directly to the host master mixer while keeping 68k status work areas synchronized.
+  - `PCM8` / `PCM8A` / `PCM8PP`: Bypasses the 15.6 kHz 4-bit ADPCM bottleneck and streams 48/96 kHz 32-bit float multi-channel audio directly to the host mixer while keeping 68k status work areas synchronized.
   - `FLOAT2.X`–`FLOAT4.X`: Routes `$FExx` floating-point traps directly to ARM hardware FPU/NEON instructions.
   - `TwentyOne.X`: Native long-filename and case-preservation support bridged to the host file system.
 
@@ -109,7 +109,7 @@ gdb-multiarch -ex 'set endian big' -ex 'set architecture m68k:68000' -ex 'target
   - Native TSR stubs for `FLOATx`, high-definition `PCM8`, and `TwentyOne`.
 - **Phase 3: Multi-VM Isolation & 3-Tier Storage Bridge**
   - Automatic VM detachment on direct CRTC/GVRAM access and `_CRTMOD` transitions.
-  - 3-tier straight storage forwarding (DOS / Disk IOCS / SCSI IOCS) and multi-VM master audio mixer.
+  - 3-tier straight storage forwarding (DOS / Disk IOCS / SCSI IOCS) and multi-VM audio mixer.
   - Per-executable compatibility profile database (BLAKE3 hash matching).
 - **Phase 4: Native OS Core Migration & FAT Binary SDK**
   - Full ARM native replacement of SX-Window window/event management.

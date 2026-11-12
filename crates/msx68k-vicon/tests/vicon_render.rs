@@ -209,7 +209,7 @@ fn test_sxwin31_boot_and_vicon_render() {
 
 #[test]
 fn test_vicon_high_res_ext_tvram_rendering() {
-    let mut vm = X68kVm::new_master_sx();
+    let mut vm = X68kVm::new_primary_sx();
 
     // Switch to 1920x1080 native resolution
     vm.bus.apply_screen_resolution(1920, 1080);
