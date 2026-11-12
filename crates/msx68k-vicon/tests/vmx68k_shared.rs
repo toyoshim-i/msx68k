@@ -1,4 +1,4 @@
-//! In drive bypass mode, a VM boots Human68k from the primary VM's own drive A:, bridged at the
+//! In shared mode, a VM boots Human68k from the primary VM's own drive A:, bridged at the
 //! file level, with its own CONFIG.SYS so that SX-Window does not start again, and what it
 //! writes lands on the primary's drive (`docs/VMX68K.md` Section 2).
 

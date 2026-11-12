@@ -48,7 +48,7 @@ run in a VM of their own from the start.
     speeds, applied and saved when chosen (for the 68000: 10MHz, 16MHz, 24MHz, and 最高速,
     msx68k's Burst); and, in custom mode only, "Boot", a submenu of the
     boot devices kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets them), written
-    and saved when chosen and taking effect at the next reset, as on the real machine. In bypass
+    and saved when chosen and taking effect at the next reset, as on the real machine. In shared
     mode the boot device stays on msx68k's boot ROM and the item is not shown; the VM's
     CONFIG.SYS decides what it starts.
   - **The configuration dialog** sets the CPU's kind, the memory size with a slider, and drive
@@ -61,17 +61,28 @@ run in a VM of their own from the start.
     window, drives, and SRAM, and いいえ leaves the change for the VM's next start. Radio buttons
     are label-less switches, as in Sharp's dialogs, and static texts get their text with
     `DITSet` when the dialog opens. While it is open, its filter serves the VM's requests, so the
-    VM does not wait for it. Drive assignment is in one of two modes: bypass mode, with the path of the
-    CONFIG.SYS the VM boots with, or custom mode, where each of the VM's drives is given a
-    floppy or HDD image file or one of the primary VM's drives, and the list can be edited. An
-    HDD image goes on the VM's SCSI and is the VM's alone. Custom mode keeps the machine's own
-    limits: two or four floppy drives, and the drive letters Human68k gives them.
+    VM does not wait for it.
+  - **Drive assignment** (decided 2026-11-13, mock in the notes) is in one of two modes, chosen
+    in the configuration dialog's ドライブ row: **共有** (shared mode, with the path of the
+    CONFIG.SYS the VM boots with: every drive is the primary VM's, under the same letter) or
+    **カスタム** (custom mode). Custom mode's 詳細... button, which shared mode greys out, opens
+    the ドライブの詳細 dialog: the number of drives, and for each a kind, **ファイル** (a floppy or
+    HDD image file, given by its path), **共有** (one of the primary VM's drives, file-level, as
+    shared mode has them), or **パススルー** (one of the primary VM's floppy drives handed to the VM
+    sector by sector, a real FD to it, write-protected on the primary meanwhile), and what it is
+    given, a path or a drive letter such as `C:`. Its 設定 keeps the changes until the
+    configuration dialog's 設定 saves them with the rest and asks about the restart once; that
+    dialog's 取消 drops them too. Paths are typed into text fields; dropping a file from the
+    Filer comes later. An HDD image goes on the VM's SCSI and is the VM's alone. Custom mode
+    keeps the machine's own limits: two or four floppy drives, and the drive letters Human68k
+    gives them. The VM boots as its SRAM says, and making a new setup (4d) chooses the boot
+    device it writes there.
   - **Floppy drives**: in custom mode, an icon for each floppy drive shows whether a disk is in
     and has an access lamp. Clicking it ejects the disk, and dropping an image on it from the
-    Filer swaps it in, both at once and without a restart. Bypass mode, which leaves the VM's
+    Filer swaps it in, both at once and without a restart. Shared mode, which leaves the VM's
     floppy drives unused, shows none.
   - **Access lamp**: one lamp lights whenever the VM reaches any of its drives, floppy, SCSI, or
-    remote, as the front panel's lamp of the real machine does, so that access shows in bypass
+    remote, as the front panel's lamp of the real machine does, so that access shows in shared
     mode too. It sits at the right of the bar, red while lit, and stays lit 0.2 s after an
     access, since emulated accesses are over at once. The app counts the VM's accesses (FDC
     reads, writes, and READ ID; SCSI reads and writes; remote drive requests) and sets the
@@ -102,7 +113,7 @@ run in a VM of their own from the start.
 - **Host bridges.** Later, the VM's IOCS and DOS calls are hooked and carried out as calls of the
   VMX68K.SX task in the primary VM, so the primary VM's Human68k stays the only owner of its file
   systems.
-- **Drive bypass mode, the default.** A VM sees the primary VM's storage as it is, with the same
+- **Shared mode, the default.** A VM sees the primary VM's storage as it is, with the same
   drive letters, bridged at the file level: each drive is a remote drive in the VM's Human68k,
   whose file operations VMX68K.SX carries out through the primary VM's Human68k. Sector access
   to the primary's disks is not given, since two Human68ks caching one file system would break
@@ -243,7 +254,7 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   before the result phase. VMX68K.X carries requests out one at a time with DOS `_SEEK`,
   `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Human68k 3.02 boots from the
   primary VM's HDD to `A>` this way (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
-- Drive bypass mode, first step (`crates/msx68k-bus/src/remote_fs.rs`): a VM's ROM window holds
+- Shared mode, first step (`crates/msx68k-bus/src/remote_fs.rs`): a VM's ROM window holds
   a boot ROM at `$FC0000` laid out like the internal SCSI ROM (IPL boot handle, install handle
   at the boot routine - 16, `'Human68k'`), and SRAM boots from it. The IPL boot routine reads
   `HUMAN.SYS` from the primary's `A:` through the bridge, puts its text and data at `$6800`,
@@ -264,7 +275,7 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   memory (`FILES`, `BUFFERS`, `LASTDRIVE` only). Human68k 3.02 boots this way, runs the
   primary's `AUTOEXEC.BAT`, and reaches `A>`; `MD`, `ECHO` into a file, and `REN` typed in it
   land on the primary's drive, and `DIR B:` lists the floppy in the primary's `B:`
-  (`crates/msx68k-vicon/tests/vmx68k_bypass.rs`).
+  (`crates/msx68k-vicon/tests/vmx68k_shared.rs`).
   The app starts VMs this way unless `--vm-fd0` names a floppy image.
 - The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
   Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests

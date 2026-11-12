@@ -907,7 +907,7 @@ impl Msx68kApp {
                 Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
             }
         } else {
-            // Drive bypass mode: the VM sees the primary's drives under the same letters, bridged
+            // Shared mode: the VM sees the primary's drives under the same letters, bridged
             // at the file level through VMX68K.X, and boots from A:. The floppy image mode for
             // drive 0 comes with the VM's settings.
             let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();

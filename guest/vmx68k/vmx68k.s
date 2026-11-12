@@ -207,7 +207,7 @@ no_library:
 	move.l	d0, (a1)
 no_drive0:
 
-	* Count the primary's drives from A:, which a VM in bypass mode sees as its own
+	* Count the primary's drives from A:, which a VM in shared mode sees as its own
 	moveq.l	#0, d3
 count_drives:
 	addq.w	#1, d3

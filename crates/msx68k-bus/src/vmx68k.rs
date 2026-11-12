@@ -186,7 +186,7 @@ impl RemoteDisk {
 pub enum VmEvent {
     /// A VM was asked for, to be shown in the window at `window`, with a disk image of
     /// `drive0_bytes` for drive 0 (0 for none) that VMX68K.SX reads and writes for it, the
-    /// primary's `drives`, from A:, that it can see in bypass mode, and from its setup the
+    /// primary's `drives`, from A:, that it can see in shared mode, and from its setup the
     /// `speed` to start at and its own SRAM, if the setup has one yet.
     Opened {
         id: u32,

@@ -127,7 +127,7 @@ official SX-Window programming manuals.
   with `E_USER1` (`X68kBus::wake_vm_windows`).
 - The host places the VM's screen at the window content's left, below the icon bar whose height
   `VmOpen` takes in `D4.W` (`vm_window_layout`), and the app starts VMs at 10 MHz with 4 MB, in
-  bypass mode unless `--vm-fd0` is given.
+  shared mode unless `--vm-fd0` is given.
 - **Step 1 is built** (2026-11-12): the 24-line icon bar with the Configuration icon (a gear,
   `'PLOT'` 1 of `VMX68K.LB`), its menu on the right button ("設定..." inactive until the dialog
   exists, and "68000" with the speed submenu, `'MENU'` 1), and `VmSpeed` (8), which the app
@@ -151,7 +151,7 @@ official SX-Window programming manuals.
    (Section 1.7). Decided and built 2026-11-13 ([VMX68K.md](VMX68K.md) Section 2, "A settings
    file per VM").
 4. In this order (decided 2026-11-13): 4a the dialog with the CPU kind and memory, saving on
-   close and the restart question (done 2026-11-13); 4b drive assignment, bypass and custom mode; 4c the boot
+   close and the restart question (done 2026-11-13); 4b drive assignment, shared and custom mode, built in the order ファイル, 共有, パススルー; mock: [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png); 4c the boot
    device submenu and the floppy icons, which need custom mode; 4d the menu to make a new
    setup (moved from step 3, as it needs a path input). The configuration dialog: CPU kind, memory slider, drive assignment, saving on close and the
    restart question (`DMError` `D_YESNO`).

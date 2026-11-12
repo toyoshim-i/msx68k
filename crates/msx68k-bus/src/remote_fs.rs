@@ -1,4 +1,4 @@
-//! A VM's remote drives in drive bypass mode (`docs/VMX68K.md` Section 2): the primary VM's
+//! A VM's remote drives in shared mode (`docs/VMX68K.md` Section 2): the primary VM's
 //! drives under the same letters, bridged at the file level, and booted from.
 //!
 //! The VM boots through a ROM msx68k provides at `$FC0000`, laid out like the internal SCSI ROM

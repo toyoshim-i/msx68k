@@ -98,7 +98,7 @@ pub struct X68kBus {
     pub(crate) hypercall_sites: std::collections::HashMap<u32, crate::hypercall::HypercallId>,
     /// VMs that VMX68K.SX has opened (see [`crate::vmx68k`]).
     pub(crate) vm_windows: crate::vmx68k::VmWindows,
-    /// A VM's remote drives in drive bypass mode (see [`crate::remote_fs`]), and whether their
+    /// A VM's remote drives in shared mode (see [`crate::remote_fs`]), and whether their
     /// boot ROM is mapped in the SCSI ROM window.
     pub(crate) remote_fs: Option<Box<crate::remote_fs::RemoteFs>>,
     pub(crate) remote_boot_rom: bool,
