@@ -6,6 +6,7 @@ pub mod dmac;
 pub mod fdc;
 pub mod gdb;
 pub mod guest_build;
+pub mod human_fs;
 pub mod hypercall;
 pub mod mfp;
 pub mod native_gm;
