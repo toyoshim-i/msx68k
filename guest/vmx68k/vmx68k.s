@@ -32,17 +32,72 @@ G_BLACK		.equ	11
 G_RED		.equ	13		; The access lamp, lit
 G_DGRAY		.equ	10		; The access lamp, out
 
+* -----------------------------------------------------------------------------
+* The work area, this task's own, at A5: VMX68K.X is an R-type module, which SX-
+* Window shares among the tasks it runs, so everything that changes lives here,
+* past the stack at its end
+* -----------------------------------------------------------------------------
+PATH_MAX	.equ	92		; Task records hold a 90-byte name, then the command line
+TASK_COMMAND	.equ	90
+STACK_SIZE	.equ	8192		; Window tracking (SXCallWindM) goes past 2 KB
+DISK_BUFFER_SIZE	.equ	32768	; A whole cylinder, both sides, of any floppy format
+
+	.offset	0
+win_ptr:	.ds.l	1
+app_task_id:	.ds.l	1
+vm_id:		.ds.l	1
+drive0_size:	.ds.l	1
+request:
+request_kind:	.ds.l	1
+request_offset:	.ds.l	1
+request_length:	.ds.l	1
+request_handle:	.ds.l	1
+setup_handle:	.ds.l	1		; pseudo-handles to setup_rec and sram_buffer
+sram_handle:	.ds.l	1
+screen_size:	.ds.l	1		; the VM's screen the window fits, width << 16 | height
+drive0_fd:	.ds.w	1
+vm_speed:	.ds.w	1		; by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
+setup_rec:	.ds.w	2		; version, speed
+event_rec:
+event_what:	.ds.w	1		; +0: what
+event_win:	.ds.l	1		; +2: whom.win
+		.ds.l	1		; +6: when
+event_where:	.ds.l	1		; +10: where
+event_what2:	.ds.w	1		; +14: ts.what2
+		.ds.w	1		; +16: ts.taskID
+		.ds.l	1		; +18: padding
+rects:
+bar_rect:	.ds.w	4
+bar_line_rect:	.ds.w	4
+screen_rect:	.ds.w	4
+lamp_rects:	.ds.w	12
+win_active:	.ds.b	1
+library_open:	.ds.b	1
+lamp_lit:	.ds.b	1		; the access lamp as drawn
+has_sram:	.ds.b	1		; sram_buffer holds the VM's SRAM
+setup_found:	.ds.b	1		; the setup file is there
+setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
+library_path:	.ds.b	PATH_MAX
+setup_path:	.ds.b	PATH_MAX
+menu_string:	.ds.b	64		; the speed submenu's items as MNConvert2 takes them
+VARS_SIZE:
+sram_buffer:	.ds.b	SRAM_SIZE	; the VM's own SRAM, kept in its setup
+disk_buffer:	.ds.b	DISK_BUFFER_SIZE
+		.ds.b	STACK_SIZE
+WORK_SIZE:
+
 	.text
 	.globl	_start
 	.globl	gui_start
 
+* An R-type module, which SX-Window runs more than once, a VM in each window,
+* sharing the module and giving each task a work area of its own.
 objr_header:
 	.dc.b	'O','B','J','R'
 	.dc.l	prog_end - objr_header		; +0x04: text size
 	.dc.l	gui_start - objr_header		; +0x08: SX-Window GUI entry point offset
-	.dc.l	$00002000			; +0x0C: stack size (8192 bytes)
-	.dc.l	$00000000			; +0x10: heap/work area size (0 bytes)
-	.dc.l	0, 0, 0				; +0x14..+0x1C: reserved (12 bytes)
+	.dc.l	WORK_SIZE			; +0x0C: work area size, the stack at its end
+	.dc.l	0, 0, 0, 0			; +0x10..+0x1C: reserved
 
 _start:
 	* Run from the Human68k command line: it needs SX-Window
@@ -53,14 +108,28 @@ _start:
 	DOS	_EXIT2
 
 gui_start:
-	lea	app_stack_top(pc), sp
+	* A1 is this task's work area, and the stack is already at its end
+	movea.l	a1, a5
+	lea	(a5), a0
+	move.w	#VARS_SIZE/2-1, d0
+clear_work:
+	clr.w	(a0)+
+	dbra	d0, clear_work
+	move.w	#-1, drive0_fd(a5)
+	move.l	#768 << 16 | 512, screen_size(a5)
+	lea	rects_init(pc), a0
+	lea	rects(a5), a1
+	moveq.l	#RECTS_SIZE/2-1, d0
+copy_rects:
+	move.w	(a0)+, (a1)+
+	dbra	d0, copy_rects
 
 	SXCALL	TSGetID			; $A360
-	lea	app_task_id(pc), a1
+	lea	app_task_id(a5), a1
 	move.l	d0, (a1)
 
 	* Open the window, hidden until the VM is there. Its content is the VM's screen.
-	move.l	app_task_id(pc), -(sp)	; refCon
+	move.l	app_task_id(a5), -(sp)	; refCon
 	move.w	#-1, -(sp)		; goAwayFlag
 	move.l	#-1, -(sp)		; behind = W_FRONT
 	move.w	#$0310, -(sp)		; procID = WI_STD2 << 4
@@ -70,7 +139,7 @@ gui_start:
 	clr.l	-(sp)			; wStorage = NULL
 	SXCALL	WMOpen			; $A1F9
 	lea	26(sp), sp
-	lea	win_ptr(pc), a1
+	lea	win_ptr(a5), a1
 	move.l	a0, (a1)
 	move.l	a0, d0
 	beq	do_ts_exit
@@ -78,7 +147,7 @@ gui_start:
 	* This program's own resources are its name with .LB for its extension, and the
 	* VM's setup is the command line's first word, or the default one
 	move.w	#-1, -(sp)		; this task
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	SXCALL	TSGetTdb		; $A35B
 	addq.l	#6, sp
 	bsr	take_paths
@@ -86,13 +155,13 @@ gui_start:
 
 	* Open VMX68K.LB and read all of it, leaving no file open; without it the bar
 	* stays empty
-	pea	library_path(pc)
+	pea	library_path(a5)
 	SXCALL	TSResOpen		; $A4A1
 	addq.l	#4, sp
 	move.l	a0, d0
 	beq.s	no_library
 	SXCALL	TSResLoad		; $A4A5
-	lea	library_open(pc), a1
+	lea	library_open(a5), a1
 	st	(a1)
 no_library:
 
@@ -103,7 +172,7 @@ no_library:
 	addq.l	#6, sp
 	tst.l	d0
 	bmi.s	no_drive0
-	lea	drive0_fd(pc), a1
+	lea	drive0_fd(a5), a1
 	move.w	d0, (a1)
 	move.w	#2, -(sp)		; from the end
 	clr.l	-(sp)
@@ -112,7 +181,7 @@ no_library:
 	addq.l	#8, sp
 	tst.l	d0
 	bmi.s	no_drive0
-	lea	drive0_size(pc), a1
+	lea	drive0_size(a5), a1
 	move.l	d0, (a1)
 no_drive0:
 
@@ -122,7 +191,7 @@ count_drives:
 	addq.w	#1, d3
 	cmpi.w	#26, d3
 	bhi.s	drives_counted
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	move.w	d3, -(sp)
 	DOS	_GETDPB
 	addq.l	#6, sp
@@ -133,37 +202,37 @@ drives_counted:
 
 	* Ask the host for a VM; without msx68k there is none, and the task ends
 	moveq.l	#MSX68K_FN_VM_OPEN, d0
-	move.l	win_ptr(pc), d1
-	move.l	drive0_size(pc), d2
+	move.l	win_ptr(a5), d1
+	move.l	drive0_size(a5), d2
 	moveq.l	#BAR_HEIGHT, d4		; the VM's screen goes below the bar
 	moveq.l	#0, d5			; the VM's SRAM from its setup, if it has one
-	tst.b	has_sram(pc)
+	tst.b	has_sram(a5)
 	beq.s	vm_open_sram
-	lea	sram_buffer(pc), a0
+	lea	sram_buffer(a5), a0
 	move.l	a0, d5
 vm_open_sram:
-	move.w	vm_speed(pc), d6
+	move.w	vm_speed(a5), d6
 	ext.l	d6
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	dispose_window
-	lea	vm_id(pc), a1
+	lea	vm_id(a5), a1
 	move.l	d0, (a1)
 	* A setup that is not there yet is made with what the VM starts with
-	tst.b	setup_found(pc)
+	tst.b	setup_found(a5)
 	bne.s	setup_kept
 	bsr	save_setup
 setup_kept:
 
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMShow			; $A207
 	addq.l	#4, sp
-	lea	win_active(pc), a1
+	lea	win_active(a5), a1
 	st	(a1)
 
 event_loop:
 
-	pea	event_rec(pc)
+	pea	event_rec(a5)
 	* The host sends E_USER1 to the window when the VM has disk requests
 	move.w	#$728A, -(sp)		; EM_USER1 | EM_MSLDOWN | EM_MSRDOWN | EM_UPDATE | EM_ACTIVATE | EM_SYSTEM1 | EM_SYSTEM2
 	SXCALL	TSEventAvail		; $A357
@@ -172,7 +241,7 @@ event_loop:
 	cmpi.w	#$DFFE, d0		; ER_ABORT
 	beq	quit_app
 
-	move.w	event_what(pc), d0
+	move.w	event_what(a5), d0
 	cmpi.w	#1, d0			; E_MSLDOWN
 	beq	handle_mouse_down
 	cmpi.w	#3, d0			; E_MSRDOWN
@@ -192,31 +261,31 @@ event_loop:
 	bra.s	event_loop
 
 handle_activate:
-	lea	win_active(pc), a1
-	move.l	event_win(pc), d0
-	cmp.l	win_ptr(pc), d0
+	lea	win_active(a5), a1
+	move.l	event_win(a5), d0
+	cmp.l	win_ptr(a5), d0
 	seq	(a1)
 	bra.s	event_loop
 
 handle_system:
-	move.w	event_what2(pc), d0
+	move.w	event_what2(a5), d0
 	cmpi.w	#1, d0			; ENDTSK
 	beq	quit_app
 	cmpi.w	#2, d0			; CLOSEALL
 	beq	quit_app
 	cmpi.w	#32, d0			; WINDOWSELECT
 	bne.s	event_loop
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMSelect		; $A1FE
 	addq.l	#4, sp
 	bra	event_loop
 
 handle_update:
 	* The bar, and the rest clear for the VM's screen
-	move.l	event_win(pc), d0
-	cmp.l	win_ptr(pc), d0
+	move.l	event_win(a5), d0
+	cmp.l	win_ptr(a5), d0
 	bne	event_loop
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMUpdate		; $A20D
 	bsr	draw_bar
 	SXCALL	WMUpdtOver		; $A20E
@@ -224,19 +293,19 @@ handle_update:
 	bra	event_loop
 
 handle_mouse_down:
-	move.l	event_win(pc), d0
-	cmp.l	win_ptr(pc), d0
+	move.l	event_win(a5), d0
+	cmp.l	win_ptr(a5), d0
 	bne	event_loop
-	tst.b	win_active(pc)
+	tst.b	win_active(a5)
 	bne.s	track_window
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMSelect		; $A1FE
 	addq.l	#4, sp
 	bra	event_loop
 track_window:
 	* Dragging and the close box
-	pea	event_rec(pc)
-	move.l	win_ptr(pc), -(sp)
+	pea	event_rec(a5)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	SXCallWindM		; $A3A2
 	addq.l	#8, sp
 	cmpi.w	#7, d0			; W_INCLOSE
@@ -246,13 +315,13 @@ track_window:
 handle_right_down:
 	* The right button on an icon of the bar pops up its menu, as SX-Window's menus
 	* follow the right button
-	move.l	event_win(pc), d0
-	cmp.l	win_ptr(pc), d0
+	move.l	event_win(a5), d0
+	cmp.l	win_ptr(a5), d0
 	bne	event_loop
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
-	move.l	event_where(pc), -(sp)
+	move.l	event_where(a5), -(sp)
 	SXCALL	GMGlobalToLocal		; $A13F
 	addq.l	#4, sp
 	move.l	d0, -(sp)
@@ -266,20 +335,20 @@ handle_right_down:
 
 quit_app:
 	moveq.l	#MSX68K_FN_VM_CLOSE, d0
-	move.l	vm_id(pc), d1
+	move.l	vm_id(a5), d1
 	bsr	msx68k_call
-	move.w	drive0_fd(pc), d0
+	move.w	drive0_fd(a5), d0
 	bmi.s	dispose_window
 	move.w	d0, -(sp)
 	DOS	_CLOSE
 	addq.l	#2, sp
 dispose_window:
 	* VMX68K.LB goes without being written back
-	tst.b	library_open(pc)
+	tst.b	library_open(a5)
 	beq.s	library_closed
 	SXCALL	TSResRemove		; $A4A4
 library_closed:
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMDispose		; $A1FC
 	addq.l	#4, sp
 do_ts_exit:
@@ -297,7 +366,7 @@ do_ts_exit:
 * -----------------------------------------------------------------------------
 draw_bar:
 	movem.l	d0-d2/a0-a1, -(sp)
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
 	move.w	#G_BLACK, -(sp)
@@ -309,13 +378,13 @@ draw_bar:
 	move.w	#$0100, -(sp)		; G_BACK << 8 | G_PSET
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	pea	bar_rect(pc)
+	pea	bar_rect(a5)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 	clr.w	-(sp)			; G_FORE << 8 | G_PSET
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	pea	bar_line_rect(pc)
+	pea	bar_line_rect(a5)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 	* Clear in all four planes: windows draw in planes 0 and 1 over plane 3 set
@@ -329,7 +398,7 @@ draw_bar:
 	move.w	#$0100, -(sp)		; G_BACK << 8 | G_PSET
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	pea	screen_rect(pc)
+	pea	screen_rect(a5)
 	SXCALL	GMFillRect		; $A173
 	addq.l	#4, sp
 	move.w	d2, -(sp)
@@ -337,7 +406,7 @@ draw_bar:
 	addq.l	#2, sp
 
 	* The Configuration icon, a plot image whose planes follow its rectangle
-	tst.b	library_open(pc)
+	tst.b	library_open(a5)
 	beq.s	draw_bar_done
 	move.w	#CONFIG_ICON_ID, -(sp)
 	move.l	#'PLOT', -(sp)
@@ -364,28 +433,47 @@ draw_bar_done:
 update_status:
 	movem.l	d0-d3/a1, -(sp)
 	moveq.l	#MSX68K_FN_VM_STATUS, d0
-	move.l	vm_id(pc), d1
+	move.l	vm_id(a5), d1
 	bsr	msx68k_call
 	tst.l	d0
 	bmi	update_lamp_done
 	tst.l	d1
 	beq.s	update_lamp
-	cmp.l	screen_size(pc), d1
+	cmp.l	screen_size(a5), d1
 	beq.s	update_lamp
 	bsr	resize_window
 update_lamp:
+	btst	#2, d0			; the master's screen changed size
+	beq.s	update_lamp_sram
+	bsr	redraw_window
+update_lamp_sram:
 	btst	#1, d0			; SRAM to save
 	beq.s	update_lamp_bit
 	bsr	take_sram
 update_lamp_bit:
 	andi.b	#1, d0			; the lamp
-	cmp.b	lamp_lit(pc), d0
+	cmp.b	lamp_lit(a5), d0
 	beq.s	update_lamp_done
-	lea	lamp_lit(pc), a1
+	lea	lamp_lit(a5), a1
 	move.b	d0, (a1)
 	bsr	draw_lamp
 update_lamp_done:
 	movem.l	(sp)+, d0-d3/a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: redraw_window
+* Hides and shows the window again, so that SX-Window works out its visible region
+* and draws it anew, frame and content, after the master's screen changed size:
+* what the old screen cut off was never drawn.
+* -----------------------------------------------------------------------------
+redraw_window:
+	movem.l	d0-d2/a0-a1, -(sp)
+	move.l	win_ptr(a5), -(sp)
+	SXCALL	WMHide			; $A208
+	SXCALL	WMShow			; $A207
+	addq.l	#4, sp
+	movem.l	(sp)+, d0-d2/a0-a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -395,14 +483,14 @@ update_lamp_done:
 take_sram:
 	movem.l	d0-d3/a0-a1, -(sp)
 	moveq.l	#MSX68K_FN_VM_SRAM, d0
-	move.l	vm_id(pc), d1
-	lea	sram_buffer(pc), a0
+	move.l	vm_id(a5), d1
+	lea	sram_buffer(a5), a0
 	move.l	a0, d2
 	move.l	#SRAM_SIZE, d3
 	bsr	msx68k_call
 	cmpi.l	#SRAM_SIZE, d0
 	bne.s	take_sram_done
-	lea	has_sram(pc), a1
+	lea	has_sram(a5), a1
 	st	(a1)
 	bsr	save_setup
 take_sram_done:
@@ -417,8 +505,8 @@ take_sram_done:
 * -----------------------------------------------------------------------------
 take_paths:
 	movem.l	d0-d1/a0-a2, -(sp)
-	lea	disk_buffer(pc), a0	; Task.name
-	lea	library_path(pc), a1
+	lea	disk_buffer(a5), a0	; Task.name
+	lea	library_path(a5), a1
 	suba.l	a2, a2			; after the last '.'
 	moveq.l	#PATH_MAX-4, d1
 take_name:
@@ -439,10 +527,10 @@ take_name_done:
 	clr.b	(a2)
 
 take_command:
-	lea	disk_buffer+TASK_COMMAND(pc), a0	; LASCII: its length, then its text
+	lea	disk_buffer+TASK_COMMAND(a5), a0	; LASCII: its length, then its text
 	moveq.l	#0, d1
 	move.b	(a0)+, d1
-	lea	setup_path(pc), a1
+	lea	setup_path(a5), a1
 take_command_skip:
 	subq.w	#1, d1
 	bmi.s	take_command_default
@@ -465,7 +553,7 @@ take_command_default:
 take_command_default_copy:
 	move.b	(a0)+, (a1)+
 	bne.s	take_command_default_copy
-	lea	setup_is_default(pc), a1
+	lea	setup_is_default(a5), a1
 	st	(a1)
 take_paths_done:
 	movem.l	(sp)+, d0-d1/a0-a2
@@ -478,13 +566,13 @@ take_paths_done:
 * -----------------------------------------------------------------------------
 load_setup:
 	movem.l	d0-d1/a0-a1, -(sp)
-	pea	setup_path(pc)
+	pea	setup_path(a5)
 	SXCALL	TSResOpen		; $A4A1
 	addq.l	#4, sp
 	move.l	a0, d0
 	beq	load_setup_done
 	SXCALL	TSResLoad		; $A4A5
-	lea	setup_found(pc), a1
+	lea	setup_found(a5), a1
 	st	(a1)
 
 	clr.w	-(sp)
@@ -497,7 +585,7 @@ load_setup:
 	move.w	2(a0), d0		; the speed
 	cmpi.w	#SPEED_COUNT, d0
 	bcc.s	load_setup_sram
-	lea	vm_speed(pc), a1
+	lea	vm_speed(a5), a1
 	move.w	d0, (a1)
 
 load_setup_sram:
@@ -508,12 +596,12 @@ load_setup_sram:
 	move.l	a0, d0
 	beq.s	load_setup_close
 	movea.l	(a0), a0
-	lea	sram_buffer(pc), a1
+	lea	sram_buffer(a5), a1
 	move.w	#SRAM_SIZE/4-1, d1
 load_setup_copy:
 	move.l	(a0)+, (a1)+
 	dbra	d1, load_setup_copy
-	lea	has_sram(pc), a1
+	lea	has_sram(a5), a1
 	st	(a1)
 
 load_setup_close:
@@ -529,21 +617,21 @@ load_setup_done:
 * -----------------------------------------------------------------------------
 save_setup:
 	movem.l	d0-d3/a0-a1, -(sp)
-	tst.b	setup_is_default(pc)
+	tst.b	setup_is_default(a5)
 	beq.s	save_setup_open
 	pea	default_setup_dir(pc)
 	DOS	_MKDIR			; there already, it fails, as it may
 	addq.l	#4, sp
 save_setup_open:
-	lea	setup_rec(pc), a0
+	lea	setup_rec(a5), a0
 	move.w	#SETUP_VERSION, (a0)
-	move.w	vm_speed(pc), 2(a0)
-	lea	setup_handle(pc), a1	; pseudo-handles to the records
+	move.w	vm_speed(a5), 2(a0)
+	lea	setup_handle(a5), a1	; pseudo-handles to the records
 	move.l	a0, (a1)+
-	lea	sram_buffer(pc), a0
+	lea	sram_buffer(a5), a0
 	move.l	a0, (a1)
 
-	pea	setup_path(pc)
+	pea	setup_path(a5)
 	SXCALL	TSResOpen		; $A4A1
 	addq.l	#4, sp
 	move.l	a0, d0
@@ -555,30 +643,30 @@ save_setup_add:
 	SXCALL	TSRscRemove		; $A4AC
 	addq.l	#6, sp
 	move.l	#SETUP_SIZE, -(sp)
-	pea	setup_handle(pc)
+	pea	setup_handle(a5)
 	clr.w	-(sp)
 	move.l	#SETUP_TYPE, -(sp)
 	SXCALL	TSRscAdd		; $A4AA
 	lea	14(sp), sp
 
-	tst.b	has_sram(pc)
+	tst.b	has_sram(a5)
 	beq.s	save_setup_close
 	clr.w	-(sp)
 	move.l	#SRAM_TYPE, -(sp)
 	SXCALL	TSRscRemove		; $A4AC
 	addq.l	#6, sp
 	move.l	#SRAM_SIZE, -(sp)
-	pea	sram_handle(pc)
+	pea	sram_handle(a5)
 	clr.w	-(sp)
 	move.l	#SRAM_TYPE, -(sp)
 	SXCALL	TSRscAdd		; $A4AA
 	lea	14(sp), sp
 
 save_setup_close:
-	pea	setup_path(pc)
+	pea	setup_path(a5)
 	SXCALL	TSResClose		; $A4A2
 	addq.l	#4, sp
-	lea	setup_found(pc), a1
+	lea	setup_found(a5), a1
 	st	(a1)
 	movem.l	(sp)+, d0-d3/a0-a1
 	rts
@@ -590,21 +678,21 @@ save_setup_close:
 * -----------------------------------------------------------------------------
 resize_window:
 	movem.l	d0-d2/a1, -(sp)
-	lea	screen_size(pc), a1
+	lea	screen_size(a5), a1
 	move.l	d1, (a1)
 	move.w	d1, d2			; height
 	swap	d1			; width
-	lea	bar_rect(pc), a1
+	lea	bar_rect(a5), a1
 	move.w	d1, 4(a1)
-	lea	bar_line_rect(pc), a1
+	lea	bar_line_rect(a5), a1
 	move.w	d1, 4(a1)
-	lea	screen_rect(pc), a1
+	lea	screen_rect(a5), a1
 	move.w	d1, 4(a1)
 	move.w	d2, d0
 	addi.w	#BAR_HEIGHT, d0
 	move.w	d0, 6(a1)
 	* The lamp, 19 dots in from the right
-	lea	lamp_rects(pc), a1
+	lea	lamp_rects(a5), a1
 	move.w	d1, d0
 	subi.w	#19, d0
 	move.w	d0, 0(a1)
@@ -623,7 +711,7 @@ resize_window:
 	addi.w	#BAR_HEIGHT, d0
 	move.w	d0, -(sp)
 	move.w	d1, -(sp)		; and the width in its high word
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	WMSize			; $A203
 	lea	10(sp), sp
 	* Shrinking exposes nothing to update: the lamp has moved all the same
@@ -638,7 +726,7 @@ resize_window:
 * -----------------------------------------------------------------------------
 draw_lamp:
 	movem.l	d0-d2/a0-a1, -(sp)
-	move.l	win_ptr(pc), -(sp)
+	move.l	win_ptr(a5), -(sp)
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
 	move.w	#$000F, -(sp)		; G_ALLPAGE
@@ -648,13 +736,13 @@ draw_lamp:
 	clr.w	-(sp)			; G_FORE << 8 | G_PSET
 	SXCALL	GMPenMode		; $A144
 	addq.l	#2, sp
-	lea	lamp_rects(pc), a1
+	lea	lamp_rects(a5), a1
 	move.w	#G_BLACK, d0
 	bsr.s	draw_lamp_fill
 	move.w	#G_WHITE, d0
 	bsr.s	draw_lamp_fill
 	move.w	#G_DGRAY, d0
-	tst.b	lamp_lit(pc)
+	tst.b	lamp_lit(a5)
 	beq.s	draw_lamp_face
 	move.w	#G_RED, d0
 draw_lamp_face:
@@ -684,15 +772,15 @@ draw_lamp_fill:
 * -----------------------------------------------------------------------------
 config_menu:
 	movem.l	d0-d3/a0-a2, -(sp)
-	tst.b	library_open(pc)
+	tst.b	library_open(a5)
 	beq	config_menu_done
 
 	* Check the current speed: rebuild the submenu from its items, with '!' before one
-	lea	menu_string(pc), a1
+	lea	menu_string(a5), a1
 	lea	speed_items(pc), a0
 	moveq.l	#0, d1
 config_speed_item:
-	cmp.w	vm_speed(pc), d1
+	cmp.w	vm_speed(a5), d1
 	bne.s	config_speed_copy
 	move.b	#'!', (a1)+
 config_speed_copy:
@@ -715,7 +803,7 @@ config_speed_built:
 	move.l	a0, d0
 	beq	config_menu_done
 	clr.w	-(sp)			; MI_PLN
-	pea	menu_string(pc)
+	pea	menu_string(a5)
 	move.l	a0, -(sp)
 	SXCALL	MNConvert2		; $A26B
 	lea	10(sp), sp
@@ -728,7 +816,7 @@ config_speed_built:
 	move.l	a0, d0
 	beq.s	config_menu_done
 	movea.l	a0, a2
-	move.l	event_where(pc), -(sp)
+	move.l	event_where(a5), -(sp)
 	move.l	a2, -(sp)
 	SXCALL	MNSelect		; $A268
 	addq.l	#8, sp
@@ -748,11 +836,11 @@ config_speed_built:
 	bcc.s	config_menu_done
 	ext.l	d2
 	moveq.l	#MSX68K_FN_VM_SPEED, d0
-	move.l	vm_id(pc), d1
+	move.l	vm_id(a5), d1
 	bsr	msx68k_call
 	tst.l	d0
 	bne.s	config_menu_done
-	lea	vm_speed(pc), a1
+	lea	vm_speed(a5), a1
 	move.w	d2, (a1)
 	bsr	save_setup
 config_menu_done:
@@ -769,14 +857,14 @@ serve_disk:
 	movem.l	d0-d3/a0-a1, -(sp)
 serve_next:
 	moveq.l	#MSX68K_FN_VM_POLL, d0
-	move.l	vm_id(pc), d1
-	lea	disk_buffer(pc), a0
+	move.l	vm_id(a5), d1
+	lea	disk_buffer(a5), a0
 	move.l	a0, d2
 	move.l	#DISK_BUFFER_SIZE, d3
 	bsr	msx68k_call
 	tst.l	d0
 	ble	serve_done		; 0: nothing to do, -1: no such VM
-	lea	request(pc), a1
+	lea	request(a5), a1
 	move.l	d0, (a1)+		; kind
 	move.l	d1, (a1)+		; offset, attribute, or drive
 	move.l	d2, (a1)+		; length
@@ -809,19 +897,19 @@ SERVE_KINDS	.equ	16
 serve_image:
 	* 1, 2: read or write drive 0's image; the reply is 0, or -1 when it fails
 	moveq.l	#-1, d3
-	move.w	drive0_fd(pc), d0
+	move.w	drive0_fd(a5), d0
 	bmi	serve_reply
 	clr.w	-(sp)			; from the start
-	move.l	request_offset(pc), -(sp)
+	move.l	request_offset(a5), -(sp)
 	move.w	d0, -(sp)
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
 	bmi	serve_reply
-	move.l	request_length(pc), -(sp)
-	pea	disk_buffer(pc)
-	move.w	drive0_fd(pc), -(sp)
-	move.l	request_kind(pc), d0
+	move.l	request_length(a5), -(sp)
+	pea	disk_buffer(a5)
+	move.w	drive0_fd(a5), -(sp)
+	move.l	request_kind(a5), d0
 	cmpi.l	#1, d0
 	bne.s	serve_image_write
 	DOS	_READ
@@ -830,15 +918,15 @@ serve_image_write:
 	DOS	_WRITE
 serve_image_moved:
 	lea	10(sp), sp
-	cmp.l	request_length(pc), d0
+	cmp.l	request_length(a5), d0
 	bne	serve_reply
 	moveq.l	#0, d3
 	bra	serve_reply
 
 serve_open:
 	* 3: open the path in the buffer with the mode given; the reply is the handle
-	move.w	request_offset+2(pc), -(sp)
-	pea	disk_buffer(pc)
+	move.w	request_offset+2(a5), -(sp)
+	pea	disk_buffer(a5)
 	DOS	_OPEN
 	addq.l	#6, sp
 	bra	serve_result
@@ -846,83 +934,83 @@ serve_open:
 serve_handle_read:
 	* 4: read at an offset of an open file; the reply is the count
 	clr.w	-(sp)
-	move.l	request_offset(pc), -(sp)
-	move.w	request_handle+2(pc), -(sp)
+	move.l	request_offset(a5), -(sp)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
 	bmi	serve_result
-	move.l	request_length(pc), -(sp)
-	pea	disk_buffer(pc)
-	move.w	request_handle+2(pc), -(sp)
+	move.l	request_length(a5), -(sp)
+	pea	disk_buffer(a5)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_READ
 	lea	10(sp), sp
 	bra	serve_result
 
 serve_close:
 	* 5: close an open file
-	move.w	request_handle+2(pc), -(sp)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_CLOSE
 	addq.l	#2, sp
 	bra	serve_result
 
 serve_files:
 	* 6: _FILES for the path at +64 of the buffer, into its first 53 bytes
-	move.w	request_offset+2(pc), -(sp)
-	pea	disk_buffer+64(pc)
-	pea	disk_buffer(pc)
+	move.w	request_offset+2(a5), -(sp)
+	pea	disk_buffer+64(a5)
+	pea	disk_buffer(a5)
 	DOS	_FILES
 	lea	10(sp), sp
 	bra	serve_result
 
 serve_nfiles:
 	* 7: _NFILES with the search buffer the host put back
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	DOS	_NFILES
 	addq.l	#4, sp
 	bra	serve_result
 
 serve_dskfre:
 	* 8: free space of a drive (1 = A:) into the buffer
-	pea	disk_buffer(pc)
-	move.w	request_offset+2(pc), -(sp)
+	pea	disk_buffer(a5)
+	move.w	request_offset+2(a5), -(sp)
 	DOS	_DSKFRE
 	addq.l	#6, sp
 	bra	serve_result
 
 serve_mkdir:
 	* 9: make the directory named in the buffer
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	DOS	_MKDIR
 	addq.l	#4, sp
 	bra	serve_result
 
 serve_rmdir:
 	* 10: remove the directory named in the buffer
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	DOS	_RMDIR
 	addq.l	#4, sp
 	bra	serve_result
 
 serve_delete:
 	* 11: delete the file named in the buffer
-	pea	disk_buffer(pc)
+	pea	disk_buffer(a5)
 	DOS	_DELETE
 	addq.l	#4, sp
 	bra	serve_result
 
 serve_rename:
 	* 12: rename the file named in the buffer to the name at +256
-	pea	disk_buffer+256(pc)
-	pea	disk_buffer(pc)
+	pea	disk_buffer+256(a5)
+	pea	disk_buffer(a5)
 	DOS	_RENAME
 	addq.l	#8, sp
 	bra	serve_result
 
 serve_chmod:
 	* 13: set the attribute given, or read it with -1; the reply is the attribute
-	move.w	request_offset+2(pc), -(sp)
-	pea	disk_buffer(pc)
+	move.w	request_offset+2(a5), -(sp)
+	pea	disk_buffer(a5)
 	DOS	_CHMOD
 	addq.l	#6, sp
 	bra	serve_result
@@ -930,9 +1018,9 @@ serve_chmod:
 serve_create:
 	* 14: create the file named in the buffer with the attribute given, replacing one
 	* there (_CREATE) or not (_NEWFILE); the reply is the handle
-	move.w	request_offset+2(pc), -(sp)
-	pea	disk_buffer(pc)
-	tst.l	request_length(pc)
+	move.w	request_offset+2(a5), -(sp)
+	pea	disk_buffer(a5)
+	tst.l	request_length(a5)
 	beq	serve_newfile
 	DOS	_CREATE
 	bra	serve_created
@@ -946,23 +1034,23 @@ serve_handle_write:
 	* 15: write the buffer at an offset of an open file, or cut it there with nothing;
 	* the reply is the count
 	clr.w	-(sp)
-	move.l	request_offset(pc), -(sp)
-	move.w	request_handle+2(pc), -(sp)
+	move.l	request_offset(a5), -(sp)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
 	bmi	serve_result
-	move.l	request_length(pc), -(sp)
-	pea	disk_buffer(pc)
-	move.w	request_handle+2(pc), -(sp)
+	move.l	request_length(a5), -(sp)
+	pea	disk_buffer(a5)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_WRITE
 	lea	10(sp), sp
 	bra	serve_result
 
 serve_filedate:
 	* 16: set the date and time of an open file
-	move.l	request_offset(pc), -(sp)
-	move.w	request_handle+2(pc), -(sp)
+	move.l	request_offset(a5), -(sp)
+	move.w	request_handle+2(a5), -(sp)
 	DOS	_FILEDATE
 	addq.l	#6, sp
 
@@ -970,7 +1058,7 @@ serve_result:
 	move.l	d0, d3
 	* What changes the master's storage is written out at once, not left in Human68k's
 	* buffers, so nothing a VM wrote is lost if the machine stops
-	move.l	request_kind(pc), d0
+	move.l	request_kind(a5), d0
 	cmpi.l	#5, d0			; _CLOSE
 	beq.s	serve_flush
 	cmpi.l	#9, d0			; _MKDIR and after
@@ -979,7 +1067,7 @@ serve_flush:
 	DOS	_FFLUSH
 serve_reply:
 	moveq.l	#MSX68K_FN_VM_REPLY, d0
-	move.l	vm_id(pc), d1
+	move.l	vm_id(a5), d1
 	move.l	d3, d2
 	bsr	msx68k_call
 	bra	serve_next
@@ -1018,111 +1106,19 @@ SPEED_COUNT	.equ	4
 	.even
 win_bounds:
 	.dc.w	40, 40, 808, 552+BAR_HEIGHT	; left, top, right, bottom: the bar, then the VM's 768 x 512
-bar_rect:
+* What the rectangles in the work area start as, for the VM's 768 x 512: the bar,
+* the line under it, the VM's screen, and the access lamp, black at the top and
+* left, white at the bottom and right, and the lamp itself
+rects_init:
 	.dc.w	0, 0, 768, BAR_HEIGHT-1
-bar_line_rect:
 	.dc.w	0, BAR_HEIGHT-1, 768, BAR_HEIGHT
-screen_rect:
 	.dc.w	0, BAR_HEIGHT, 768, BAR_HEIGHT+512
-* The access lamp: black at the top and left, white at the bottom and right, and
-* the lamp itself
-lamp_rects:
 	.dc.w	749, 8, 763, 16
 	.dc.w	750, 9, 763, 16
 	.dc.w	750, 9, 762, 15
+RECTS_SIZE	.equ	6*8
 config_icon_rect:
 	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
-
-win_ptr:
-	.dc.l	0
-app_task_id:
-	.dc.l	0
-vm_id:
-	.dc.l	0
-drive0_fd:
-	.dc.w	-1
-	.even
-drive0_size:
-	.dc.l	0
-request:
-request_kind:
-	.dc.l	0
-request_offset:
-	.dc.l	0
-request_length:
-	.dc.l	0
-request_handle:
-	.dc.l	0
-win_active:
-	.dc.b	0
-library_open:
-	.dc.b	0
-lamp_lit:
-	.dc.b	0			; the access lamp as drawn
-has_sram:
-	.dc.b	0			; sram_buffer holds the VM's SRAM
-setup_found:
-	.dc.b	0			; the setup file is there
-setup_is_default:
-	.dc.b	0			; the setup is DEFAULT.V68
-	.even
-setup_rec:
-	.dc.w	SETUP_VERSION, 0
-setup_handle:
-	.dc.l	0
-sram_handle:
-	.dc.l	0
-* Task records hold a 90-byte name, then the command line
-PATH_MAX	.equ	92
-TASK_COMMAND	.equ	90
-library_path:
-	.ds.b	PATH_MAX
-setup_path:
-	.ds.b	PATH_MAX
-	.even
-screen_size:
-	.dc.l	768 << 16 | 512		; the VM's screen the window fits, width << 16 | height
-	.even
-* Speed the VM runs at, by MSX68K_FN_VM_SPEED's numbers; VMs start at 10 MHz
-vm_speed:
-	.dc.w	0
-* The speed submenu's items as MNConvert2 takes them, each with a '!' at most
-menu_string:
-	.ds.b	64
-	.even
-
-event_rec:
-event_what:
-	.dc.w	0			; +0: what
-event_win:
-	.dc.l	0			; +2: whom.win
-	.dc.l	0			; +6: when
-event_where:
-	.dc.l	0			; +10: where
-event_what2:
-	.dc.w	0			; +14: ts.what2
-	.dc.w	0			; +16: ts.taskID
-	.dc.l	0			; +18: padding
-	.even
-
-* Window tracking (SXCallWindM) goes deep, past 2 KB, into the data above
-app_stack:
-	.ds.b	8192
-	.even
-app_stack_top:
-	.even
-
-* The VM's own SRAM, kept in its setup
-sram_buffer:
-	.ds.b	SRAM_SIZE
-	.even
-
-* A read or write of a whole cylinder, both sides, of any floppy format. It comes last, as
-* PC-relative references reach only 32 KB.
-DISK_BUFFER_SIZE	.equ	32768
-disk_buffer:
-	.ds.b	DISK_BUFFER_SIZE
-	.even
 
 prog_end:
 	.end	_start

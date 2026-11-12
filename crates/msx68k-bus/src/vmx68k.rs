@@ -236,6 +236,8 @@ struct VmStatus {
     lamp: bool,
     /// Whether the VM's SRAM changed and is to be saved.
     sram: bool,
+    /// Whether the master's screen changed size, so that the window is to be drawn anew.
+    redraw: bool,
     /// Width and height, `(0, 0)` until the VM shows a frame.
     screen: (u16, u16),
 }
@@ -244,6 +246,8 @@ struct VmStatus {
 const STATUS_LAMP: u32 = 1;
 /// `VmStatus` bit of SRAM to save, which `VmSram` hands over.
 const STATUS_SRAM: u32 = 2;
+/// `VmStatus` bit of a window to draw anew, for a screen that changed size.
+const STATUS_REDRAW: u32 = 4;
 
 /// The VMs VMX68K.SX has open.
 #[derive(Debug, Default)]
@@ -326,6 +330,15 @@ impl X68kBus {
         if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
             open.sram = Some(sram);
             open.status.sram = true;
+        }
+    }
+
+    /// Has VMX68K.SX draw each of its windows anew, after the master's screen changed size:
+    /// what was off the screen, which SX-Window did not draw, and its visible region, which
+    /// the screen clipped, come back with them.
+    pub(crate) fn redraw_vm_windows(&mut self) {
+        for open in &mut self.vm_windows.open {
+            open.status.redraw = true;
         }
     }
 
@@ -557,8 +570,8 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp
-    /// and bit 1 SRAM to save, or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
+    /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp,
+    /// bit 1 SRAM to save, and bit 2 a window to draw anew, or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
     /// height`, 0 before its first frame).
     pub(crate) fn hypercall_vm_status(&mut self, state: &mut CpuState) -> TrapResult {
         let id = state.d[1];
@@ -566,10 +579,14 @@ impl X68kBus {
             state.d[0] = u32::MAX;
             return TrapResult::Handled { extra_cycles: 0 };
         };
+        let status = open.status;
+        // A redraw is asked for once.
+        open.status.redraw = false;
         open.status_told = open.status;
         open.status_woken = false;
-        let status = open.status;
-        state.d[0] = if status.lamp { STATUS_LAMP } else { 0 } | if status.sram { STATUS_SRAM } else { 0 };
+        state.d[0] = if status.lamp { STATUS_LAMP } else { 0 }
+            | if status.sram { STATUS_SRAM } else { 0 }
+            | if status.redraw { STATUS_REDRAW } else { 0 };
         state.d[1] = (status.screen.0 as u32) << 16 | status.screen.1 as u32;
         TrapResult::Handled { extra_cycles: 0 }
     }

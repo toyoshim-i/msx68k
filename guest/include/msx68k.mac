@@ -20,7 +20,7 @@ MSX68K_FN_VM_CLOSE	.equ	6	; D1.L = VM ID; stops the VM
 MSX68K_FN_VM_REPLY	.equ	7	; D1.L = VM ID, D2.L = 0 when the request succeeded
 MSX68K_FN_VM_SPEED	.equ	8	; D1.L = VM ID, D2.L = speed: 0 10 MHz, 1 16 MHz, 2 24 MHz, 3 Burst
 MSX68K_FN_VM_STATUS	.equ	9	; D1.L = VM ID; returns D0 bit 0 = lamp lit, bit 1 = SRAM to save,
-				; D1.L = width << 16 | height
+				; bit 2 = redraw the window, D1.L = width << 16 | height
 MSX68K_FN_VM_SRAM	.equ	10	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns the SRAM's size
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3

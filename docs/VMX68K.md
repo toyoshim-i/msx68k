@@ -178,6 +178,13 @@ windows work the same way as the master VM.
   every pass of the event loop, and `VmClose` (6) stops the VM. `VmOpen` also takes the
   lines of the content above the VM's screen (`D4.W`, the icon bar), and `VmSpeed` (8) sets
   the VM's speed from the menu.
+- **One VM per window, any number.** VMX68K.SX is an R-type module (`OBJR`): SX-Window runs
+  it as often as it is started, sharing the module and giving each task a work area of its own
+  (A1 at entry, then A5, the stack at its end; the size at `+$0C` of the header), which holds
+  everything that changes. An O-type module (`OBJO`) cannot run twice.
+- **When the master's screen grows**, SX-Window does not draw what the old screen cut off, and
+  windows' visible regions stay clipped to it, so the host has VMX68K.SX hide and show its
+  windows (`VmStatus` bit 2), which draws them anew.
 - **Window position and visible region.** VMX68K.SX does not report them. The host reads them
   from the window's `Graph` every frame: its rectangle, its bitmap's rectangle (which places it
   on the screen), and its visible region, which become the `VmLayer`'s position and scissor

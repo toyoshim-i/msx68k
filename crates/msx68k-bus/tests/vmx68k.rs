@@ -275,3 +275,99 @@ fn a_setup_opens_vmx68k_with_its_settings() {
     assert_eq!(*speed, CpuSpeedMode::Burst);
     assert!(opened == &sram, "the setup's own SRAM");
 }
+
+#[test]
+fn vmx68k_runs_a_vm_in_each_of_its_windows() {
+    let Some(mut vm) = boot() else {
+        eprintln!("ROMs or disks not found, skipping the VMX68K test");
+        return;
+    };
+    vm.bus.request_screen_resolution(1024, 768);
+    for _ in 0..5_000_000 {
+        if vm.bus.crtc.active_resolution() == (1024, 768) {
+            break;
+        }
+        vm.step();
+    }
+    vm.run_steps(3_000_000);
+    // VMX68K.X twice from \X68, the Filer's window brought forward in between.
+    let mut windows = Vec::new();
+    for n in 1..=2 {
+        click(&mut vm, DRIVE_ICON, 2, 3_000_000);
+        click(&mut vm, (104, 255), 2, 8_000_000);
+        let events = vm.bus.take_vm_events();
+        let [VmEvent::Opened { id, window, .. }] = events[..] else {
+            panic!("VMX68K.X must open VM {n}: {events:?}");
+        };
+        assert_eq!(id, n);
+        windows.push(window);
+    }
+    screenshot(&vm, "two_vms");
+
+    // Each task serves its own VM's requests: both are answered.
+    let replies: Vec<_> = [1, 2]
+        .map(|id| {
+            let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
+            vm.bus.attach_vm_bridge(id, requests);
+            std::thread::spawn(move || bridge.ask(msx68k_bus::vmx68k::BridgeOp::Dskfre { drive: 1 }))
+        })
+        .into_iter()
+        .collect();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !replies.iter().all(|r| r.is_finished()) && std::time::Instant::now() < until {
+        vm.run_steps(200_000);
+    }
+    for (id, reply) in [1, 2].into_iter().zip(replies) {
+        assert!(reply.is_finished(), "VM {id}'s request must be served");
+        let reply = reply.join().unwrap().expect("a reply");
+        assert!(reply.result as i32 >= 0, "VM {id}: {reply:?}");
+    }
+
+    // The second window, in front of the first, shows its own VM's lamp, not the first's.
+    let lamp = |vm: &X68kVm| {
+        let layout = vm.bus.vm_window_layout(windows[1]).unwrap();
+        let right = layout.visible.iter().map(|v| v.2).max().unwrap() as usize;
+        text_index(vm, (right - 12, layout.top as usize - 12))
+    };
+    vm.bus.set_vm_lamp(2, true);
+    vm.run_steps(3_000_000);
+    assert_eq!(lamp(&vm), 13, "VM 2's lamp lit");
+    vm.bus.set_vm_lamp(1, true);
+    vm.bus.set_vm_lamp(2, false);
+    vm.run_steps(3_000_000);
+    assert_eq!(lamp(&vm), 10, "VM 1's lamp is not VM 2's");
+}
+
+#[test]
+fn a_window_the_screen_cut_off_is_drawn_when_the_screen_grows() {
+    // At 768x512 the window, 576 lines down to its content's bottom, runs off the screen.
+    let Some(mut vm) = boot() else {
+        eprintln!("ROMs or disks not found, skipping the VMX68K test");
+        return;
+    };
+    assert_eq!(vm.bus.crtc.active_resolution(), (768, 512));
+    click(&mut vm, DRIVE_ICON, 2, 3_000_000);
+    click(&mut vm, (104, 255), 2, 8_000_000);
+    let events = vm.bus.take_vm_events();
+    let [VmEvent::Opened { window, .. }] = events[..] else {
+        panic!("VMX68K.X must open one VM: {events:?}");
+    };
+    vm.bus.request_screen_resolution(1024, 768);
+    for _ in 0..5_000_000 {
+        if vm.bus.crtc.active_resolution() == (1024, 768) {
+            break;
+        }
+        vm.step();
+    }
+    vm.run_steps(5_000_000);
+    screenshot(&vm, "grown");
+    // What was off the screen is clear for the VM's screen, its visible region reaches it,
+    // and the window's frame is there.
+    for at in [(400, 520), (400, 575), (800, 300), (800, 575)] {
+        assert_eq!(text_index(&vm, at), 0, "{at:?}");
+    }
+    let layout = vm.bus.vm_window_layout(window).unwrap();
+    let (right, bottom) = layout.visible.iter().fold((0, 0), |(r, b), v| (r.max(v.2), b.max(v.3)));
+    assert_eq!((right, bottom), (808, 576));
+    assert_ne!(text_index(&vm, (400, 576)), 0, "the bottom of the frame");
+}

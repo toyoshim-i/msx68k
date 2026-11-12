@@ -384,6 +384,8 @@ impl X68kBus {
         let width = width.clamp(256, 3840);
         let height = height.clamp(256, 2160);
         self.target_resolution = Some((width, height));
+        // VMX68K.SX's windows, the parts the old screen cut off included, are drawn anew.
+        self.redraw_vm_windows();
 
         let (old_w, old_h) = self.crtc.active_resolution();
         let old_was_ext = self.is_ext_tvram_active();

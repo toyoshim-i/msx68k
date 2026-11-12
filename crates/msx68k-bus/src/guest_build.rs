@@ -74,8 +74,9 @@ pub fn build_guest_x_executable(
     let mut x_bytes = std::fs::read(&temp_out).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&temp_out);
 
-    // If payload begins with 'OBJR' at .text (+64) and exec is 0, set entry point to 0x00000020
-    if x_bytes.len() >= 68 && &x_bytes[64..68] == b"OBJR" {
+    // If payload begins with an SX-Window module header ('OBJR', 'OBJO', or 'OBJC') at .text
+    // (+64) and exec is 0, set entry point to 0x00000020, past the 32-byte header
+    if x_bytes.len() >= 68 && matches!(&x_bytes[64..68], b"OBJR" | b"OBJO" | b"OBJC") {
         let cur_exec = u32::from_be_bytes([x_bytes[8], x_bytes[9], x_bytes[10], x_bytes[11]]);
         if cur_exec == 0 {
             x_bytes[8..12].copy_from_slice(&0x0000_0020u32.to_be_bytes());
