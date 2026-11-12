@@ -1040,7 +1040,7 @@ The msx68k settings app: a hybrid CLI and interactive SX-Window GUI application 
     - `SHELL/SXWIN.ENV`: configured with canonical search path `path=A:\;A:\SHELL;A:\SYS;A:\BIN;A:\X68;A:\ｼｬｰﾍﾟﾝ;A:\ｼｬｰﾍﾟﾝ\EXCOM;A:\FONT;A:\SAMPLE;`.
     - `.ENV` Files (`ｼｬｰﾍﾟﾝ\ｺﾝｿｰﾙ.ENV` etc.): preserved byte-for-byte as original binary `'EdEV'` databases without offset distortion.
   - **Mouse Startup Acceleration**:
-    - During boot and title sequences, VM executes in unpaced Burst mode until graphics desktop mode is reached and active mouse polling begins (`is_mouse_polling_active` checks `vicon` graphics display registers and `scc.poll_count() >= 8`).
+    - During boot and title sequences, VM executes in unpaced Burst mode until graphics desktop mode is reached and active mouse polling begins (`is_mouse_polling_active` checks that VICON R2 shows every layer, `$003F`, and `scc.poll_count() >= 8`). The graphics mode in R0 is not checked: SX-Window picks `$0004` or `$0003` depending on its environment, and requiring `$0004` left Burst on virtual time for good on some setups, so double-click intervals shrank with the CPU speed.
     - Once mouse polling starts, peripheral pacing locks to exact 60Hz wall-clock time (`run_burst_frame` with 166,667 10MHz ticks/frame).
 
 ### 7.4 Host Emulator Integration

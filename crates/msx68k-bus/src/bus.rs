@@ -648,11 +648,12 @@ impl X68kBus {
         self.tvram.is_some()
     }
 
-    /// Returns `true` once the guest has entered graphics desktop mode and is actively polling the mouse.
+    /// Returns `true` once the guest shows its graphics desktop, every layer on, and is actively
+    /// polling the mouse. The graphics mode in VICON R0 is left out: SX-Window picks it from its
+    /// environment, `$0004` on some setups and `$0003` on others.
     #[inline]
     pub const fn is_mouse_polling_active(&self) -> bool {
-        self.vicon.r0_mode() == 0x0004
-            && self.vicon.r2_display() == 0x003F
+        self.vicon.r2_display() == 0x003F
             && self.scc.poll_count() >= 8
     }
 
