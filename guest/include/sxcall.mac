@@ -206,10 +206,16 @@ DMCautionAlert		.equ	$A2CD
 * Sharp's names (Workroom SX-68K)
 DMRefer			.equ	$A2C4	; Make a dialog from 'DLOG' (id.w, record or 0, behind) -> A0
 DMDispose		.equ	$A2C6	; Close and dispose of a dialog made on the heap
+DMClose			.equ	$A2C5	; Close a dialog whose record is not on the heap
 DMControl		.equ	$A2C7	; Run the current dialog until an item returns (filter) -> D0
 DMDraw			.equ	$A2C8	; Draw all of a dialog's items
 DIGet			.equ	$A2CF	; An item's type, handle, and rectangle (dlg, no.w, 3 buffers)
 DITSet			.equ	$A2D2	; Set an item's text (type.w, handle, Pascal string)
+DITGet			.equ	$A2D1	; Get an item's text (type.w, handle, buffer)
+DIHide			.equ	$A2D8	; Hide an item (dlg, no.w)
+DIShow			.equ	$A2D9	; Show an item again (dlg, no.w)
+CMShine			.equ	$A298	; Highlight a control's part (handle, part.w): 255 inactive
+TMIdle			.equ	$A30E	; Blink a text edit's cursor (handle)
 DMError			.equ	$A2F6	; An alert (flags.w, ASCIIZ) -> D0 the button
 CMValueSet		.equ	$A290	; Set a control's value (handle, value.w)
 CMValueGet		.equ	$A291	; A control's value (handle) -> D0

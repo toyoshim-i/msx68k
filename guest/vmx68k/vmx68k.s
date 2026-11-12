@@ -30,8 +30,29 @@ ITEM_68000	.equ	3
 ITEM_68030	.equ	4
 ITEM_MEMORY	.equ	5
 ITEM_MEMORY_SIZE	.equ	6
-ITEM_LABELS	.equ	7		; Static texts: the title, CPU, メモリ, 68000, 68030
-LABEL_COUNT	.equ	5
+ITEM_SHARED	.equ	12		; The ドライブ row: 共有, カスタム, and 詳細...
+ITEM_CUSTOM	.equ	13
+ITEM_DETAILS	.equ	14
+DRIVE_DIALOG_ID	.equ	2		; The ドライブの詳細 dialog
+ITEM_FEWER	.equ	3		; Its - and + buttons and the number of drives
+ITEM_MORE	.equ	4
+ITEM_COUNT	.equ	5
+ITEM_ROWS	.equ	13		; Its rows: number, ファイル, 共有, パススルー, text field
+ROW_ITEMS	.equ	5
+DRIVE_ROWS	.equ	8
+* A setup's drives, 'V68D': version.w, mode.w (0 shared, 1 custom), count.w, then
+* DRIVE_ROWS entries of kind.w (0 ファイル, 1 共有, 2 パススルー) and a Pascal
+* string of up to 92 bytes, a path or a drive letter
+DRIVES_TYPE	.equ	'V68D'
+DRV_MODE	.equ	2
+DRV_COUNT	.equ	4
+DRV_ENTRIES	.equ	6
+ENTRY_SIZE	.equ	96
+DRIVES_SIZE	.equ	DRV_ENTRIES+DRIVE_ROWS*ENTRY_SIZE
+DIALOG_TEDIT	.equ	118		; A dialog record's TEdit handle, after its window
+DIALOG_RECORD	.equ	136		; A dialog record, 128 bytes, kept in the work area, and
+					; after it the record's offset in the work area, from which
+					; dialog_filter finds the work area: A5 is not this task's then
 D_YESNO		.equ	4		; DMError's はい/いいえ
 SRAM_TYPE	.equ	'SRAM'		; The VM's own SRAM
 SRAM_SIZE	.equ	16384
@@ -75,7 +96,13 @@ dlg_ram:	.ds.w	1
 dlg_type:	.ds.w	1		; DIGet's item type, handle, and rectangle
 dlg_hdl:	.ds.l	1
 dlg_rect:	.ds.w	4
-dlg_ptr:	.ds.l	1		; the dialog's record
+dlg_ptr:	.ds.l	1		; the dialog the dlg_ helpers work on
+cfg_ptr:	.ds.l	1		; the configuration dialog's, while ドライブの詳細 is open
+cfg_dialog:	.ds.b	DIALOG_RECORD	; the configuration dialog's record
+		.ds.w	1		; its offset
+det_dialog:	.ds.b	DIALOG_RECORD	; ドライブの詳細's
+		.ds.w	1
+drives_handle:	.ds.l	1		; a pseudo-handle to vm_drives
 setup_rec:	.ds.w	4		; version, speed, CPU, RAM
 event_rec:
 event_what:	.ds.w	1		; +0: what
@@ -101,6 +128,11 @@ setup_path:	.ds.b	PATH_MAX
 menu_string:	.ds.b	64		; the speed submenu's items as MNConvert2 takes them
 config_string:	.ds.b	32		; the Configuration menu's
 size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
+	.even
+vm_drives:	.ds.b	DRIVES_SIZE	; the setup's drives
+dlg_drives:	.ds.b	DRIVES_SIZE	; the configuration dialog's
+det_drives:	.ds.b	DRIVES_SIZE	; ドライブの詳細's
+dlg_text:	.ds.b	256		; a dialog item's text
 VARS_SIZE:
 sram_buffer:	.ds.b	SRAM_SIZE	; the VM's own SRAM, kept in its setup
 disk_buffer:	.ds.b	DISK_BUFFER_SIZE
@@ -139,6 +171,8 @@ clear_work:
 	move.w	#-1, drive0_fd(a5)
 	move.l	#768 << 16 | 512, screen_size(a5)
 	move.w	#4, vm_ram(a5)		; what setups that do not say have
+	move.w	#1, vm_drives(a5)	; shared, one drive
+	move.w	#1, vm_drives+DRV_COUNT(a5)
 	lea	rects_init(pc), a0
 	lea	rects(a5), a1
 	moveq.l	#RECTS_SIZE/2-1, d0
@@ -646,6 +680,19 @@ load_setup_copy:
 	st	(a1)
 
 load_setup_close:
+	clr.w	-(sp)
+	move.l	#DRIVES_TYPE, -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	move.l	a0, d0
+	beq.s	load_setup_remove
+	movea.l	(a0), a0
+	lea	vm_drives(a5), a1
+	move.w	#DRIVES_SIZE/2-1, d1
+load_setup_drives:
+	move.w	(a0)+, (a1)+
+	dbra	d1, load_setup_drives
+load_setup_remove:
 	SXCALL	TSResRemove		; $A4A4
 load_setup_done:
 	movem.l	(sp)+, d0-d1/a0-a1
@@ -689,6 +736,19 @@ save_setup_add:
 	pea	setup_handle(a5)
 	clr.w	-(sp)
 	move.l	#SETUP_TYPE, -(sp)
+	SXCALL	TSRscAdd		; $A4AA
+	lea	14(sp), sp
+
+	lea	vm_drives(a5), a0
+	move.l	a0, drives_handle(a5)
+	clr.w	-(sp)
+	move.l	#DRIVES_TYPE, -(sp)
+	SXCALL	TSRscRemove		; $A4AC
+	addq.l	#6, sp
+	move.l	#DRIVES_SIZE, -(sp)
+	pea	drives_handle(a5)
+	clr.w	-(sp)
+	move.l	#DRIVES_TYPE, -(sp)
 	SXCALL	TSRscAdd		; $A4AA
 	lea	14(sp), sp
 
@@ -938,31 +998,21 @@ config_dialog:
 	movem.l	d0-d3/a0-a1, -(sp)
 	move.w	vm_cpu(a5), dlg_cpu(a5)
 	move.w	vm_ram(a5), dlg_ram(a5)
+	move.w	#cfg_dialog, cfg_dialog+DIALOG_RECORD(a5)
 	move.l	#-1, -(sp)		; in front
-	clr.l	-(sp)			; its record on the heap
+	pea	cfg_dialog(a5)		; its record in the work area
 	move.w	#CONFIG_DIALOG_ID, -(sp)
 	SXCALL	DMRefer			; $A2C4
 	lea	10(sp), sp
 	move.l	a0, d0
 	beq	config_dialog_done
 	move.l	a0, dlg_ptr(a5)
-	* The labels, static text items from ITEM_LABELS on
-	lea	dialog_labels(pc), a1
-	moveq.l	#ITEM_LABELS, d3
-config_dialog_label:
-	move.w	d3, d0
-	bsr	dlg_item
-	move.l	a1, -(sp)
-	move.l	dlg_hdl(a5), -(sp)
-	move.w	dlg_type(a5), -(sp)
-	SXCALL	DITSet			; $A2D2
-	lea	10(sp), sp
-	moveq.l	#0, d0
-	move.b	(a1), d0
-	lea	1(a1, d0.w), a1
-	addq.w	#1, d3
-	cmpi.w	#ITEM_LABELS+LABEL_COUNT, d3
-	bcs.s	config_dialog_label
+	lea	config_labels(pc), a1
+	bsr	dlg_labels
+	lea	vm_drives(a5), a0
+	lea	dlg_drives(a5), a1
+	bsr	copy_drives
+	bsr	dlg_show_mode
 	bsr	dlg_show_cpu
 	moveq.l	#ITEM_MEMORY, d0
 	bsr	dlg_item
@@ -989,6 +1039,12 @@ config_dialog_loop:
 	beq	config_dialog_68000
 	cmpi.w	#ITEM_68030, d0
 	beq	config_dialog_68030
+	cmpi.w	#ITEM_SHARED, d0
+	beq	config_dialog_shared
+	cmpi.w	#ITEM_CUSTOM, d0
+	beq	config_dialog_custom
+	cmpi.w	#ITEM_DETAILS, d0
+	beq	config_dialog_details
 	cmpi.w	#ITEM_MEMORY, d0
 	bne	config_dialog_loop
 	moveq.l	#ITEM_MEMORY, d0
@@ -1011,6 +1067,19 @@ config_dialog_max:
 	SXCALL	DMDraw			; $A2C8
 	addq.l	#4, sp
 	bra	config_dialog_loop
+config_dialog_shared:
+	clr.w	dlg_drives+DRV_MODE(a5)
+	bsr	dlg_show_mode
+	bra	config_dialog_loop
+config_dialog_custom:
+	move.w	#1, dlg_drives+DRV_MODE(a5)
+	bsr	dlg_show_mode
+	bra	config_dialog_loop
+config_dialog_details:
+	tst.w	dlg_drives+DRV_MODE(a5)
+	beq	config_dialog_loop
+	bsr	drive_dialog
+	bra	config_dialog_loop
 config_dialog_68000:
 	clr.w	dlg_cpu(a5)
 	bsr	dlg_show_cpu
@@ -1027,8 +1096,15 @@ config_dialog_ok:
 	cmp.w	vm_cpu(a5), d0
 	bne.s	config_dialog_changed
 	cmp.w	vm_ram(a5), d1
+	bne.s	config_dialog_changed
+	bsr	drives_differ
 	beq	config_dialog_done
 config_dialog_changed:
+	lea	dlg_drives(a5), a0
+	lea	vm_drives(a5), a1
+	bsr	copy_drives
+	move.w	dlg_cpu(a5), d0
+	move.w	dlg_ram(a5), d1
 	* Another CPU starts at its first speed
 	cmp.w	vm_cpu(a5), d0
 	beq.s	config_dialog_save
@@ -1064,10 +1140,322 @@ config_dialog_done:
 	movem.l	(sp)+, d0-d3/a0-a1
 	rts
 
-* Disposes of the dialog
+* Copies the drives at A0 to A1
+copy_drives:
+	movem.l	d0/a0-a1, -(sp)
+	move.w	#DRIVES_SIZE/2-1, d0
+copy_drives_word:
+	move.w	(a0)+, (a1)+
+	dbra	d0, copy_drives_word
+	movem.l	(sp)+, d0/a0-a1
+	rts
+
+* Sets Z when dlg_drives are the setup's
+drives_differ:
+	movem.l	d0/a0-a1, -(sp)
+	lea	dlg_drives(a5), a0
+	lea	vm_drives(a5), a1
+	move.w	#DRIVES_SIZE/2-1, d0
+drives_differ_word:
+	cmpm.w	(a0)+, (a1)+
+	dbne	d0, drives_differ_word
+	movem.l	(sp)+, d0/a0-a1
+	rts
+
+* Sets the dialog's static texts from the table at A1: item.b, then a Pascal
+* string, up to item 0
+dlg_labels:
+	movem.l	d0/a1, -(sp)
+dlg_labels_next:
+	moveq.l	#0, d0
+	move.b	(a1)+, d0
+	beq.s	dlg_labels_done
+	bsr	dlg_item
+	move.l	a1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	moveq.l	#0, d0
+	move.b	(a1), d0
+	lea	1(a1, d0.w), a1
+	bra.s	dlg_labels_next
+dlg_labels_done:
+	movem.l	(sp)+, d0/a1
+	rts
+
+* Sets the ドライブ row to dlg_drives' mode: its switches, and 詳細... inactive in
+* shared mode
+dlg_show_mode:
+	movem.l	d0-d2/a0-a1, -(sp)
+	moveq.l	#ITEM_SHARED, d0
+	bsr	dlg_item
+	moveq.l	#0, d1
+	tst.w	dlg_drives+DRV_MODE(a5)
+	seq	d1
+	andi.w	#1, d1
+	move.w	d1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	moveq.l	#ITEM_CUSTOM, d0
+	bsr	dlg_item
+	move.w	dlg_drives+DRV_MODE(a5), -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	moveq.l	#ITEM_DETAILS, d0
+	bsr	dlg_item
+	move.w	#255, d1		; inactive
+	tst.w	dlg_drives+DRV_MODE(a5)
+	beq.s	dlg_show_mode_shine
+	moveq.l	#0, d1
+dlg_show_mode_shine:
+	move.w	d1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMShine			; $A298
+	addq.l	#6, sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* -----------------------------------------------------------------------------
+* Helper: drive_dialog
+* ドライブの詳細, custom mode's drives: how many, and each one's kind and path or
+* drive letter. 設定 keeps the changes in dlg_drives, for the configuration
+* dialog's 設定 to save.
+* -----------------------------------------------------------------------------
+drive_dialog:
+	movem.l	d0-d4/a0-a2, -(sp)
+	lea	dlg_drives(a5), a0
+	lea	det_drives(a5), a1
+	bsr	copy_drives
+	move.l	dlg_ptr(a5), cfg_ptr(a5)
+	move.w	#det_dialog, det_dialog+DIALOG_RECORD(a5)
+	move.l	#-1, -(sp)
+	pea	det_dialog(a5)
+	move.w	#DRIVE_DIALOG_ID, -(sp)
+	SXCALL	DMRefer			; $A2C4
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq	drive_dialog_back
+	move.l	a0, dlg_ptr(a5)
+	lea	drive_labels(pc), a1
+	bsr	dlg_labels
+	moveq.l	#0, d3
+drive_dialog_row:
+	* The row's number, kind, and text
+	lea	dlg_text(a5), a0
+	move.b	#1, (a0)
+	move.b	d3, d0
+	addi.b	#'1', d0
+	move.b	d0, 1(a0)
+	bsr	row_item
+	move.w	d4, d0
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	move.w	d4, d0
+	addq.w	#4, d0
+	bsr	dlg_item
+	bsr	row_entry
+	pea	2(a2)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	bsr	det_show_kind
+	addq.w	#1, d3
+	cmpi.w	#DRIVE_ROWS, d3
+	bcs.s	drive_dialog_row
+	bsr	det_show_count
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	WMShow			; $A207
+	SXCALL	GMSetGraph		; $A131
+	SXCALL	DMDraw			; $A2C8
+	addq.l	#4, sp
+
+drive_dialog_loop:
+	pea	dialog_filter(pc)
+	SXCALL	DMControl		; $A2C7
+	addq.l	#4, sp
+	cmpi.w	#ITEM_OK, d0
+	beq	drive_dialog_ok
+	cmpi.w	#ITEM_CANCEL, d0
+	beq	drive_dialog_close
+	cmpi.w	#ITEM_FEWER, d0
+	beq.s	drive_dialog_fewer
+	cmpi.w	#ITEM_MORE, d0
+	beq.s	drive_dialog_more
+	subi.w	#ITEM_ROWS, d0
+	bcs.s	drive_dialog_loop
+	ext.l	d0
+	divu	#ROW_ITEMS, d0
+	move.w	d0, d3			; the row
+	swap	d0			; its item: 1 to 3 the kinds
+	subq.w	#1, d0
+	cmpi.w	#3, d0
+	bcc.s	drive_dialog_loop
+	bsr	row_entry
+	move.w	d0, (a2)
+	bsr	det_show_kind
+	bra.s	drive_dialog_loop
+drive_dialog_fewer:
+	cmpi.w	#1, det_drives+DRV_COUNT(a5)
+	bls.s	drive_dialog_loop
+	subq.w	#1, det_drives+DRV_COUNT(a5)
+	bra.s	drive_dialog_count
+drive_dialog_more:
+	cmpi.w	#DRIVE_ROWS, det_drives+DRV_COUNT(a5)
+	bcc	drive_dialog_loop
+	addq.w	#1, det_drives+DRV_COUNT(a5)
+drive_dialog_count:
+	bsr	det_show_count
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	DMDraw			; $A2C8
+	addq.l	#4, sp
+	bra	drive_dialog_loop
+
+drive_dialog_ok:
+	* Each row's text, up to 92 bytes
+	moveq.l	#0, d3
+drive_dialog_take:
+	bsr	row_item
+	move.w	d4, d0
+	addq.w	#4, d0
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITGet			; $A2D1
+	lea	10(sp), sp
+	bsr	row_entry
+	lea	dlg_text(a5), a0
+	moveq.l	#0, d0
+	move.b	(a0), d0
+	cmpi.w	#92, d0
+	bls.s	drive_dialog_trim
+	moveq.l	#92, d0
+drive_dialog_trim:
+	* Without the spaces the field ends with
+	tst.w	d0
+	beq.s	drive_dialog_len
+	cmpi.b	#' ', (a0, d0.w)
+	bne.s	drive_dialog_len
+	subq.w	#1, d0
+	bra.s	drive_dialog_trim
+drive_dialog_len:
+	lea	2(a2), a1
+	move.b	d0, (a1)+
+	addq.l	#1, a0
+	bra.s	drive_dialog_copy_next
+drive_dialog_copy:
+	move.b	(a0)+, (a1)+
+drive_dialog_copy_next:
+	dbra	d0, drive_dialog_copy
+	addq.w	#1, d3
+	cmpi.w	#DRIVE_ROWS, d3
+	bcs.s	drive_dialog_take
+	lea	det_drives(a5), a0
+	lea	dlg_drives(a5), a1
+	bsr	copy_drives
+drive_dialog_close:
+	bsr	dlg_dispose
+drive_dialog_back:
+	move.l	cfg_ptr(a5), dlg_ptr(a5)
+	clr.l	cfg_ptr(a5)
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	movem.l	(sp)+, d0-d4/a0-a2
+	rts
+
+* D4.W: the first item of row D3.W
+row_item:
+	move.w	d3, d4
+	mulu	#ROW_ITEMS, d4
+	addi.w	#ITEM_ROWS, d4
+	rts
+
+* A2: det_drives' entry of row D3.W
+row_entry:
+	move.l	d0, -(sp)
+	move.w	d3, d0
+	mulu	#ENTRY_SIZE, d0
+	lea	det_drives+DRV_ENTRIES(a5), a2
+	adda.l	d0, a2
+	move.l	(sp)+, d0
+	rts
+
+* Sets row D3.W's kind switches to its entry's kind
+det_show_kind:
+	movem.l	d0-d4/a0-a2, -(sp)
+	bsr	row_item
+	bsr	row_entry
+	moveq.l	#0, d2
+det_show_kind_next:
+	move.w	d4, d0
+	addq.w	#1, d0
+	add.w	d2, d0
+	bsr	dlg_item
+	moveq.l	#0, d1
+	cmp.w	(a2), d2
+	seq	d1
+	andi.w	#1, d1
+	move.w	d1, -(sp)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMValueSet		; $A290
+	addq.l	#6, sp
+	addq.w	#1, d2
+	cmpi.w	#3, d2
+	bcs.s	det_show_kind_next
+	movem.l	(sp)+, d0-d4/a0-a2
+	rts
+
+* Shows the number of drives, and their rows only
+det_show_count:
+	movem.l	d0-d4/a0-a2, -(sp)
+	lea	dlg_text(a5), a0
+	move.b	#1, (a0)
+	move.w	det_drives+DRV_COUNT(a5), d0
+	addi.b	#'0', d0
+	move.b	d0, 1(a0)
+	moveq.l	#ITEM_COUNT, d0
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5), -(sp)
+	move.w	dlg_type(a5), -(sp)
+	SXCALL	DITSet			; $A2D2
+	lea	10(sp), sp
+	moveq.l	#0, d3
+det_show_row:
+	bsr	row_item
+	moveq.l	#ROW_ITEMS-1, d2
+det_show_item:
+	move.w	d4, -(sp)
+	move.l	dlg_ptr(a5), -(sp)
+	cmp.w	det_drives+DRV_COUNT(a5), d3
+	bcc.s	det_hide_item
+	SXCALL	DIShow			; $A2D9
+	bra.s	det_shown_item
+det_hide_item:
+	SXCALL	DIHide			; $A2D8
+det_shown_item:
+	addq.l	#6, sp
+	addq.w	#1, d4
+	dbra	d2, det_show_item
+	addq.w	#1, d3
+	cmpi.w	#DRIVE_ROWS, d3
+	bcs.s	det_show_row
+	movem.l	(sp)+, d0-d4/a0-a2
+	rts
+
+* Closes the dialog, whose record is in the work area
 dlg_dispose:
 	move.l	dlg_ptr(a5), -(sp)
-	SXCALL	DMDispose		; $A2C6
+	SXCALL	DMClose			; $A2C5
 	addq.l	#4, sp
 	clr.l	dlg_ptr(a5)
 	rts
@@ -1140,12 +1528,29 @@ dlg_size_tens:
 * -----------------------------------------------------------------------------
 * Helper: dialog_filter (dlgPtr, eventRec on the stack), which DMControl calls
 * with each event: the VM's requests are served and the window drawn meanwhile.
-* Returns 0, the event as it is.
+* Returns 0, the event as it is. A5 is not this task's work area here: it is
+* found from the dialog's record, which is in it.
 * -----------------------------------------------------------------------------
 dialog_filter:
-	movem.l	d1-d7/a0-a4, -(sp)
-	movea.l	8+48(sp), a0		; the event
+	movem.l	d1-d7/a0-a5, -(sp)
+	* The work area, from the dialog's record in it
+	movea.l	4+52(sp), a5
+	move.w	DIALOG_RECORD(a5), d0
+	suba.w	d0, a5
+	movea.l	8+52(sp), a0		; the event
 	move.w	(a0), d0
+	bne.s	dialog_filter_user
+	* E_IDLE: the text field's cursor blinks, in ドライブの詳細, the dialog with them
+	tst.l	cfg_ptr(a5)
+	beq.s	dialog_filter_done
+	movea.l	dlg_ptr(a5), a0
+	move.l	DIALOG_TEDIT(a0), d0
+	beq.s	dialog_filter_done
+	move.l	d0, -(sp)
+	SXCALL	TMIdle			; $A30E
+	addq.l	#4, sp
+	bra.s	dialog_filter_done
+dialog_filter_user:
 	cmpi.w	#14, d0			; E_USER1
 	bne.s	dialog_filter_update
 	bsr	serve_disk
@@ -1175,7 +1580,7 @@ dialog_filter_back:
 	addq.l	#4, sp
 dialog_filter_done:
 	moveq.l	#0, d0
-	movem.l	(sp)+, d1-d7/a0-a4
+	movem.l	(sp)+, d1-d7/a0-a5
 	rts
 
 * -----------------------------------------------------------------------------
@@ -1438,14 +1843,27 @@ speed_items_68000:
 	.dc.b	"10MHz", 0, "16MHz", 0, "24MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
 speed_items_68030:
 	.dc.b	"25MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
-* The dialog's labels, Pascal strings in the order of its items from ITEM_LABELS:
-* "VMの設定", "CPU", "メモリ", "68000", "68030"
-dialog_labels:
-	.dc.b	8, $56, $4D, $82, $CC, $90, $DD, $92, $E8
-	.dc.b	3, "CPU"
-	.dc.b	6, $83, $81, $83, $82, $83, $8A
-	.dc.b	5, "68000"
-	.dc.b	5, "68030"
+* The dialogs' static texts: item.b, then a Pascal string, up to item 0
+config_labels:
+	.dc.b	7, 8, $56, $4D, $82, $CC, $90, $DD, $92, $E8		; VMの設定
+	.dc.b	8, 3, "CPU"
+	.dc.b	9, 6, $83, $81, $83, $82, $83, $8A		; メモリ
+	.dc.b	10, 5, "68000"
+	.dc.b	11, 5, "68030"
+	.dc.b	15, 8, $83, $68, $83, $89, $83, $43, $83, $75		; ドライブ
+	.dc.b	16, 4, $8B, $A4, $97, $4C		; 共有
+	.dc.b	17, 8, $83, $4A, $83, $58, $83, $5E, $83, $80		; カスタム
+	.dc.b	0
+drive_labels:
+	.dc.b	6, 14, $83, $68, $83, $89, $83, $43, $83, $75, $82, $CC, $8F, $DA, $8D, $D7		; ドライブの詳細
+	.dc.b	7, 10, $83, $68, $83, $89, $83, $43, $83, $75, $90, $94		; ドライブ数
+	.dc.b	8, 4, $94, $D4, $8D, $86		; 番号
+	.dc.b	9, 8, $83, $74, $83, $40, $83, $43, $83, $8B		; ファイル
+	.dc.b	10, 4, $8B, $A4, $97, $4C		; 共有
+	.dc.b	11, 10, $83, $70, $83, $58, $83, $58, $83, $8B, $81, $5B		; パススルー
+	.dc.b	12, 8, $8A, $84, $82, $E8, $93, $96, $82, $C4		; 割り当て
+	.dc.b	0
+	.even
 * "VMの再起動で有効になります。今すぐ再起動しますか？"
 restart_message:
 	.dc.b	$56, $4D, $82, $CC, $8D, $C4, $8B, $4E, $93, $AE, $82, $C5, $97, $4C, $8C, $F8, $82, $C9, $82, $C8, $82, $E8, $82, $DC, $82, $B7, $81, $42, $8D, $A1, $82, $B7, $82, $AE, $8D, $C4, $8B, $4E, $93, $AE, $82, $B5, $82, $DC, $82, $B7, $82, $A9, $81, $48, 0

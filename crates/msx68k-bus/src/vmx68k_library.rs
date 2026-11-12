@@ -23,6 +23,23 @@ pub const ITEM_68000: u16 = 3;
 pub const ITEM_68030: u16 = 4;
 pub const ITEM_MEMORY: u16 = 5;
 pub const ITEM_MEMORY_SIZE: u16 = 6;
+/// The ドライブ row: 共有 and カスタム, and 詳細..., after the first labels (7 to 11).
+pub const ITEM_SHARED: u16 = 12;
+pub const ITEM_CUSTOM: u16 = 13;
+pub const ITEM_DETAILS: u16 = 14;
+
+/// `'DLOG'` and `'DITL'` of the ドライブの詳細 dialog, custom mode's drives.
+pub const DRIVE_DIALOG_ID: u16 = 2;
+/// Its items: 設定, 取消, − and ＋ for the number of drives and the number, the labels (6 to
+/// 12), then [`DRIVE_ROWS`] rows of [`ROW_ITEMS`] items each from [`ITEM_ROWS`]: the drive's
+/// number, its kind's three switches (ファイル, 共有, パススルー), and its text field.
+pub const ITEM_FEWER: u16 = 3;
+pub const ITEM_MORE: u16 = 4;
+pub const ITEM_COUNT: u16 = 5;
+pub const ITEM_ROWS: u16 = 13;
+pub const ROW_ITEMS: u16 = 5;
+/// Drives custom mode has at most.
+pub const DRIVE_ROWS: u16 = 8;
 
 /// `'PLOT'` of the Configuration icon, a plot image ([`plot_image`]).
 pub const CONFIGURATION_ICON_ID: u16 = 1;
@@ -184,6 +201,26 @@ pub fn add_setup_icon(library: &[u8]) -> Option<Vec<u8>> {
     Some(library.to_bytes())
 }
 
+/// Bytes of a drive's entry in `'V68D'`: its kind, then a Pascal string of up to 92 bytes.
+pub const DRIVE_ENTRY_BYTES: usize = 96;
+
+/// A setup's drives, `'V68D'` 0: its version (1), the mode (0 shared, 1 custom), the number of
+/// drives, then [`DRIVE_ROWS`] entries ([`DRIVE_ENTRY_BYTES`]) of a kind (0 ファイル, 1 共有, 2
+/// パススルー) and what it is given, a path or a drive letter. Setups without it are shared.
+pub fn setup_drives(custom: bool, drives: &[(u16, &[u8])]) -> Vec<u8> {
+    let mut data: Vec<u8> = [1, custom as u16, drives.len() as u16].iter().flat_map(|w| w.to_be_bytes()).collect();
+    for row in 0..DRIVE_ROWS as usize {
+        let mut entry = vec![0u8; DRIVE_ENTRY_BYTES];
+        if let Some((kind, text)) = drives.get(row) {
+            entry[..2].copy_from_slice(&kind.to_be_bytes());
+            entry[2] = text.len().min(92) as u8;
+            entry[3..3 + text.len().min(92)].copy_from_slice(&text[..text.len().min(92)]);
+        }
+        data.extend_from_slice(&entry);
+    }
+    data
+}
+
 /// Builds a VM setup (`*.V68`) as VMX68K.X writes it: `'V68S'` 0, its version (2), the speed
 /// (as `VmSpeed`'s for the CPU), the CPU (0 the 68000, 1 the 68030), and the RAM in MB, and
 /// `'SRAM'` 0, the VM's 16 KB of SRAM once it has one. Version 1 had the speed only, for a
@@ -265,16 +302,26 @@ const D_DISABL: u8 = 0x80;
 const SLIDER_PROC: u16 = 0x13 << 4;
 
 /// Where the configuration dialog shows, centered on a 768×512 screen.
-const CONFIG_DIALOG_BOUNDS: [i16; 4] = [254, 186, 514, 326];
+const CONFIG_DIALOG_BOUNDS: [i16; 4] = [254, 176, 514, 336];
+/// Where the ドライブの詳細 dialog shows, centered on a 768×512 screen.
+const DRIVE_DIALOG_BOUNDS: [i16; 4] = [149, 118, 619, 393];
+/// Editable text items' type (`DIALOG.H`).
+const D_EDTTXT: u8 = 0x10;
+
+/// An editable text item's data, as the Workroom's samples have it: as many spaces as the text
+/// may hold, a Pascal string, which the text field takes as its size.
+fn text_field(size: u8) -> Vec<u8> {
+    pascal_even(&vec![b' '; size as usize])
+}
 const MEMORY_SLIDER_BOUNDS: [i16; 4] = [70, 60, 200, 76];
 
 /// Items of the configuration dialog (see [`ITEM_OK`] and on), in Shift_JIS. Radio buttons are
 /// switches without a label, as in Sharp's dialogs, so their labels are static text: the
-/// title, CPU, メモリ, 68000, and 68030, items 7 to 11.
+/// title, CPU, メモリ, 68000, and 68030, items 7 to 11, and ドライブ, 共有, and カスタム, 15 to 17.
 fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     vec![
-        ([150, 108, 190, 126], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
-        ([200, 108, 240, 126], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
+        ([150, 132, 190, 150], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
+        ([200, 132, 240, 150], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
         ([70, 36, 103, 45], D_RADBTN, vec![0, 0]),
         ([150, 36, 183, 45], D_RADBTN, vec![0, 0]),
         (MEMORY_SLIDER_BOUNDS, D_RSCITM, MEMORY_SLIDER_ID.to_be_bytes().to_vec()),
@@ -284,7 +331,43 @@ fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
         ([14, 63, 64, 75], D_STCTXT | D_DISABL, static_text()), // メモリ
         ([107, 35, 145, 47], D_STCTXT | D_DISABL, static_text()),
         ([187, 35, 225, 47], D_STCTXT | D_DISABL, static_text()),
+        ([70, 90, 103, 99], D_RADBTN, vec![0, 0]),
+        ([70, 108, 103, 117], D_RADBTN, vec![0, 0]),
+        ([160, 104, 210, 122], D_CHRBTN, pascal_even(b"\x8F\xDA\x8D\xD7\x2E\x2E\x2E")), // 詳細...
+        ([14, 89, 64, 101], D_STCTXT | D_DISABL, static_text()), // ドライブ
+        ([107, 89, 145, 101], D_STCTXT | D_DISABL, static_text()), // 共有
+        ([107, 107, 157, 119], D_STCTXT | D_DISABL, static_text()), // カスタム
     ]
+}
+
+/// Items of the ドライブの詳細 dialog (see [`ITEM_FEWER`] and on), whose texts VMX68K.X sets:
+/// the labels ドライブの詳細, ドライブ数, 番号, ファイル, 共有, パススルー, and 割り当て, then the rows.
+fn drive_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
+    let mut items = vec![
+        ([360, 247, 400, 265], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
+        ([410, 247, 450, 265], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
+        ([80, 30, 96, 46], D_CHRBTN, pascal_even(b"-")),
+        ([118, 30, 134, 46], D_CHRBTN, pascal_even(b"+")),
+        ([100, 32, 114, 44], D_STCTXT | D_DISABL, static_text()),
+        ([190, 6, 290, 20], D_STCTXT | D_DISABL, static_text()), // ドライブの詳細
+        ([14, 32, 76, 44], D_STCTXT | D_DISABL, static_text()), // ドライブ数
+        ([14, 58, 44, 70], D_STCTXT | D_DISABL, static_text()), // 番号
+        ([54, 58, 114, 70], D_STCTXT | D_DISABL, static_text()), // ファイル
+        ([124, 58, 184, 70], D_STCTXT | D_DISABL, static_text()), // 共有
+        ([194, 58, 254, 70], D_STCTXT | D_DISABL, static_text()), // パススルー
+        ([264, 58, 324, 70], D_STCTXT | D_DISABL, static_text()), // 割り当て
+    ];
+    for row in 0..DRIVE_ROWS as i16 {
+        let y = 78 + row * 20;
+        items.push(([20, y, 34, y + 12], D_STCTXT | D_DISABL, static_text()));
+        for kind in 0..3 {
+            let x = 54 + kind * 70;
+            items.push(([x, y + 2, x + 33, y + 11], D_RADBTN, vec![0, 0]));
+        }
+        // A field handles its own clicks and keys, so it does not return from DMControl.
+        items.push(([264, y - 1, 450, y + 13], D_EDTTXT | D_DISABL, text_field(92)));
+    }
+    items
 }
 
 /// Builds `VMX68K.LB`.
@@ -296,6 +379,11 @@ pub fn vmx68k_library() -> Vec<u8> {
         Resource::new(CONFIG_DIALOG_ID, dialog_template(CONFIG_DIALOG_BOUNDS, CONFIG_DIALOG_ID)),
     );
     library.insert(b"DITL", Resource::new(CONFIG_DIALOG_ID, dialog_items(&config_dialog_items())));
+    library.insert(
+        b"DLOG",
+        Resource::new(DRIVE_DIALOG_ID, dialog_template(DRIVE_DIALOG_BOUNDS, DRIVE_DIALOG_ID)),
+    );
+    library.insert(b"DITL", Resource::new(DRIVE_DIALOG_ID, dialog_items(&drive_dialog_items())));
     library.insert(
         b"CNTL",
         Resource::new(MEMORY_SLIDER_ID, control(MEMORY_SLIDER_BOUNDS, 4, 1, 12, SLIDER_PROC)),
@@ -380,6 +468,9 @@ mod tests {
         );
         let library = ResourceLibrary::parse(&vmx68k_library()).unwrap();
         let ditl = &library.get(b"DITL", CONFIG_DIALOG_ID).unwrap().data;
-        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 10, "eleven items");
+        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 16, "seventeen items");
+        let ditl = &library.get(b"DITL", DRIVE_DIALOG_ID).unwrap().data;
+        let items = u16::from_be_bytes([ditl[0], ditl[1]]) + 1;
+        assert_eq!(items, ITEM_ROWS - 1 + DRIVE_ROWS * ROW_ITEMS);
     }
 }

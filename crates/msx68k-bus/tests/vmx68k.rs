@@ -99,6 +99,32 @@ fn text_index(vm: &X68kVm, (x, y): (usize, usize)) -> u8 {
     (0..4).fold(0, |v, p| v | ((tvram[p * plane + at] >> bit) & 1) << p)
 }
 
+/// Types `text` on the primary's keyboard: lowercase letters, digits, and `:\.`.
+fn type_keys(vm: &mut X68kVm, text: &str) {
+    for c in text.chars() {
+        let code = match c {
+            'a'..='z' => {
+                let row = b"qwertyuiopasdfghjklzxcvbnm";
+                let codes = [
+                    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1E, 0x1F, 0x20, 0x21,
+                    0x22, 0x23, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30,
+                ];
+                codes[row.iter().position(|&b| b == c as u8).unwrap()]
+            }
+            '1'..='9' => 0x02 + (c as u8 - b'1'),
+            '0' => 0x0B,
+            ':' => 0x28,
+            '.' => 0x32,
+            '\\' => 0x0E,
+            _ => panic!("no key for {c:?}"),
+        };
+        for byte in [code, code | 0x80] {
+            vm.bus.mfp.push_keyboard_byte(byte);
+            vm.run_steps(300_000);
+        }
+    }
+}
+
 /// What the setup `name` of `\VMX68K` on the VM's disk keeps.
 #[derive(Debug, PartialEq, Eq)]
 struct Setup {
@@ -122,6 +148,24 @@ fn saved_setup(vm: &X68kVm, name: &str) -> Option<Setup> {
         ram_mb: word(settings, 6),
         sram: setup.get(b"SRAM", 0).is_some(),
     })
+}
+
+/// The drives the setup `name` keeps: custom mode, and each drive's kind and text.
+fn saved_drives(vm: &X68kVm, name: &str) -> Option<(bool, Vec<(u16, String)>)> {
+    let mut image = vm.bus.scsi_hdd_data(0)?.to_vec();
+    let volume = HumanVolume::open(&mut image)?;
+    let data = volume.read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))?;
+    let setup = ResourceLibrary::parse(&data)?;
+    let drives = &setup.get(b"V68D", 0)?.data;
+    let word = |at: usize| u16::from_be_bytes([drives[at], drives[at + 1]]);
+    let entries = (0..word(4) as usize)
+        .map(|row| {
+            let at = 6 + row * 96;
+            let len = drives[at + 2] as usize;
+            (word(at), String::from_utf8_lossy(&drives[at + 3..at + 3 + len]).into_owned())
+        })
+        .collect();
+    Some((word(2) == 1, entries))
 }
 
 /// A 68000 setup with 4 MB.
@@ -429,22 +473,48 @@ fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     assert_ne!(text_index(&vm, (300, 200)), 0, "the dialog over the VM's screen");
 
     // The 68030, and the slider's knob dragged from 4 MB to 8 MB.
-    click(&mut vm, (420, 226), 1, 2_000_000);
-    point(&mut vm, (361, 254), 300_000);
+    click(&mut vm, (420, 216), 1, 2_000_000);
+    point(&mut vm, (361, 244), 300_000);
     vm.bus.scc.set_mouse_buttons(true, false);
-    point(&mut vm, (361, 254), 300_000);
+    point(&mut vm, (361, 244), 300_000);
     for x in (361..=408).step_by(4) {
-        point(&mut vm, (x, 254), 100_000);
+        point(&mut vm, (x, 244), 100_000);
     }
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (408, 254), 1_000_000);
+    point(&mut vm, (408, 244), 1_000_000);
     screenshot(&vm, "dialog_set");
 
+    // カスタム drives: 詳細... gives three, an image file, a shared drive, and a passthrough one.
+    click(&mut vm, (340, 288), 1, 2_000_000);
+    click(&mut vm, (439, 289), 1, 6_000_000);
+    screenshot(&vm, "dialog_drives");
+    click(&mut vm, (275, 156), 1, 2_000_000);
+    click(&mut vm, (275, 156), 1, 2_000_000);
+    click(&mut vm, (290, 222), 1, 2_000_000);
+    click(&mut vm, (360, 242), 1, 2_000_000);
+    click(&mut vm, (500, 202), 1, 2_000_000);
+    type_keys(&mut vm, "a:\\vmx68k\\game.xdf");
+    click(&mut vm, (500, 222), 1, 2_000_000);
+    type_keys(&mut vm, "c:");
+    click(&mut vm, (500, 242), 1, 2_000_000);
+    type_keys(&mut vm, "b:");
+    screenshot(&vm, "dialog_drives_set");
+    click(&mut vm, (529, 374), 1, 4_000_000);
+    screenshot(&vm, "dialog_drives_kept");
+    assert_eq!(saved_drives(&vm, "DEFAULT").map(|(custom, _)| custom), Some(false), "kept, not saved yet");
+
     // 設定 saves the setup and asks whether to restart the VM now: はい restarts it.
-    click(&mut vm, (424, 303), 1, 4_000_000);
+    click(&mut vm, (424, 317), 1, 4_000_000);
     screenshot(&vm, "dialog_restart");
     assert_eq!(vm.bus.take_vm_events(), [], "not before the answer");
     assert_eq!(saved_setup(&vm, "DEFAULT"), Some(Setup { speed: 0, cpu: 1, ram_mb: 8, sram: false }));
+    assert_eq!(
+        saved_drives(&vm, "DEFAULT"),
+        Some((
+            true,
+            vec![(0, "a:\\vmx68k\\game.xdf".into()), (1, "c:".into()), (2, "b:".into())]
+        ))
+    );
     click(&mut vm, (610, 198), 1, 4_000_000);
     assert_eq!(
         vm.bus.take_vm_events(),

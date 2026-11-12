@@ -101,6 +101,14 @@ official SX-Window programming manuals.
   data's size, so data is padded to an even size inside it, or DMRefer faults (system error 2).
 - Type 7 items name a `'CNTL'` by its ID; radio buttons (type 5) are 33×9 switches without a
   label; how static text (type 8) keeps its text is unknown, `DITSet` sets it.
+- Editable text items, as the Workroom's samples (`ダイアログ.LB`, `ファイル操作.LB`) have them,
+  are type `$90` (`D_EDTTXT` with `D_DISABL`: they handle their clicks and keys and do not
+  return from `DMControl`), their data as many spaces as they hold, a Pascal string: the
+  field's size. `DITGet` returns the text with its trailing spaces. The samples' radio buttons
+  and check boxes have no data.
+- `DMControl` calls the filter with A5 not the task's: VMX68K.X keeps its dialog records in its
+  work area (`DMRefer` takes the storage; `DMClose` then, not `DMDispose`), with each record's
+  offset after it, and the filter finds the work area from the dialog it is given.
 - `DMControl` returns a slider's item once its drag ends; `DITSet` does not draw the text anew
   (`DMDraw` does). `DMError` with `D_YESNO` returns 1 for はい.
 
