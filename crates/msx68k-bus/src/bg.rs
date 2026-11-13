@@ -1,5 +1,5 @@
 //! Background address generation and palette-code line buffers.
-use crate::Crtc;
+use crate::{sprite::SpriteLine, Crtc};
 
 pub const BG_WIDTH: usize = 512;
 
@@ -8,7 +8,7 @@ pub struct BgLine {
     planes: [[u8; BG_WIDTH]; 2],
 }
 
-fn word(ram: &[u8], offset: usize) -> u16 {
+pub(crate) fn word(ram: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([ram[offset], ram[offset + 1]])
 }
 
@@ -27,20 +27,13 @@ impl BgLine {
         let Some(ram) = ram.filter(|ram| ram.len() >= 0x10000) else {
             return line;
         };
-        let resolution = word(ram, 0x810);
-        // Reserved horizontal/vertical modes have no defined BG scanout here.
-        if resolution & 0x0a != 0 {
+        let Some((origin_x, source_y)) = origin(crtc, ram, y) else {
             return line;
-        }
-        let large = resolution & 1 != 0;
+        };
+        let large = word(ram, 0x810) & 1 != 0;
         let size = if large { 16 } else { 8 };
         let mask = size * 64 - 1;
         let control = word(ram, 0x808);
-        let origin_x = ((word(ram, 0x80c) & 63) as i32 - (crtc.regs[2] & 0xfff) as i32 - 4) * 8;
-        let source_y = y as i32 + (word(ram, 0x80e) & 255) as i32 - (crtc.regs[6] & 0xfff) as i32;
-        if !(0..1024).contains(&source_y) {
-            return line;
-        }
         for plane in 0..if large { 1 } else { 2 } {
             let scroll_x = (word(ram, 0x800 + plane * 4) & 1023) as usize;
             let scroll_y = (word(ram, 0x802 + plane * 4) & 1023) as usize;
@@ -59,12 +52,7 @@ impl BgLine {
                     py = size - 1 - py;
                 }
                 let pattern = (tile & 255) as usize;
-                let offset = if large {
-                    pattern * 128 + (px / 8) * 64 + (py / 8) * 32 + (py & 7) * 4 + (px & 7) / 2
-                } else {
-                    pattern * 32 + py * 4 + px / 2
-                };
-                let nibble = (ram[0x8000 + offset] >> (4 * (1 - (px & 1)))) & 15;
+                let nibble = pattern_pixel(ram, pattern, px, py, large);
                 if nibble != 0 {
                     line.planes[plane][x] = ((tile >> 4) as u8 & 0xf0) | nibble;
                 }
@@ -75,24 +63,57 @@ impl BgLine {
 
     /// Resolve BG0 over BG1, retaining palette codes until final color conversion.
     pub fn output(&self, control: u16) -> [u8; BG_WIDTH] {
+        self.compose(control, None)
+    }
+
+    pub fn output_with_sprites(&self, control: u16, sprites: &SpriteLine) -> [u8; BG_WIDTH] {
+        self.compose(control, Some(sprites))
+    }
+
+    fn compose(&self, control: u16, sprites: Option<&SpriteLine>) -> [u8; BG_WIDTH] {
         if control & 0x200 == 0 {
             return [0; BG_WIDTH];
         }
         std::array::from_fn(|x| {
-            let front = if control & 1 != 0 {
+            let bg0 = if control & 1 != 0 {
                 self.planes[0][x]
             } else {
                 0
             };
-            if front != 0 {
-                front
-            } else if control & 8 != 0 {
+            let bg1 = if control & 8 != 0 {
                 self.planes[1][x]
             } else {
                 0
+            };
+            let (code, priority) = sprites.map_or((0, 0), |line| (line.codes[x], line.priorities[x]));
+            match priority {
+                3 => code,
+                2 if bg0 == 0 => code,
+                1 if bg0 == 0 && bg1 == 0 => code,
+                _ if bg0 != 0 => bg0,
+                _ => bg1,
             }
         })
     }
+}
+
+/// Common sprite/BG coordinate origin and supported resolution gate.
+pub(crate) fn origin(crtc: &Crtc, ram: &[u8], y: u32) -> Option<(i32, i32)> {
+    if word(ram, 0x810) & 0x0a != 0 {
+        return None;
+    }
+    let x = ((word(ram, 0x80c) & 63) as i32 - (crtc.regs[2] & 0xfff) as i32 - 4) * 8;
+    let y = y as i64 + (word(ram, 0x80e) & 255) as i64 - (crtc.regs[6] & 0xfff) as i64;
+    (0..1024).contains(&y).then_some((x, y as i32))
+}
+
+pub(crate) fn pattern_pixel(ram: &[u8], pattern: usize, x: usize, y: usize, large: bool) -> u8 {
+    let offset = if large {
+        pattern * 128 + (x / 8) * 64 + y * 4 + (x & 7) / 2
+    } else {
+        pattern * 32 + y * 4 + x / 2
+    };
+    (ram[0x8000 + offset] >> (4 * (1 - (x & 1)))) & 15
 }
 
 pub fn control(ram: Option<&[u8]>) -> u16 {

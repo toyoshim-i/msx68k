@@ -639,7 +639,7 @@ impl X68kBus {
                     self.sysport.contrast,
                     self.sprite_bg.as_deref(),
                 );
-                self.raster.fetch_background(&self.crtc, self.sprite_bg.as_deref());
+                self.raster.fetch_sprite_bg(&self.crtc, self.sprite_bg.as_deref());
             }
             if sync.v_disp_fell {
                 self.fdc.refresh_remote_media(&mut self.ioi);

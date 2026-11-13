@@ -44,7 +44,7 @@ pub struct ViconUniforms {
     pub contrast: u32,
     pub tvram_row_bytes: u32,
     pub tvram_plane_bytes: u32,
-    /// Raster row-map height (zero for a uniform frame), then BG code buffer offset.
+    /// Raster row-map height (zero for a uniform frame), then sprite/BG code buffer offset.
     pub reserved: [u32; 2],
 }
 

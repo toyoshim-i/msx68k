@@ -22,7 +22,7 @@ the raster fixture also executes a real 68000/MFP interrupt handler. This keeps
 the usual development loop independent of a Human68k or SX-Window boot.
 
 ```sh
-cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test raster --locked -- --test-threads=1
+cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test sprite --test raster --locked -- --test-threads=1
 cargo test --release -p msx68k-vicon --test graphics_modes --test raster --locked -- --test-threads=1
 ```
 

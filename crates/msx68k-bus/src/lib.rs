@@ -17,6 +17,7 @@ pub mod peripherals;
 pub mod raster;
 pub mod remote_fs;
 pub mod scsi;
+pub mod sprite;
 pub mod sx_control_panel;
 pub mod sx_resource;
 pub mod sx_settings;

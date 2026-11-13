@@ -2,6 +2,7 @@
 use crate::{ViconUniforms, MAX_FB_HEIGHT};
 use std::borrow::Cow;
 use msx68k_bus::bg::{self, BgLine, BG_WIDTH};
+use msx68k_bus::sprite::SpriteLine;
 use msx68k_bus::{
     raster::{RasterFrame, RasterState},
     X68kBus, TVRAM_PLANE_BYTES,
@@ -10,7 +11,7 @@ use msx68k_bus::{
 const _: () = assert!(std::mem::size_of::<ViconUniforms>() == 80);
 
 const STATE_WORDS: usize = 20 + 512;
-/// Palette words, row-state records and packed BG codes for at most one full frame.
+/// Palette words, row-state records and packed sprite/BG codes for at most one full frame.
 pub(crate) const VIDEO_BYTES: u64 =
     ((512 + MAX_FB_HEIGHT as usize * (1 + STATE_WORDS + BG_WIDTH / 4)) * 4) as u64;
 
@@ -83,7 +84,7 @@ fn raster_input(bus: &X68kBus, params: &mut ViconUniforms) -> Vec<u32> {
     words
 }
 
-/// BG code history is independent of palette snapshots and has bounded pixel lookup.
+/// Sprite/BG code history is independent of palette snapshots and has bounded pixel lookup.
 pub(crate) fn background_input<'a>(bus: &'a X68kBus, params: &ViconUniforms) -> Cow<'a, [u8]> {
     if let Some(frame) = completed_frame(bus, params) {
         return Cow::Borrowed(&frame.background);
@@ -98,7 +99,10 @@ pub(crate) fn background_input<'a>(bus: &'a X68kBus, params: &ViconUniforms) -> 
     let mut codes = Vec::with_capacity(params.height as usize * BG_WIDTH);
     for y in 0..params.height {
         codes.extend_from_slice(
-            &BgLine::fetch(&bus.crtc, bus.sprite_bg(), y).output(bg::control(bus.sprite_bg())),
+            &BgLine::fetch(&bus.crtc, bus.sprite_bg(), y).output_with_sprites(
+                bg::control(bus.sprite_bg()),
+                &SpriteLine::fetch(&bus.crtc, bus.sprite_bg(), y),
+            ),
         );
     }
     Cow::Owned(codes)

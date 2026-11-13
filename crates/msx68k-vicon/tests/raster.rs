@@ -270,3 +270,70 @@ fn background_text_and_graphics_share_the_final_priority_order() {
         verify(&mut vm, &[(0, 0, expected)]);
     }
 }
+
+fn sprite_fixture() -> X68kVm {
+    let mut vm = background_fixture();
+    vm.bus.crtc.regs[6] = 2;
+    vm.bus.crtc.regs[7] = 130;
+    write(&mut vm, 0xeb080e, 2);
+    write(&mut vm, 0xeb0808, 0x200); // Sprites on, BG planes off.
+    for (offset, value) in [(0, 16), (2, 16), (4, 1), (6, 3)] {
+        write(&mut vm, 0xeb0000 + offset, value);
+    }
+    for offset in (0..128).step_by(2) {
+        write(&mut vm, 0xeb8080 + offset, 0x2222);
+    }
+    vm
+}
+
+#[test]
+fn sprite_prefetch_freezes_attributes_and_codes_before_background_fetch() {
+    let mut vm = sprite_fixture();
+    vm.bus.advance_peripherals(LINE + 65);
+    write(&mut vm, 0xeb0000, 16); // One cycle before sprite row zero fetch.
+    vm.bus.advance_peripherals(1);
+    write(&mut vm, 0xeb8080, 0x3333); // Too late to replace buffered row zero.
+    write(&mut vm, 0xeb0000, 32); // Move later rows sixteen pixels to the right.
+    write(&mut vm, 0xe82204, 0xf800); // Palette conversion is still pending.
+    vm.bus.advance_peripherals(2 * LINE); // Display row zero.
+    write(&mut vm, 0xe82204, 0x003e);
+    vm.bus.advance_peripherals(128 * LINE);
+    verify(&mut vm, &[(0, 0, GREEN), (0, 1, BLACK), (16, 1, BLUE)]);
+    let frame = vm.bus.raster_frame().unwrap();
+    assert_eq!(frame.background[0], 2);
+    assert_eq!(frame.background[512], 0);
+    assert_eq!(frame.background[512 + 16], 2);
+}
+
+#[test]
+fn sprite_fetch_continues_with_both_output_gates_off() {
+    let mut vm = sprite_fixture();
+    write(&mut vm, 0xeb0808, 0);
+    write(&mut vm, 0xe82600, 0);
+    vm.bus.advance_peripherals(LINE + 66);
+    write(&mut vm, 0xeb8080, 0x3333);
+    write(&mut vm, 0xeb0808, 0x200);
+    write(&mut vm, 0xe82600, 0x40);
+    vm.bus.advance_peripherals(130 * LINE);
+    verify(&mut vm, &[(0, 0, BLUE), (15, 0, BLUE)]);
+}
+
+#[test]
+fn sprite_priority_interleaves_with_background_planes_in_both_gpu_paths() {
+    let mut vm = sprite_fixture();
+    write(&mut vm, 0xebc000, 0x0100);
+    write(&mut vm, 0xebe000, 0x0200);
+    write(&mut vm, 0xe82222, 0xf800); // BG0 green.
+    write(&mut vm, 0xe82242, 0x07c0); // BG1 red.
+    for (priority, control, expected) in [
+        (1, 0x229, GREEN),
+        (1, 0x228, RED),
+        (2, 0x229, GREEN),
+        (2, 0x228, BLUE),
+        (3, 0x229, BLUE),
+    ] {
+        write(&mut vm, 0xeb0006, priority);
+        write(&mut vm, 0xeb0808, control);
+        verify(&mut vm, &[(0, 0, expected)]);
+    }
+}

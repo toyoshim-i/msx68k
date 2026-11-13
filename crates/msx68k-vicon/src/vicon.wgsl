@@ -163,7 +163,7 @@ fn text_is_clear(x: u32, y: u32, state: ViconUniforms) -> bool {
     return sample_tvram_index(x, y, state) == 0u;
 }
 
-// BG buffers retain palette codes; the current row's palette converts them here.
+// Sprite/BG buffers retain palette codes; the current row's palette converts them here.
 fn background_color(x: u32, y: u32, state: ViconUniforms, palette_base: u32) -> u32 {
     if (params.reserved.y == 0u || x >= 512u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) { return 0u; }
     let pixel = y * 512u + x;

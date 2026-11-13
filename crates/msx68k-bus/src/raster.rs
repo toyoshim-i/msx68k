@@ -1,6 +1,7 @@
 //! Frame-stable register/palette history, sampled at separate fetch and display stages.
 use crate::{
     bg::{self, BgLine, BG_WIDTH},
+    sprite::SpriteLine,
     Crtc, Vicon,
 };
 
@@ -33,7 +34,7 @@ pub struct RasterFrame {
     pub width: u32,
     pub height: u32,
     pub lines: Vec<RasterLine>,
-    /// Fetched BG palette codes, with a fixed 512-pixel row stride; empty when blank.
+    /// Fetched sprite/BG palette codes, with a fixed 512-pixel row stride; empty when blank.
     pub background: Vec<u8>,
     vertical_timing: [u16; 3],
 }
@@ -46,6 +47,7 @@ pub(crate) struct RasterCapture {
     text_scroll: (u16, u16),
     graphic_scroll: [(u16, u16); 4],
     background: Option<(u16, BgLine)>,
+    sprites: [Option<(u16, SpriteLine)>; 2],
 }
 
 impl RasterCapture {
@@ -98,7 +100,15 @@ impl RasterCapture {
         if vicon.r2_display() & 0x40 != 0 {
             if let Some((raster, line)) = &self.background {
                 if *raster == crtc.current_raster() {
-                    let codes = line.output(bg::control(ram));
+                    let sprite = self
+                        .sprites
+                        .iter()
+                        .flatten()
+                        .find(|(raster, _)| *raster == crtc.current_raster());
+                    let codes = match sprite {
+                        Some((_, sprites)) => line.output_with_sprites(bg::control(ram), sprites),
+                        None => line.output(bg::control(ram)),
+                    };
                     if !frame.background.is_empty() || codes.iter().any(|&code| code != 0) {
                         frame.background.resize(height as usize * BG_WIDTH, 0);
                         frame.background[y as usize * BG_WIDTH..(y as usize + 1) * BG_WIDTH]
@@ -156,23 +166,28 @@ impl RasterCapture {
         Self::push(frame, y, state);
     }
 
-    /// Prepare the following physical raster before its final display gates are known.
-    pub fn fetch_background(&mut self, crtc: &Crtc, ram: Option<&[u8]>) {
+    /// Prepare independent sprite and BG stages before their final output gates are known.
+    pub fn fetch_sprite_bg(&mut self, crtc: &Crtc, ram: Option<&[u8]>) {
         self.background = None;
+        self.sprites.rotate_left(1);
+        self.sprites[1] = None;
         if ram.is_none() {
             return;
         }
-        let next = if crtc.current_raster() >= (crtc.regs[4] & 0xfff).max(256) {
-            0
-        } else {
-            crtc.current_raster() + 1
-        };
-        let start = (crtc.regs[6] & 0xfff) + 1;
-        let end = (crtc.regs[7] & 0xfff) + 1;
+        let total = (crtc.regs[4] & 0xfff).max(256) as u32 + 1;
+        let start = (crtc.regs[6] & 0xfff) as u32 + 1;
+        let end = (crtc.regs[7] & 0xfff) as u32 + 1;
+        let (_, height) = crtc.active_resolution();
+        let next = (crtc.current_raster() as u32 + 1) % total;
         if next >= start && next < end {
-            let (_, height) = crtc.active_resolution();
-            let y = (next - start) as u32 * height / (end - start) as u32;
-            self.background = Some((next, BgLine::fetch(crtc, ram, y)));
+            let y = (next - start) * height / (end - start);
+            self.background = Some((next as u16, BgLine::fetch(crtc, ram, y)));
+        }
+        // Sprite selection/pattern fetch precedes BG fetch by a separate stage.
+        let sprite_next = (crtc.current_raster() as u32 + 2) % total;
+        if sprite_next >= start && sprite_next < end {
+            let y = (sprite_next - start) * height / (end - start);
+            self.sprites[1] = Some((sprite_next as u16, SpriteLine::fetch(crtc, ram, y)));
         }
     }
 

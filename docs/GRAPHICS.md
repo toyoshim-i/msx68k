@@ -13,8 +13,8 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
    control changes. Line-start address fetch is separate from horizontal display
    sampling. Mode-specific fetch timing still needs validation, and mid-frame
    text/graphics VRAM writes need a separate history.
-3. Implemented BG/PCG address generation and palette-code line buffering for
-   8-dot BG0/BG1 and 16-dot BG0. Sprite selection and rendering remain pending.
+3. Implemented BG/PCG and sprite palette-code line buffering: 8-dot BG0/BG1,
+   16-dot BG0, 128 sprite attributes, and a 32-sprite scanline limit.
 4. Special priority, half transparency, interlace and precise boundary timing.
 
 ## Physical GVRAM and CPU views
@@ -118,8 +118,8 @@ A zero pattern nibble is transparent regardless of the palette block.
 The completed frame retains fetched codes, so subsequent PCG/map writes cannot
 replace already fetched pixels. Color conversion uses that output row's shared
 text/sprite palette. BG0 appears above BG1; their combined output participates
-in VICON text/sprite priority and graphics insertion. Sprite priorities between
-the two BG planes and special palette-zero interactions remain future work.
+in VICON text/sprite priority and graphics insertion. Special palette-zero
+interactions remain future work.
 
 GPU input packs four BG codes per word with a fixed 512-pixel row stride and
 bounded lookup. Blank BG frames add no code upload. The main display and VM
@@ -127,13 +127,37 @@ textures share composition, including BG opacity for VM-layer visibility.
 Before a complete scanout history exists, rendering samples current BG memory;
 native extended TVRAM retains its existing path.
 
+## Sprite scanout
+
+The 128 sprite entries at `$EB0000` contain 10-bit X/Y coordinates, a 16-dot
+pattern number, palette block, flips, and priority. Coordinates include a
+16-pixel margin relative to the shared sprite/BG origin. Priority zero disables
+an entry. Selection visits register numbers in ascending order and admits at
+most 32 enabled sprites intersecting the output row and viewport. Transparent
+patterns consume a slot; disabled and entirely offscreen entries do not.
+
+Within a pixel, higher sprite priority wins; equal priorities retain the lower
+register number. Zero pattern nibbles expose underlying pixels. Final internal
+ordering is sprite priority 3, BG0, sprite priority 2, BG1, sprite priority 1.
+BG enable bits are applied at this final step. The controller master gate and
+VICON sprite/BG gate suppress output without stopping internal fetch.
+
+Sprite attribute selection and pattern expansion prepare two physical rasters
+ahead at horizontal display start; BG expansion prepares one raster ahead.
+These are separate scheduling stages within the current timing approximation,
+not verified per-mode hardware cycle counts. Startup needs the preceding
+blanking rasters to fill the stages. Reset clears pending buffers. Fetched
+sprite codes and attributes cannot be replaced by subsequent RAM writes, while
+the displayed row still uses its own palette snapshot. Sprite/BG codes share the
+existing packed GPU input and completed-frame history.
+
 ## Next implementation steps
 
 1. Validate address-fetch and display-sampling positions for each screen mode,
    including doubled lines and writes on either side of each edge. Keep the
    current timing approximation explicit until measured timing is available.
-2. Add sprite selection, its display limits and composition around BG0/BG1.
-   Define sprite attribute and pattern fetch points independently of BG fetch.
+2. Validate mixed-resolution coordinate scaling and interlace, including sprite
+   selection at viewport edges and pipeline behavior during geometry changes.
 3. Add text/graphics VRAM write history where rendering from final memory would
    lose already fetched data. Keep CPU bus waits independent of pipeline latency.
 4. Extend final composition with special priority and half transparency, then
@@ -154,9 +178,9 @@ guest scanout timing from host output buffering. Model-dependent fetch points
 need validation in each supported screen mode.
 
 Display-output suppression and internal pipeline progress are separate concerns.
-BG buffers continue fetching while display output is disabled. The blank-frame
-snapshot/upload optimization must not automatically stop future sprite buffers;
-their behavior while disabled needs its own definition.
+BG and sprite buffers continue fetching while display output is disabled. The
+blank-frame snapshot/upload optimization only suppresses final output records
+and transfers; it does not freeze internal line preparation.
 
 Keep CPU history independent of GPU representation. A future timestamped change
 history should feed attribute-specific latches and delays, then produce display
@@ -175,10 +199,10 @@ vertical blank and the next frame. These are regression tests of the current
 approximation, not evidence of exact hardware latency.
 
 Validate writes immediately before and after each hardware-backed fetch point,
-checking which output row changes. VRAM write history, precise interlace,
-sprite rendering and special effects remain outside the current scope.
+checking which output row changes. Text/graphics VRAM write history, precise
+interlace and special effects remain outside the current scope.
 
 ```sh
-cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test raster -- --test-threads=1
+cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test sprite --test raster -- --test-threads=1
 cargo test --release -p msx68k-vicon --test graphics_modes --test raster -- --test-threads=1
 ```
