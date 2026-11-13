@@ -99,9 +99,22 @@ pub(crate) fn background_input<'a>(bus: &'a X68kBus, params: &ViconUniforms) -> 
     let mut codes = Vec::with_capacity(params.height as usize * BG_WIDTH);
     for y in 0..params.height {
         codes.extend_from_slice(
-            &BgLine::fetch(&bus.crtc, bus.sprite_bg(), y).output_with_sprites(
+            &BgLine::fetch_with_bank(
+                &bus.crtc,
+                bus.sprite_bg(),
+                bus.sprite_bg_extra(),
+                y,
+                bus.sprite_options.full_pattern_memory,
+            )
+            .output_with_sprites(
                 bg::control(bus.sprite_bg()),
-                &SpriteLine::fetch(&bus.crtc, bus.sprite_bg(), y),
+                &SpriteLine::fetch_with_options(
+                    &bus.crtc,
+                    bus.sprite_bg(),
+                    bus.sprite_bg_extra(),
+                    y,
+                    bus.sprite_options,
+                ),
             ),
         );
     }

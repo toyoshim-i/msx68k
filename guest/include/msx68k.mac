@@ -83,3 +83,5 @@ msx68k_call_done:
 	movem.l	(sp)+, a1
 	rts
 	.endm
+
+MSX68K_FN_VM_SPRITE_OPTIONS .equ 15 ; D1 VM, D2 flags (bit0 unlimited, bit1 full RAM), -1 query

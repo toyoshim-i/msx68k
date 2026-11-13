@@ -20,7 +20,7 @@ fn small_tiles_use_independent_maps_palettes_flips_and_wrapping() {
     write(&mut vm, 0x8000, 0x1200);
     write(&mut vm, 0xc000, 0x0300);
     write(&mut vm, 0xe000, 0x0400);
-    write(&mut vm, 0x808, 2 << 4); // BG1 uses the second map.
+    write(&mut vm, 0x808, 1 << 4); // BG1 uses the second map.
     let codes = row(&vm, 0, 0x209);
     assert_eq!(&codes[..3], &[0x31, 0x32, 0]);
     assert_eq!(&row(&vm, 0, 0x208)[..3], &[0x41, 0x42, 0]);

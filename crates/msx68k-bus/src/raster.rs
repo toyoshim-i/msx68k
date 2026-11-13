@@ -167,7 +167,13 @@ impl RasterCapture {
     }
 
     /// Prepare independent sprite and BG stages before their final output gates are known.
-    pub fn fetch_sprite_bg(&mut self, crtc: &Crtc, ram: Option<&[u8]>) {
+    pub fn fetch_sprite_bg(
+        &mut self,
+        crtc: &Crtc,
+        ram: Option<&[u8]>,
+        extra: Option<&[u8]>,
+        options: crate::sprite::SpriteOptions,
+    ) {
         self.background = None;
         self.sprites.rotate_left(1);
         self.sprites[1] = None;
@@ -181,13 +187,19 @@ impl RasterCapture {
         let next = (crtc.current_raster() as u32 + 1) % total;
         if next >= start && next < end {
             let y = (next - start) * height / (end - start);
-            self.background = Some((next as u16, BgLine::fetch(crtc, ram, y)));
+            self.background = Some((
+                next as u16,
+                BgLine::fetch_with_bank(crtc, ram, extra, y, options.full_pattern_memory),
+            ));
         }
         // Sprite selection/pattern fetch precedes BG fetch by a separate stage.
         let sprite_next = (crtc.current_raster() as u32 + 2) % total;
         if sprite_next >= start && sprite_next < end {
             let y = (sprite_next - start) * height / (end - start);
-            self.sprites[1] = Some((sprite_next as u16, SpriteLine::fetch(crtc, ram, y)));
+            self.sprites[1] = Some((
+                sprite_next as u16,
+                SpriteLine::fetch_with_options(crtc, ram, extra, y, options),
+            ));
         }
     }
 

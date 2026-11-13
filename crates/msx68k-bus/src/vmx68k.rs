@@ -410,6 +410,7 @@ pub enum VmEvent {
     },
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
+    SpriteOptions { id: u32, options: crate::sprite::SpriteOptions },
     /// The VM was closed.
     Closed { id: u32 },
 }
@@ -872,6 +873,7 @@ struct OpenVm {
     /// The VM's SRAM as it last changed, for VMX68K.SX to save with `VmSram`.
     sram: Option<Vec<u8>>,
     runtime_sram: Option<Vec<u8>>,
+    sprite_options: crate::sprite::SpriteOptions,
     custom: bool,
 }
 
@@ -1227,6 +1229,7 @@ impl X68kBus {
             status_woken: false,
             sram: None,
             runtime_sram: None,
+            sprite_options: crate::sprite::SpriteOptions::default(),
             custom: state.a[2] >> 24 == 0x56 && state.a[2] & 0x00FF_FFFF != 0,
         });
         let sram_at = state.d[5] & 0x00FF_FFFF;
@@ -1417,6 +1420,36 @@ impl X68kBus {
                 0
             }
             None => u32::MAX,
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    pub fn vm_sprite_options(&self, id: u32) -> crate::sprite::SpriteOptions {
+        self.vm_windows
+            .open
+            .iter()
+            .find(|open| open.id == id)
+            .map_or(crate::sprite::SpriteOptions::default(), |open| {
+                open.sprite_options
+            })
+    }
+
+    /// D2=-1 queries; otherwise bits 0/1 enable unlimited sprites/full pattern memory.
+    pub(crate) fn hypercall_vm_sprite_options(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            Some(open) if state.d[2] == u32::MAX => open.sprite_options.bits(),
+            Some(open) if state.d[2] & !3 == 0 => {
+                let options = crate::sprite::SpriteOptions::from_bits(state.d[2]);
+                if options != open.sprite_options {
+                    open.sprite_options = options;
+                    self.vm_windows
+                        .events
+                        .push(VmEvent::SpriteOptions { id, options });
+                }
+                0
+            }
+            _ => u32::MAX,
         };
         TrapResult::Handled { extra_cycles: 0 }
     }
@@ -2152,5 +2185,43 @@ mod tests {
         state.d[2] = 3;
         bus.hypercall_vm_speed(&mut state);
         assert_eq!(bus.take_vm_events(), [VmEvent::Speed { id, mode: CpuSpeedMode::Burst }]);
+    }
+}
+
+#[cfg(test)]
+mod sprite_option_tests {
+    use super::*;
+
+    #[test]
+    fn vm_sprite_options_validate_and_preserve_the_live_machine() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let mut state = CpuState::default();
+        state.d[7] = 4;
+        bus.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        bus.take_vm_events();
+        state.d[1] = id;
+        state.d[2] = 3;
+        bus.hypercall_vm_sprite_options(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert_eq!(
+            bus.take_vm_events(),
+            [VmEvent::SpriteOptions {
+                id,
+                options: crate::sprite::SpriteOptions::from_bits(3),
+            }]
+        );
+        state.d[2] = u32::MAX;
+        bus.hypercall_vm_sprite_options(&mut state);
+        assert_eq!(state.d[0], 3);
+        assert!(bus.take_vm_events().is_empty());
+        state.d[2] = 4;
+        bus.hypercall_vm_sprite_options(&mut state);
+        assert_eq!(state.d[0], u32::MAX);
+        assert_eq!(bus.vm_sprite_options(id).bits(), 3);
+        state.d[2] = 4;
+        state.d[3] = 0;
+        bus.hypercall_vm_restart(&mut state);
+        assert_eq!(bus.vm_sprite_options(id).bits(), 3);
     }
 }

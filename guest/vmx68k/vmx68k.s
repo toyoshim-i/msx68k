@@ -35,6 +35,8 @@ ITEM_CUSTOM	.equ	13
 ITEM_PATH	.equ	18
 ITEM_FREQUENCY	.equ	20
 ITEM_BOOT	.equ	21
+ITEM_UNLIMITED	.equ	26
+ITEM_FULL_PATTERN .equ	28
 ITEM_DETAILS	.equ	14
 DRIVE_DIALOG_ID	.equ	2		; The ドライブの詳細 dialog
 ITEM_FEWER	.equ	3		; Its - and + buttons and the number of drives
@@ -93,6 +95,9 @@ setup_handle:	.ds.l	1		; pseudo-handles to setup_rec and sram_buffer
 sram_handle:	.ds.l	1
 screen_size:	.ds.l	1		; the VM's screen the window fits, width << 16 | height
 drive0_fd:	.ds.w	1
+vm_graphics:	.ds.w	1
+cfg_graphics:	.ds.w	1
+graphics_handle: .ds.l	1
 vm_speed:	.ds.w	1		; by MSX68K_FN_VM_SPEED's numbers for run_cpu
 vm_cpu:		.ds.w	1		; the setup's CPU, 0 the 68000, 1 the 68030
 vm_ram:		.ds.w	1		; the setup's RAM in MB, 1 to 12
@@ -323,6 +328,10 @@ vm_open_sram:
 	bmi	dispose_window
 	lea	vm_id(a5), a1
 	move.l	d0, (a1)
+	tst.w	vm_graphics(a5)
+	beq.s	vm_graphics_opened
+	bsr	apply_graphics
+vm_graphics_opened:
 	* A setup that is not there yet is made with what the VM starts with
 	tst.b	setup_found(a5)
 	bne.s	setup_kept
@@ -731,7 +740,7 @@ load_setup:
 	SXCALL	TSRscGet		; $A4AB
 	addq.l	#6, sp
 	move.l	a0, d0
-	beq.s	load_setup_sram
+	beq.s	load_setup_graphics
 	movea.l	(a0), a0
 	move.w	2(a0), vm_speed(a5)
 	cmpi.w	#2, (a0)		; version 2 has the CPU and the RAM
@@ -751,9 +760,20 @@ load_setup_speed:
 	move.w	vm_cpu(a5), d0
 	bsr	speed_list
 	cmp.w	vm_speed(a5), d1
-	bhi.s	load_setup_sram
+	bhi.s	load_setup_graphics
 	clr.w	vm_speed(a5)
 
+load_setup_graphics:
+	clr.w	-(sp)
+	move.l	#'V68G',-(sp)
+	SXCALL	TSRscGet
+	addq.l	#6,sp
+	move.l	a0,d0
+	beq.s	load_setup_sram
+	movea.l	(a0),a0
+	move.w	(a0),d0
+	andi.w	#3,d0
+	move.w	d0,vm_graphics(a5)
 load_setup_sram:
 	clr.w	-(sp)
 	move.l	#SRAM_TYPE, -(sp)
@@ -829,6 +849,19 @@ save_setup_add:
 	move.l	#SETUP_TYPE, -(sp)
 	SXCALL	TSRscAdd		; $A4AA
 	lea	14(sp), sp
+
+	lea	vm_graphics(a5),a0
+	move.l	a0,graphics_handle(a5)
+	clr.w	-(sp)
+	move.l	#'V68G',-(sp)
+	SXCALL	TSRscRemove
+	addq.l	#6,sp
+	move.l	#2,-(sp)
+	pea	graphics_handle(a5)
+	clr.w	-(sp)
+	move.l	#'V68G',-(sp)
+	SXCALL	TSRscAdd
+	lea	14(sp),sp
 
 	lea	vm_drives(a5), a0
 	move.l	a0, drives_handle(a5)
@@ -1120,6 +1153,7 @@ config_dialog:
 	movem.l	d0-d4/a0-a2, -(sp)
 	clr.w	dlg_edit(a5)
 	move.w	#-1,new_result(a5)
+	move.w	vm_graphics(a5),cfg_graphics(a5)
 	move.w	vm_speed(a5),cfg_speed(a5)
 	move.w	vm_speed(a5),cfg_old_speed(a5)
 	move.w	vm_boot(a5),cfg_boot(a5)
@@ -1150,6 +1184,7 @@ config_dialog:
 config_boot_initial:
 	bsr	dlg_show_mode
 	bsr	dlg_show_cpu
+	bsr	config_graphics_draw
 	moveq.l	#ITEM_MEMORY, d0
 	bsr	dlg_item
 	move.w	dlg_ram(a5), -(sp)
@@ -1220,6 +1255,10 @@ config_dialog_loop:
 	beq	config_frequency
 	cmpi.w	#ITEM_BOOT,d0
 	beq	config_boot
+	cmpi.w	#ITEM_UNLIMITED,d0
+	beq	config_unlimited
+	cmpi.w	#ITEM_FULL_PATTERN,d0
+	beq	config_full_pattern
 	cmpi.w	#ITEM_MEMORY, d0
 	bne	config_dialog_loop
 	moveq.l	#ITEM_MEMORY, d0
@@ -1242,6 +1281,44 @@ config_dialog_max:
 	SXCALL	DMDraw			; $A2C8
 	addq.l	#4, sp
 	bra	config_dialog_loop
+config_unlimited:
+	eori.w	#1,cfg_graphics(a5)
+	bra.s	config_graphics_changed
+config_full_pattern:
+	eori.w	#2,cfg_graphics(a5)
+config_graphics_changed:
+	bsr	config_graphics_draw
+	bra	config_dialog_loop
+config_graphics_draw:
+	movem.l	d0-d2/a0-a1,-(sp)
+	moveq.l	#ITEM_UNLIMITED,d0
+	bsr	dlg_item
+	move.w	cfg_graphics(a5),d1
+	andi.w	#1,d1
+	move.w	d1,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
+	moveq.l	#ITEM_FULL_PATTERN,d0
+	bsr	dlg_item
+	move.w	cfg_graphics(a5),d1
+	lsr.w	#1,d1
+	andi.w	#1,d1
+	move.w	d1,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
+	movem.l	(sp)+,d0-d2/a0-a1
+	rts
+apply_graphics:
+	movem.l	d0-d2/a0-a1,-(sp)
+	moveq.l	#MSX68K_FN_VM_SPRITE_OPTIONS,d0
+	move.l	vm_id(a5),d1
+	moveq.l	#0,d2
+	move.w	vm_graphics(a5),d2
+	bsr	msx68k_call
+	movem.l	(sp)+,d0-d2/a0-a1
+	rts
 config_dialog_shared:
 	clr.w	dlg_drives+DRV_MODE(a5)
 	bsr	dlg_show_mode
@@ -1308,6 +1385,8 @@ config_commit:
 	move.w	dlg_cpu(a5),vm_cpu(a5)
 	move.w	dlg_ram(a5),vm_ram(a5)
 	move.w	cfg_speed(a5),vm_speed(a5)
+	move.w	cfg_graphics(a5),vm_graphics(a5)
+	bsr	apply_graphics
 	bsr	config_commit_boot
 	bsr	save_setup
 	move.w	vm_cpu(a5),d0
@@ -3492,6 +3571,7 @@ new_setup_create:
 	move.w	vm_cpu(a5),-(sp)
 	move.w	vm_ram(a5),-(sp)
 	move.w	vm_speed(a5),-(sp)
+	move.w	vm_graphics(a5),-(sp)
 	lea	vm_drives(a5),a0
 	lea	old_drives(a5),a1
 	bsr	copy_drives
@@ -3501,6 +3581,7 @@ new_setup_create:
 	move.w	dlg_cpu(a5),vm_cpu(a5)
 	move.w	dlg_ram(a5),vm_ram(a5)
 	move.w	cfg_speed(a5),vm_speed(a5)
+	move.w	cfg_graphics(a5),vm_graphics(a5)
 	movea.l	cfg_rom(a5),a1
 	lea	sram_buffer(a5),a0
 	lea	disk_buffer(a5),a2
@@ -3535,6 +3616,7 @@ new_use_path:
 	clr.b	setup_is_default(a5)
 	bsr	save_setup
 new_restore:
+	move.w	(sp)+,vm_graphics(a5)
 	move.w	(sp)+,vm_speed(a5)
 	move.w	(sp)+,vm_ram(a5)
 	move.w	(sp)+,vm_cpu(a5)
@@ -3662,6 +3744,8 @@ config_labels:
 	.dc.b	23,8,$8B,$4E,$93,$AE,$91,$95,$92,$75
 	.dc.b	24,2,$81,$A5
 	.dc.b	25,2,$81,$A5
+	.dc.b	27,24,$83,$58,$83,$76,$83,$89,$83,$43,$83,$67,$82,$CC,$8D,$73,$90,$A7,$8C,$C0,$82,$F0,$89,$F0,$8F,$9C
+	.dc.b	29,22,$83,$70,$83,$5E,$81,$5B,$83,$93,$52,$41,$4D,$82,$F0,$32,$94,$7B,$82,$C9,$8A,$67,$92,$A3
 	.dc.b	0
 new_common_labels:
 	.dc.b	7,4,$90,$56,$8B,$4B

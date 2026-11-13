@@ -326,11 +326,11 @@ fn sprite_priority_interleaves_with_background_planes_in_both_gpu_paths() {
     write(&mut vm, 0xe82222, 0xf800); // BG0 green.
     write(&mut vm, 0xe82242, 0x07c0); // BG1 red.
     for (priority, control, expected) in [
-        (1, 0x229, GREEN),
-        (1, 0x228, RED),
-        (2, 0x229, GREEN),
-        (2, 0x228, BLUE),
-        (3, 0x229, BLUE),
+        (1, 0x219, GREEN),
+        (1, 0x218, RED),
+        (2, 0x219, GREEN),
+        (2, 0x218, BLUE),
+        (3, 0x219, BLUE),
     ] {
         write(&mut vm, 0xeb0006, priority);
         write(&mut vm, 0xeb0808, control);

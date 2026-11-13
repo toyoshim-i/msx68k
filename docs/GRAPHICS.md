@@ -151,6 +151,30 @@ sprite codes and attributes cannot be replaced by subsequent RAM writes, while
 the displayed row still uses its own palette snapshot. Sprite/BG codes share the
 existing packed GPU input and completed-frame history.
 
+## Dynamic sprite options
+
+Both options default to off and can be changed on a running VM without resetting
+CPU, RAM, SRAM or drives. Existing fetched rows retain their codes; new settings
+apply to subsequent fetches. CPU-visible bank selection takes effect immediately.
+
+- Disable the 32-sprite scanline limit to admit all intersecting entries from the
+  existing 128-attribute table. This does not increase the attribute count.
+- Enable full pattern memory to add a second independent 32 KiB pattern/map bank,
+  allowing 512 large patterns across both banks. Disabling it hides the added
+  RAM without erasing it; enabling it again restores access to the same contents.
+
+`$EB0808` bit 10 (MPUCS) selects the bank visible through `$EB8000..$EBFFFF`.
+Sprite attribute word 3 bit 2 (SPCS) selects the pattern bank independently for
+each sprite. BG control bits 2/5 select BG0/BG1 map storage banks; bits 1/4
+independently select TEXT0/TEXT1 within those banks. BG pattern pixels still
+come from the standard pattern bank. An absent bank reads as `$FFFF`, ignores
+CPU writes and supplies pattern nibble 15 to sprite fetch. Registers remain
+shared and accessible regardless of MPUCS.
+
+VMX settings stage both checkboxes until accepted, apply them without a restart
+prompt, and save their flags in the setup's optional `V68G` resource. See
+[VMX68K](VMX68K.md) for the host call and persistence contract.
+
 ## Next implementation steps
 
 1. Validate address-fetch and display-sampling positions for each screen mode,

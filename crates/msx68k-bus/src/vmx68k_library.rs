@@ -295,14 +295,15 @@ fn static_text() -> Vec<u8> {
 /// Dialog item types (`DIALOG.H`).
 const D_CHRBTN: u8 = 0x04;
 const D_RADBTN: u8 = 0x05;
+const D_CHKBOX: u8 = 0x06;
 const D_RSCITM: u8 = 0x07;
 const D_STCTXT: u8 = 0x08;
 const D_DISABL: u8 = 0x80;
 /// `'CDEF'` of SX-Window's slider (`CI_SLDVOL`), × 16.
 const SLIDER_PROC: u16 = 0x13 << 4;
 
-/// Where the configuration dialog shows, centered on a 768×512 screen.
-const CONFIG_DIALOG_BOUNDS: [i16; 4] = [194, 81, 574, 431];
+/// Configuration dialog bounds within the standard 768 by 512 screen.
+const CONFIG_DIALOG_BOUNDS: [i16; 4] = [194, 81, 574, 487];
 /// Where the ドライブの詳細 dialog shows, centered on a 768×512 screen.
 const DRIVE_DIALOG_BOUNDS: [i16; 4] = [149, 118, 619, 393];
 /// Editable text items' type (`DIALOG.H`).
@@ -323,12 +324,12 @@ const MEMORY_SLIDER_BOUNDS: [i16; 4] = [90, 122, 254, 140];
 fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     vec![
         (
-            [164, 305, 248, 331],
+            [164, 359, 248, 385],
             D_CHRBTN,
             pascal_even(b"\x90\xDD\x92\xE8"),
         ),
         (
-            [264, 305, 356, 331],
+            [264, 359, 356, 385],
             D_CHRBTN,
             pascal_even(b"\x8E\xE6\x8F\xC1"),
         ),
@@ -363,6 +364,10 @@ fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
         ([18, 254, 82, 278], D_STCTXT | D_DISABL, static_text()),
         ([252, 224, 270, 240], D_STCTXT | D_DISABL, static_text()),
         ([252, 260, 270, 276], D_STCTXT | D_DISABL, static_text()),
+        ([18, 296, 51, 305], D_CHKBOX, vec![0, 0]),
+        ([54, 294, 360, 312], D_STCTXT | D_DISABL, static_text()),
+        ([18, 324, 51, 333], D_CHKBOX, vec![0, 0]),
+        ([54, 322, 360, 340], D_STCTXT | D_DISABL, static_text()),
     ]
 }
 
@@ -592,7 +597,7 @@ mod tests {
         );
         let library = ResourceLibrary::parse(&vmx68k_library()).unwrap();
         let ditl = &library.get(b"DITL", CONFIG_DIALOG_ID).unwrap().data;
-        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 24, "twenty-five shared form items");
+        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 28, "twenty-nine shared form items");
         let ditl = &library.get(b"DITL", DRIVE_DIALOG_ID).unwrap().data;
         let items = u16::from_be_bytes([ditl[0], ditl[1]]) + 1;
         assert_eq!(items, ITEM_ROWS - 1 + DRIVE_ROWS * ROW_ITEMS);

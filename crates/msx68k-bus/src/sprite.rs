@@ -1,10 +1,29 @@
 //! Sprite selection and palette-code scanline buffers.
 use crate::{
-    bg::{origin, pattern_pixel, word, BG_WIDTH},
+    bg::{origin, pattern_pixel_bank, word, BG_WIDTH},
     Crtc,
 };
 
 pub const SPRITES_PER_LINE: usize = 32;
+
+/// Host-side options; changing these does not reset the emulated machine.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SpriteOptions {
+    pub unlimited_sprites: bool,
+    pub full_pattern_memory: bool,
+}
+
+impl SpriteOptions {
+    pub fn bits(self) -> u32 {
+        self.unlimited_sprites as u32 | ((self.full_pattern_memory as u32) << 1)
+    }
+    pub fn from_bits(bits: u32) -> Self {
+        Self {
+            unlimited_sprites: bits & 1 != 0,
+            full_pattern_memory: bits & 2 != 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SpriteLine {
@@ -24,6 +43,16 @@ impl Default for SpriteLine {
 impl SpriteLine {
     /// Select intersecting, enabled sprites in register order, independently of output gates.
     pub fn fetch(crtc: &Crtc, ram: Option<&[u8]>, y: u32) -> Self {
+        Self::fetch_with_options(crtc, ram, None, y, SpriteOptions::default())
+    }
+
+    pub fn fetch_with_options(
+        crtc: &Crtc,
+        ram: Option<&[u8]>,
+        extra: Option<&[u8]>,
+        y: u32,
+        options: SpriteOptions,
+    ) -> Self {
         let mut line = Self::default();
         let Some(ram) = ram.filter(|ram| ram.len() >= 0x10000) else {
             return line;
@@ -35,7 +64,8 @@ impl SpriteLine {
         let mut selected = 0;
         for index in 0..128 {
             let address = index * 8;
-            let priority = (word(ram, address + 6) & 3) as u8;
+            let flags = word(ram, address + 6);
+            let priority = (flags & 3) as u8;
             if priority == 0 {
                 continue;
             }
@@ -44,7 +74,7 @@ impl SpriteLine {
             if !(0..16).contains(&row) || left >= width || left + 16 <= 0 {
                 continue;
             }
-            if selected == SPRITES_PER_LINE {
+            if !options.unlimited_sprites && selected == SPRITES_PER_LINE {
                 break;
             }
             selected += 1;
@@ -64,7 +94,16 @@ impl SpriteLine {
                 } else {
                     dx
                 } as usize;
-                let nibble = pattern_pixel(ram, (attributes & 255) as usize, px, py, true);
+                let nibble = pattern_pixel_bank(
+                    ram,
+                    extra,
+                    options.full_pattern_memory,
+                    flags & 4 != 0,
+                    (attributes & 255) as usize,
+                    px,
+                    py,
+                    true,
+                );
                 let x = x as usize;
                 if nibble != 0 && (line.codes[x] == 0 || priority > line.priorities[x]) {
                     line.codes[x] = ((attributes >> 4) as u8 & 0xf0) | nibble;

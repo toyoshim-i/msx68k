@@ -101,6 +101,8 @@ pub enum AppFunction {
     VmBoot = 13,
     /// Detects image formats through the same registry as local floppy mounts.
     VmImage = 14,
+    /// Queries or changes live sprite scanout options without restarting a VM.
+    VmSpriteOptions = 15,
 }
 
 impl AppFunction {
@@ -121,6 +123,7 @@ impl AppFunction {
             12 => Some(Self::VmMedia),
             13 => Some(Self::VmBoot),
             14 => Some(Self::VmImage),
+            15 => Some(Self::VmSpriteOptions),
             _ => None,
         }
     }
@@ -213,6 +216,7 @@ impl X68kBus {
                 Some(AppFunction::VmMedia) => self.hypercall_vm_media(state),
                 Some(AppFunction::VmBoot) => self.hypercall_vm_boot(state),
                 Some(AppFunction::VmImage) => self.hypercall_vm_image(state),
+                Some(AppFunction::VmSpriteOptions) => self.hypercall_vm_sprite_options(state),
                 None => TrapResult::Unhandled,
             },
         }

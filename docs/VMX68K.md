@@ -54,11 +54,14 @@ run in a VM of their own from the start.
     CONFIG.SYS decides what it starts.
   - **The configuration dialog** is shared with 新規. It shows the setup file path,
     CPU, memory slider, shared/custom drives with the existing 詳細... window,
-    frequency, and boot device. The path is read-only for existing setups and
+    frequency, boot device, sprite scanline-limit override and full pattern memory.
+    The path is read-only for existing setups and
     editable for new ones; the action is 設定 or 作成 respectively. Choice windows
     use the left mouse button. 起動装置 is disabled for shared drives. All edits
     are staged until accepted. Existing CPU/memory/drive changes ask whether to
-    restart; frequency and boot changes do not require restarting immediately.
+    restart; frequency and sprite-option changes apply live. Boot changes take
+    effect at the next reset. Sprite options default to off and never trigger
+    the hardware-restart prompt.
 
   - **Drive assignment** has two modes, chosen
     in the configuration dialog's ドライブ row: **共有** (shared mode, with the path of the
@@ -94,11 +97,16 @@ run in a VM of their own from the start.
   missing. The VM's SRAM is written back to its setup whenever it changes.
   - **Contents**: `'V68S'` 0, version 2 with speed, CPU and RAM size (four words), and `'SRAM'` 0,
     the VM's 16 KB of SRAM once it has one (`vmx68k_library::setup_library`).
+    Optional `V68G` 0 stores one big-endian word: bit 0 removes the 32-sprite
+    scanline cap, bit 1 enables full pattern memory. Missing `V68G` means both
+    off, preserving existing setups. New setups retain their staged flags
+    independently of the VM that created them.
   - **Opening**: the setup's path is VMX68K.SX's first command line word, which the Filer gives
     (`vmx68k.x %`). VMX68K.SX reads the setup, drops the library unwritten, and passes the speed
     and SRAM to `VmOpen` (`D6.L`, `D5.L`); the app starts the VM with them, the SRAM's RAM size
-    set to the VM's. VMX68K.SX finds its own `VMX68K.LB` from its program's name in its task
-    record (`TSGetTdb`), as Sharp's skeleton does.
+    set to the VM's. The task applies nondefault sprite flags through
+    `VmSpriteOptions` after opening. VMX68K.SX finds its own `VMX68K.LB` from its
+    program's name in its task record (`TSGetTdb`), as Sharp's skeleton does.
   - **Saving**: when a speed is chosen, and when the VM's SRAM changes. The app takes the SRAM
     from the VM's thread once it stays unchanged for 0.5 s, so a program writing it byte by
     byte is saved once; the primary wakes VMX68K.SX, which takes it with `VmSram` (10) and
@@ -205,6 +213,12 @@ Sprite/BG fetch delays will use their own timing rules rather than inheriting th
   every pass of the event loop, and `VmClose` (6) stops the VM. `VmOpen` also takes the
   lines of the content above the VM's screen (`D4.W`, the icon bar), and `VmSpeed` (8) sets
   the VM's speed from the menu.
+- **Live sprite options.** `VmSpriteOptions` (15) takes the VM ID in `D1.L` and
+  flags in `D2.L` (bits 0/1 as `V68G`); `D2.L = -1` queries the current flags.
+  Set returns 0, query returns flags, and invalid flags or IDs return -1. The host
+  posts changes to the VM's execution thread without restarting it. Options
+  survive machine restarts and settings reloads. Cancel and new-setup staging
+  leave the creator's live options unchanged.
 - **One VM per window, any number.** VMX68K.SX is an R-type module (`OBJR`): SX-Window runs
   it as often as it is started, sharing the module and giving each task a work area of its own
   (A1 at entry, then A5, the stack at its end; the size at `+$0C` of the header), which holds
@@ -339,8 +353,9 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   them past it. The Task Manager hands the event to the window's task even behind another window.
   Booting Human68k takes about 290 wake-ups and 580 polls; with null events instead, VMX68K.X
   polled about 11,000 times.
-- The compositor shader has no scanline table, sprites, or BG yet; it composites text and
-  graphic page 0 from the state at the end of the frame.
+- Primary and VM textures share graphics modes, raster palette/register state,
+  and buffered sprite/BG composition. Timing scope and remaining work are
+  specified in [GRAPHICS](GRAPHICS.md).
 - The final pass (`render_bus_to_surface_view`) draws the primary VM's screen, then each
   `VmLayer` (a VM's latest completed texture at a position on the primary VM's screen) once per
   rectangle of its visible region, as a scissor rectangle; rectangles are scaled with the

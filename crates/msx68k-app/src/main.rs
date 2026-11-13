@@ -879,6 +879,11 @@ impl Msx68kApp {
                         guest.thread.post(move |vm| vm.set_speed_mode(mode));
                     }
                 }
+                VmEvent::SpriteOptions { id, options } => {
+                    if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
+                        guest.thread.post(move |vm| vm.bus.sprite_options = options);
+                    }
+                }
                 VmEvent::Closed { id } => self.guest_vms.retain(|guest| guest.id != id),
             }
         }
@@ -969,6 +974,7 @@ impl Msx68kApp {
                 .with_speed_mode(speed)
                 .with_ram_mb(machine.ram_mb as usize),
         );
+        vm.bus.sprite_options = self.vm.bus.vm_sprite_options(id);
         // The VM's own SRAM from its setup, with the size of its RAM as the machine has it.
         if let Some(sram) = sram.as_ref().filter(|sram| sram.len() == vm.bus.sram().len()) {
             vm.bus.sram_mut().copy_from_slice(sram);

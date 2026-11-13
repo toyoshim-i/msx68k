@@ -69,7 +69,7 @@ fn sprite_priorities_interleave_with_both_background_planes() {
     write(&mut vm, 0x8220, 0x4444); // Small pattern 17.
     write(&mut vm, 0xc000, 0x0210);
     write(&mut vm, 0xe000, 0x0311);
-    write(&mut vm, 0x808, 2 << 4);
+    write(&mut vm, 0x808, 1 << 4);
     let bg = BgLine::fetch(&vm.bus.crtc, vm.bus.sprite_bg(), 0);
     for (priority, both, only_bg1) in [(1, 0x23, 0x34), (2, 0x23, 0x11), (3, 0x11, 0x11)] {
         sprite(&mut vm, 0, 16, 16, 0x0101, priority);
@@ -101,4 +101,75 @@ fn line_limit_counts_blank_patterns_but_excludes_disabled_and_offscreen_entries(
     write(&mut vm, 0, 16);
     write(&mut vm, 2, 32); // Different vertical line.
     assert_eq!(output(&vm, 0)[0], 1);
+}
+
+#[test]
+fn live_options_remove_the_limit_and_switch_independent_pattern_ram_banks() {
+    let mut vm = fixture();
+    fill(&mut vm, 1, 1);
+    for index in 0..32 {
+        sprite(&mut vm, index, 16, 16, 0, 1);
+    }
+    sprite(&mut vm, 32, 16, 16, 1, 3);
+    let sample = |vm: &X68kVm| {
+        BgLine::default().output_with_sprites(
+            0x200,
+            &SpriteLine::fetch_with_options(
+                &vm.bus.crtc,
+                vm.bus.sprite_bg(),
+                vm.bus.sprite_bg_extra(),
+                0,
+                vm.bus.sprite_options,
+            ),
+        )[0]
+    };
+    assert_eq!(sample(&vm), 0);
+    vm.bus.sprite_options.unlimited_sprites = true;
+    assert_eq!(sample(&vm), 1);
+    // MPUCS selects the absent bank until the RAM expansion is enabled.
+    write(&mut vm, 0x808, 0x400);
+    write(&mut vm, 0x8080, 0x2222);
+    assert_eq!(vm.bus.read_u16(0xeb8080, true).unwrap(), 0xffff);
+    vm.bus.sprite_options.full_pattern_memory = true;
+    assert_eq!(vm.bus.read_u16(0xeb8080, true).unwrap(), 0);
+    write(&mut vm, 0x8080, 0x2222);
+    write(&mut vm, 0x808, 0);
+    assert_eq!(vm.bus.read_u16(0xeb8080, true).unwrap(), 0x1111);
+    write(&mut vm, 32 * 8 + 6, 7); // SPCS selects extended patterns.
+    assert_eq!(sample(&vm), 2);
+    vm.bus.sprite_options.full_pattern_memory = false;
+    assert_eq!(sample(&vm), 15);
+    vm.bus.sprite_options.full_pattern_memory = true;
+    assert_eq!(sample(&vm), 2, "dynamic disable preserves the hidden RAM");
+    vm.bus.sprite_options.unlimited_sprites = false;
+    assert_eq!(sample(&vm), 0);
+}
+
+#[test]
+fn background_map_bank_is_independent_of_map_number_and_pattern_storage() {
+    let mut vm = fixture();
+    write(&mut vm, 0x8000, 0x1000);
+    write(&mut vm, 0xc000, 0x0100);
+    vm.bus.sprite_options.full_pattern_memory = true;
+    write(&mut vm, 0x808, 0x400);
+    write(&mut vm, 0xc000, 0x0200);
+    write(&mut vm, 0xe000, 0x0300);
+    let sample = |vm: &X68kVm| {
+        BgLine::fetch_with_bank(
+            &vm.bus.crtc,
+            vm.bus.sprite_bg(),
+            vm.bus.sprite_bg_extra(),
+            0,
+            vm.bus.sprite_options.full_pattern_memory,
+        )
+        .output(0x201)[0]
+    };
+    write(&mut vm, 0x808, 0);
+    assert_eq!(sample(&vm), 0x11);
+    write(&mut vm, 0x808, 4); // B0CS, primary map number, extended map storage.
+    assert_eq!(sample(&vm), 0x21);
+    write(&mut vm, 0x808, 6); // B0CS plus TEXT1.
+    assert_eq!(sample(&vm), 0x31);
+    write(&mut vm, 0x808, 2); // Primary bank's TEXT1 remains zero.
+    assert_eq!(sample(&vm), 1);
 }

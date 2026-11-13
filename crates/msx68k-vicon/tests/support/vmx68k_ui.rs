@@ -572,6 +572,56 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
         "normal settings path must be readonly"
     );
 
+    // These graphics settings apply without entering the hardware restart flow.
+    click(&mut vm, (228, 381), 1, 350_000);
+    click(&mut vm, (228, 409), 1, 350_000);
+    click(&mut vm, (402, 453), 1, 750_000);
+    assert_eq!(
+        case_events(&mut vm),
+        [VmEvent::SpriteOptions {
+            id: 1,
+            options: msx68k_bus::sprite::SpriteOptions::from_bits(3),
+        }]
+    );
+    assert_eq!(vm.bus.vm_sprite_options(case_id(1)).bits(), 3);
+    let mut image = vm.bus.scsi_hdd_data(0).unwrap().to_vec();
+    let volume = HumanVolume::open(&mut image).unwrap();
+    let data = volume
+        .read_file(&[short_name("VMX68K", "")], &short_name("DEFAULT", "V68"))
+        .unwrap();
+    assert_eq!(
+        ResourceLibrary::parse(&data)
+            .unwrap()
+            .get(b"V68G", 0)
+            .unwrap()
+            .data,
+        [0, 3]
+    );
+    // Reopening initializes both checked controls; toggling them back disables both.
+    for at in [(56, 52), (90, 102)] {
+        point(&mut vm, at, 200_000);
+        vm.bus.scc.set_mouse_buttons(false, at == (56, 52));
+        point(&mut vm, at, 250_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    point(&mut vm, (90, 102), 1_000_000);
+    click(&mut vm, (228, 381), 1, 350_000);
+    click(&mut vm, (228, 409), 1, 350_000);
+    click(&mut vm, (402, 453), 1, 750_000);
+    assert_eq!(
+        case_events(&mut vm),
+        [VmEvent::SpriteOptions {
+            id: 1,
+            options: msx68k_bus::sprite::SpriteOptions::default(),
+        }]
+    );
+    point(&mut vm, (56, 52), 200_000);
+    vm.bus.scc.set_mouse_buttons(false, true);
+    point(&mut vm, (56, 52), 250_000);
+    point(&mut vm, (90, 102), 250_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    point(&mut vm, (90, 102), 1_000_000);
+
     // The 68030, and the slider's knob dragged from 4 MB to 8 MB.
     click(&mut vm, (420, 174), 1, 500_000);
     point(&mut vm, (329, 212), 300_000);
@@ -613,7 +663,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     );
 
     // 設定 saves the setup and asks whether to restart the VM now: はい restarts it.
-    click(&mut vm, (402, 399), 1, 1_000_000);
+    click(&mut vm, (402, 453), 1, 1_000_000);
     screenshot(&vm, "dialog_restart");
     assert_eq!(case_events(&mut vm), [], "not before the answer");
     assert_eq!(
@@ -697,7 +747,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
                 };
                 (125..137).any(|y| (290..400).any(|x| text_index(vm, (x, y)) == 10))
                     && ink(346, 305, 398, 317)
-                    && ink(380, 392, 420, 404)
+                    && ink(380, 446, 420, 458)
             },
             "new form fully drawn",
         );
@@ -719,7 +769,9 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     open_new(&mut vm);
     screenshot(&vm, "new_common");
     click(&mut vm, (420, 174), 1, 500_000);
-    click(&mut vm, (504, 399), 1, 750_000);
+    click(&mut vm, (228, 381), 1, 350_000);
+    click(&mut vm, (228, 409), 1, 350_000);
+    click(&mut vm, (504, 453), 1, 750_000);
     assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
     assert_eq!(saved_drives(&vm, "DEFAULT"), original);
     assert!(saved_setup(&vm, "NEW").is_none());
@@ -768,7 +820,9 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
         "common form repainted after selecting a device",
     );
     screenshot(&vm, "new_setup");
-    click(&mut vm, (402, 399), 1, 2_500_000);
+    click(&mut vm, (228, 381), 1, 350_000);
+    click(&mut vm, (228, 409), 1, 350_000);
+    click(&mut vm, (402, 453), 1, 2_500_000);
     screenshot(&vm, "new_setup_started");
     assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
     assert_eq!(saved_drives(&vm, "DEFAULT"), original);
@@ -794,10 +848,21 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
         sram: Some(sram),
         custom: Some(drives),
         ..
-    }] = events.as_slice()
+    }, VmEvent::SpriteOptions { id: 2, options }] = events.as_slice()
     else {
         panic!("new settings must create one separately configured VM: {events:?}");
     };
+    assert_eq!(options.bits(), 3);
+    assert_eq!(
+        vm.bus.vm_sprite_options(case_id(1)).bits(),
+        0,
+        "creator unchanged"
+    );
+    assert_eq!(
+        vm.bus.vm_sprite_options(case_id(2)).bits(),
+        3,
+        "new setup reloaded"
+    );
     assert_eq!(msx68k_bus::vmx68k::boot_choice(sram), 7);
     assert!(matches!(
         drives.as_slice(),
@@ -813,7 +878,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     let original_new = bytes(&vm);
     open_new(&mut vm);
     set_path(&mut vm);
-    click(&mut vm, (402, 399), 1, 1_000_000);
+    click(&mut vm, (402, 453), 1, 1_000_000);
     assert_eq!(
         bytes(&vm),
         original_new,
@@ -1120,7 +1185,8 @@ fn case_events(vm: &mut X68kVm) -> Vec<VmEvent> {
             | VmEvent::Closed { id }
             | VmEvent::Media { id, .. }
             | VmEvent::Boot { id, .. }
-            | VmEvent::Speed { id, .. } => id,
+            | VmEvent::Speed { id, .. }
+            | VmEvent::SpriteOptions { id, .. } => id,
         };
         *id = *id - base + 1;
     }
@@ -1228,7 +1294,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         saved_drives(&vm, "DEFAULT").map(|(custom, _)| custom),
         Some(false)
     );
-    click(&mut vm, (402, 399), 1, 1_000_000);
+    click(&mut vm, (402, 453), 1, 1_000_000);
     assert_eq!(
         saved_drives(&vm, "DEFAULT"),
         Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))

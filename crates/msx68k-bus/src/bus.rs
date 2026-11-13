@@ -109,6 +109,10 @@ pub struct X68kBus {
     raster: crate::raster::RasterCapture,
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
     sprite_bg: Option<Box<[u8]>>,
+    /// Independent extra 32 KiB pattern/map bank; retained while disabled.
+    sprite_bg_extra: Option<Box<[u8]>>,
+    /// Live scanout options, preserved across soft resets.
+    pub sprite_options: crate::sprite::SpriteOptions,
     /// Battery-backed SRAM (`$ED0000`–`$ED3FFF`, 16 KB).
     pub(crate) sram: Vec<u8>,
     /// Write-unlock latch for SRAM (`$E8E00D == 0x31`).
@@ -239,6 +243,8 @@ impl X68kBus {
             remote_boot_rom: false,
             vm_windows: Default::default(),
             sprite_bg: None,
+            sprite_bg_extra: None,
+            sprite_options: crate::sprite::SpriteOptions::default(),
             sram,
             sram_write_enabled: false,
             sram_dirty: false,
@@ -415,6 +421,11 @@ impl X68kBus {
     #[inline]
     pub fn sprite_bg(&self) -> Option<&[u8]> {
         self.sprite_bg.as_deref()
+    }
+
+    /// Extra pattern/map RAM without the shared registers.
+    pub fn sprite_bg_extra(&self) -> Option<&[u8]> {
+        self.sprite_bg_extra.as_deref()
     }
 
     /// Direct slice access to the 1 MB ROM window (`$F00000`–`$FFFFFF`).
@@ -639,7 +650,12 @@ impl X68kBus {
                     self.sysport.contrast,
                     self.sprite_bg.as_deref(),
                 );
-                self.raster.fetch_sprite_bg(&self.crtc, self.sprite_bg.as_deref());
+                self.raster.fetch_sprite_bg(
+                    &self.crtc,
+                    self.sprite_bg.as_deref(),
+                    self.sprite_bg_extra.as_deref(),
+                    self.sprite_options,
+                );
             }
             if sync.v_disp_fell {
                 self.fdc.refresh_remote_media(&mut self.ioi);
@@ -868,6 +884,13 @@ impl Bus for X68kBus {
                     return Err(BusFault::BusError {
                         addr: a,
                         is_write: false,
+                    });
+                }
+                if offset >= 0x8000 && crate::bg::control(self.sprite_bg()) & 0x400 != 0 {
+                    return Ok(if self.sprite_options.full_pattern_memory {
+                        self.sprite_bg_extra.as_ref().map_or(0, |buf| buf[offset - 0x8000])
+                    } else {
+                        0xff
                     });
                 }
                 Ok(self.sprite_bg.as_ref().map_or(0, |buf| buf[offset]))
@@ -1129,6 +1152,14 @@ impl Bus for X68kBus {
                         addr: a,
                         is_write: true,
                     });
+                }
+                if offset >= 0x8000 && crate::bg::control(self.sprite_bg()) & 0x400 != 0 {
+                    if self.sprite_options.full_pattern_memory {
+                        let buf = self.sprite_bg_extra
+                            .get_or_insert_with(|| vec![0; 0x8000].into_boxed_slice());
+                        buf[offset - 0x8000] = val;
+                    }
+                    return Ok(());
                 }
                 let buf = self
                     .sprite_bg
