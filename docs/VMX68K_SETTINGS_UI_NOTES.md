@@ -245,23 +245,11 @@ official SX-Window programming manuals.
   dialog, then rejects creating the same path again without changing its bytes.
   `vmx68k_disk.rs` also boots SCSI6 with SCSI0 present, checks its B: prompt, and resets
   to FD0 and checks A:; reset clears the preceding SCSI boot's target and drive-letter state.
-- Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
-  VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
-  `crates/msx68k-vicon/tests/vmx68k_disk.rs` also boots a custom raw image from the primary's
-  HDD, using a path different from legacy DRIVE0.XDF, checking an absent image and four-drive
-  connection. It also boots a custom HDD to `A>`, writes and rereads 64 KB through SCSI and
-  VMX68K.X, and checks the primary's image file changed without a flush. A resident HDD boot
-  test covers the generated IPL: its next sector loads at `$003000`, not over the executing
-  IPL at `$002000` and its trap return PC. The bus tests cover handle counts, 512/1024-byte
-  partition metadata, SCSI capacity/ranges, multiple targets, and disconnected bridges.
-  `vmx68k_shared.rs` tests FD boot, HDD boot, and FD boot with an extra HDD, each with reversed
-  primary drive assignments. It checks the resulting letters, file creation/rename/listing,
-  and the original CONFIG.SYS through the first shared unit, alongside the existing shared
-  boot test. It also boots and writes a passthrough FD, checks same-format replacement drops
-  the VM's old directory cache, writes again, and verifies the primary's Human68k sees the new
-  file after release. Unit tests cover ROM coexistence, boot metadata, driver enumeration on
-  reset, exclusive FD ownership, FDC write rejection, physical tabs, geometry changes, native
-  polling, and release on detach/restart/close.
+- Testing: `crates/msx68k-vicon/tests/vmx68k_lifecycle.rs` runs the UI, disk, shared-drive
+  and passthrough scenarios sequentially in one primary. Cold-boot checks remain separate.
+  See [TESTING.md](TESTING.md) for commands, subset selection, diagnostics and lifecycle
+  policy; the runner itself is the maintained list of scenarios.
+
 ---
 
 ## 2. Proposed Implementation (not decided)

@@ -296,7 +296,7 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   for a multi-track command, in one request; a write sends the written sectors in one request
   before the result phase. VMX68K.X carries requests out one at a time with DOS `_SEEK`,
   `_READ`, and `_WRITE` on a 32 KB buffer (`VmPoll`, `VmReply`). Human68k 3.02 boots from the
-  primary VM's HDD to `A>` this way (`crates/msx68k-vicon/tests/vmx68k_disk.rs`).
+  primary VM's HDD to `A>` this way (`crates/msx68k-vicon/tests/vmx68k_lifecycle.rs`).
 - Shared mode, first step (`crates/msx68k-bus/src/remote_fs.rs`): a VM's ROM window holds
   a boot ROM at `$FC0000` laid out like the internal SCSI ROM (IPL boot handle, install handle
   at the boot routine - 16, `'Human68k'`), and SRAM boots from it. The IPL boot routine reads
@@ -318,7 +318,7 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
   memory (`FILES`, `BUFFERS`, `LASTDRIVE` only). Human68k 3.02 boots this way, runs the
   primary's `AUTOEXEC.BAT`, and reaches `A>`; `MD`, `ECHO` into a file, and `REN` typed in it
   land on the primary's drive, and `DIR B:` lists the floppy in the primary's `B:`
-  (`crates/msx68k-vicon/tests/vmx68k_shared.rs`).
+  (`crates/msx68k-vicon/tests/vmx68k_lifecycle.rs`).
   The app starts VMs this way unless `--vm-fd0` names a floppy image.
 - The host posts `E_USER1` when the guest is about to take an event (`EMGet`), into the Event
   Manager's queue the way `EMSet` would, with `whom` the VM's window, once per batch of requests
