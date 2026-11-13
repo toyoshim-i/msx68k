@@ -150,7 +150,7 @@ official SX-Window programming manuals.
   get no letters. Custom mode now passes a drive table to `VmOpen`/`VmRestart` in `A2.L`
   (0 for shared mode; count.w, then kind.w, handle/drive.w, size.l per row). VMX68K.X opens
   file images read/write and owns their handles until restart or exit; saving a setup and declining restart
-  leaves the running images open. Raw floppy images are mounted in file-row order through
+  leaves the running images open. Floppy images are mounted in file-row order through
   `RemoteDisk::with_handle`, without copying the whole image. A file that cannot open reserves
   an empty floppy unit; three or four units connect all four drives. The VM boots from its own
   SRAM, without installing the shared boot ROM. HDD images use the same `RemoteDisk`
@@ -162,8 +162,8 @@ official SX-Window programming manuals.
   primary drive, in row order, to file-level remote units after the VM's own FD and SCSI
   drives. They reuse shared mode's DOS bridge, expose the primary's real CONFIG.SYS, and
   preserve SRAM and the physical drives. パススルー rows now lend primary FD units exclusively,
-  with live media state and sector reads/writes through the same bridge. Remote DIM file images
-  remain unsupported (a DIM already mounted and expanded by the primary FDC can be passed).
+  with live media state and sector reads/writes through the same bridge. RAW and DIM files
+  are parsed by the same format registry as command-line mounts (details below).
 - **Custom driver installation**: Human68k installs a ROM boot device before its built-in FD
   driver, and non-boot ROM interfaces afterwards. For HDD boot with custom shares, `_BOOTINF`
   reports the HDD-only ROM anchor at `$FC0200` instead of `$FC0000`, preserving the IPL's boot
@@ -193,12 +193,34 @@ official SX-Window programming manuals.
   even when replacing a disk with another of the same format. Bridge detach, close, restart,
   and VM startup failure release ownership, invalidate the old VM's media state, and preserve
   the current disk's real tab (including a disk inserted while lent).
+- **Shared image formats**: `floppy_image.rs` owns the format registry (`FloppyImage::probe`),
+  decoded geometry, and logical-sector to file-offset mapping. Both `Fdc::insert_disk` and
+  VMX use it. RAW and DIM 2HD/2HC/2HQ are supported; adding a format there covers both paths.
+  The guest does not recognize extensions, header types or raw sizes. `VmImage` (14) takes
+  D1 DOS handle, D2 file length, D3 chunk length (0 starts a probe), A0 chunk data. Result
+  D0=2 requests D1 bytes at file offset D2; D0=1 caches the recognized layout by handle,
+  D0=0 means another file type. Prefixes accumulate natively in 32 KB chunks, not whole images.
+  Runtime drive-table kind 3 carries the handle and physical file length; `VmOpen`/`VmRestart`
+  consume its layout into `CustomDrive::Image`. Live replacement transfers it with the
+  existing Media event. Kind 0 retains legacy raw/HDD behavior.
+  `RemoteDisk` shares the mutable layout across its clones and uses its explicit geometry,
+  while its `ImageStorage` transport remains format-independent. Missing DIM tracks read $E5.
+  A write to one expands packed tracks backwards in place using one-track buffers, fills
+  omitted tracks, and updates the DIM flags. `ImageSync` (poll kind 18, D3 handle) closes and
+  reopens the file, using `_DUP2` if the reopened handle differs: `_FFLUSH` alone leaves the
+  extended file's directory length stale. Pending old-media paths are retained until kind 17
+  retires their handles, so a layout change also works while a swap is queued.
+  Unit tests cover every supported DIM type, packed/full layouts, local/remote sector parity,
+  bounded transfers, shared layout updates and persistence. UI tests drop a packed DIM, write
+  an omitted track through actual Human68k DOS, force handle reassignment, reopen the resulting
+  file and verify its header, length, preserved neighbours and new contents. A VM boots
+  Human68k from a DIM stored on the primary HDD even when its filename ends in XDF.
 - **Live floppy controls (4c)**: PLOT IDs 10–17 are FD0–3, empty/inserted. `VmStatus`
   returns connected units in D2 bits 0–3, inserted media in 4–7, per-unit lamps in 8–11,
   and passthrough sources in 12–15; shared mode returns zero. The app applies the same 0.2 s
   afterglow as the global lamp. Left-click ejects, DRAGEND (81) accepts a single Filer path
   with `TSGetDrag` / `TSCellToStr`. `VmMedia` (12), D1 ID, D2 unit, D3 new handle (-1 eject),
-  D4 raw length, posts a change to the VM thread. Existing I/O finishes first; kind 17
+  D4 file length, posts a change to the VM thread. Existing I/O finishes first; kind 17
   (`MediaDone`, D1 unit) then lets the task close its retained old handle. Per-unit busy flags
   prevent overlapping swaps. Native FloppyEject keeps a physical lease for reinsertion;
   FloppyRelease relinquishes it when an image replaces it. Running assignments have their
@@ -261,10 +283,9 @@ official SX-Window programming manuals.
      SRAM.~~ Done.
 
 ### 2.2 Pieces Still to Build
-- **Custom image files on the VM** (4b-1): Raw floppy and HDD/SCSI images now work through
-  the existing handle bridge, including boot and writes. Add remote DIM support separately
-  if needed: the remote FDC backend accepts raw image sizes only. The SCSI block driver still
-  uses each image's first Human68k partition; arbitrary partition layouts need separate work.
+- **HDD partition layouts**: RAW/DIM floppy and HDD/SCSI images work through the shared
+  image/handle bridge, including boot and writes. The SCSI block driver still uses each
+  image's first Human68k partition; arbitrary partition layouts need separate work.
 
 ### 2.3 Still Open
 - The resources in a VM's `.LB` and their layout, and how double-clicking one opens VMX68K.SX

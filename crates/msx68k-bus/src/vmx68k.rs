@@ -4,14 +4,15 @@
 //! The bus only keeps the record. The app starts and stops the VMs it reports, each on a
 //! thread of its own, and places their screens with [`X68kBus::vm_window_layout`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use msx68k_cpu::{CpuModel, CpuState, TrapResult};
 
 use crate::bus::X68kBus;
+use crate::floppy_image::{FloppyImage, ImageStorage, Probe};
 use crate::timing::CpuSpeedMode;
 
 /// `SYS/FSX.X` global holding the active window record (`WMActive`), from its text base.
@@ -94,6 +95,10 @@ pub enum BridgeOp {
     MediaDone {
         unit: u32,
     },
+    /// 18: persist a resized image and reopen it under the same DOS handle.
+    ImageSync {
+        handle: u32,
+    },
     FloppyEject {
         unit: u32,
     },
@@ -129,6 +134,7 @@ impl BridgeOp {
             Self::HandleWrite { .. } => 15,
             Self::Filedate { .. } => 16,
             Self::MediaDone { .. } => 17,
+            Self::ImageSync { .. } => 18,
             Self::FloppyEject { .. } | Self::FloppyRelease { .. } => 0,
             Self::FloppyRead { .. } | Self::FloppyWrite { .. } => 0,
         }
@@ -199,6 +205,7 @@ impl PassthroughMedia {
 /// its [`VmBridge`].
 #[derive(Debug, Clone)]
 pub struct RemoteDisk {
+    image: Option<Arc<Mutex<FloppyImage>>>,
     len: usize,
     bridge: VmBridge,
     /// The primary's file handle of the image, or `None` for drive 0's, which VMX68K.SX keeps.
@@ -213,6 +220,7 @@ impl RemoteDisk {
             bridge,
             handle: None,
             floppy: None,
+            image: None,
         }
     }
 
@@ -223,11 +231,27 @@ impl RemoteDisk {
             bridge,
             handle: Some(handle),
             floppy: None,
+            image: None,
         }
     }
 
-    /// Size of the image.
+    pub fn with_image(bridge: VmBridge, handle: u32, len: usize, image: FloppyImage) -> Self {
+        let mut disk = Self::with_handle(bridge, handle, len);
+        disk.image = Some(Arc::new(Mutex::new(image)));
+        disk
+    }
+
+    pub(crate) fn image_geometry(&self) -> Option<crate::fdc::FloppyGeometry> {
+        self.image
+            .as_ref()
+            .map(|image| image.lock().unwrap().geometry)
+    }
+
+    /// Size of the sector image, independent of the file's container.
     pub fn len(&self) -> usize {
+        if let Some(image) = &self.image {
+            return image.lock().unwrap().len();
+        }
         self.floppy
             .as_ref()
             .map_or(self.len, |(_, media)| media.len())
@@ -253,6 +277,9 @@ impl RemoteDisk {
 
     /// Reads an image range, splitting transfers to fit VMX68K.X's 32 KB buffer.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        if let Some(image) = &self.image {
+            return image.lock().unwrap().read(self, offset, len);
+        }
         if offset.checked_add(len)? > self.len() {
             return None;
         }
@@ -293,6 +320,9 @@ impl RemoteDisk {
 
     /// Writes through in chunks; a failed transfer may have written earlier chunks.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
+        if let Some(image) = &self.image {
+            return image.lock().unwrap().write(self, offset, data);
+        }
         if !offset
             .checked_add(data.len())
             .is_some_and(|end| end <= self.len())
@@ -384,11 +414,40 @@ pub enum VmEvent {
     Closed { id: u32 },
 }
 
+impl ImageStorage for RemoteDisk {
+    fn flush_layout(&self) -> bool {
+        self.handle.is_some_and(|handle| {
+            self.bridge
+                .ask(BridgeOp::ImageSync { handle })
+                .is_some_and(|reply| reply.result == 0)
+        })
+    }
+    fn read_at(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let count = (len - data.len()).min(32768);
+            data.extend(self.read_chunk(offset + data.len(), count)?);
+        }
+        Some(data)
+    }
+    fn write_at(&self, offset: usize, data: Vec<u8>) -> bool {
+        data.chunks(32768)
+            .enumerate()
+            .all(|(i, bytes)| self.write_chunk(offset + i * 32768, bytes.to_vec()))
+    }
+}
+
 /// A drive of a VM in custom mode, as VMX68K.SX set it up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CustomDrive {
     /// An image file VMX68K.SX opened, read and written through `handle`, of `len` bytes.
     File { handle: u32, len: u32 },
+    /// A container format identified by the shared image parser.
+    Image {
+        handle: u32,
+        len: u32,
+        image: FloppyImage,
+    },
     /// An image file VMX68K.SX could not open, an empty drive.
     Missing,
     /// The primary's drive `drive` (1 is A:), file-level.
@@ -398,7 +457,7 @@ pub enum CustomDrive {
 }
 
 /// Bytes of an entry of the drive table `VmOpen` and `VmRestart` take in `A2.L`, after its
-/// count (a word): its kind (0 file, 1 shared, 2 passthrough), its handle or drive (-1 for a
+/// count (a word): its kind (0 legacy file, 1 shared, 2 passthrough, 3 probed image), its handle or drive (-1 for a
 /// file that did not open), and the file's size.
 const DRIVE_TABLE_ENTRY: u32 = 8;
 
@@ -504,6 +563,7 @@ impl X68kBus {
         let valid = self.vm_windows.open.iter().any(|open| {
             open.id == id && open.custom && unit < 4 && open.status.floppies & (1 << unit) != 0
         }) && (handle == u32::MAX
+            || self.vm_windows.image_formats.contains_key(&handle)
             || crate::fdc::FloppyGeometry::from_image_len(len as usize).is_some());
         state.d[0] = if valid {
             self.vm_windows.events.push(VmEvent::Media {
@@ -516,6 +576,43 @@ impl X68kBus {
         } else {
             u32::MAX
         };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    pub fn take_vm_image(&mut self, handle: u32) -> Option<FloppyImage> {
+        self.vm_windows.image_formats.remove(&handle)
+    }
+
+    /// Probe a DOS file using a task-supplied prefix. No bridge request or host
+    /// file access is made on the primary thread. New formats only extend probe().
+    pub(crate) fn hypercall_vm_image(&mut self, state: &mut CpuState) -> TrapResult {
+        let (handle, len, size) = (state.d[1], state.d[2] as usize, state.d[3].min(32768));
+        self.vm_windows.image_formats.remove(&handle);
+        let mut prefix = if size == 0 {
+            Vec::new()
+        } else {
+            self.vm_windows
+                .image_prefixes
+                .remove(&handle)
+                .unwrap_or_default()
+        };
+        self.vm_windows.image_prefixes.remove(&handle);
+        prefix.extend((0..size).map(|i| self.peek_u8(state.a[0] + i).unwrap_or(0)));
+        match FloppyImage::probe(len, &prefix) {
+            Probe::Need(required) if required > prefix.len() && required <= len => {
+                state.d[0] = 2;
+                state.d[1] = (required - prefix.len()).min(32768) as u32;
+                state.d[2] = prefix.len() as u32;
+                self.vm_windows.image_prefixes.insert(handle, prefix);
+            }
+            Probe::Need(_) | Probe::Unsupported => {
+                state.d[0] = 0;
+            }
+            Probe::Image(image) => {
+                self.vm_windows.image_formats.insert(handle, image);
+                state.d[0] = 1;
+            }
+        }
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -564,7 +661,7 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
-    /// Installs a custom setup's raw floppy/HDD images and file-level shares.
+    /// Installs a custom setup's floppy/HDD images and file-level shares.
     /// FDD units, SCSI IDs, and shares each follow row order independently, with
     /// shared drives appended after the physical disks. Missing images reserve
     /// empty floppy units. Returns unsupported rows or images beyond the limits.
@@ -579,8 +676,20 @@ impl X68kBus {
         let mut unsupported = Vec::new();
         let mut shared = Vec::new();
         let mut passed = Vec::new();
-        for &drive in drives {
+        for drive in drives.iter().cloned() {
             match drive {
+                CustomDrive::Image {
+                    handle,
+                    len,
+                    ref image,
+                } if unit < 4 => {
+                    self.fdc.insert_remote_disk(
+                        unit,
+                        RemoteDisk::with_image(bridge.clone(), handle, len as usize, image.clone()),
+                        false,
+                    );
+                    unit += 1;
+                }
                 CustomDrive::File { handle, len }
                     if crate::fdc::FloppyGeometry::from_image_len(len as usize).is_some()
                         && unit < 4 =>
@@ -610,6 +719,7 @@ impl X68kBus {
                         {
                             let disk = RemoteDisk {
                                 len: 0,
+                                image: None,
                                 bridge: bridge.clone(),
                                 handle: None,
                                 floppy: Some((*source, Arc::clone(media))),
@@ -641,7 +751,7 @@ impl X68kBus {
     }
 
     /// Reads the drive table at `at`, or `None` for shared mode (0).
-    fn custom_drives(&self, at: u32) -> Option<Vec<CustomDrive>> {
+    fn custom_drives(&mut self, at: u32) -> Option<Vec<CustomDrive>> {
         let at = at & 0x00FF_FFFF;
         if at == 0 {
             return None;
@@ -655,7 +765,16 @@ impl X68kBus {
                 let len = self.peek_u32(entry + 4).unwrap_or(0);
                 match (kind, arg) {
                     (0, 0xFFFF) => CustomDrive::Missing,
-                    (0, handle) => CustomDrive::File { handle: handle as u32, len },
+                    (0, handle) => CustomDrive::File { handle: handle as u32, len,
+                    },
+                    (3, handle) => match self.vm_windows.image_formats.remove(&(handle as u32)) {
+                        Some(image) => CustomDrive::Image {
+                            handle: handle as u32,
+                            len,
+                            image,
+                        },
+                        None => CustomDrive::Missing,
+                    },
                     (1, drive) => CustomDrive::Shared { drive: drive as u32 },
                     (_, drive) => CustomDrive::Passthrough { drive: drive as u32 },
                 }
@@ -750,6 +869,8 @@ pub(crate) struct VmWindows {
     /// Bridge requests of each VM, and the one VMX68K.SX is carrying out with its buffer.
     disks: Vec<(u32, VmDisk)>,
     passthrough: Vec<FloppyLease>,
+    image_formats: HashMap<u32, FloppyImage>,
+    image_prefixes: HashMap<u32, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -815,7 +936,7 @@ impl X68kBus {
         let mut slots = 0;
         for drive in drives {
             match drive {
-                CustomDrive::Missing => slots += 1,
+                CustomDrive::Missing | CustomDrive::Image { .. } => slots += 1,
                 CustomDrive::File { len, .. }
                     if crate::fdc::FloppyGeometry::from_image_len(*len as usize).is_some() =>
                 {
@@ -1173,6 +1294,7 @@ impl X68kBus {
             BridgeOp::Nfiles { buffer } => ([0, 0, 0], vec![(0, buffer.clone())], 53),
             BridgeOp::Dskfre { drive } => ([*drive, 0, 0], vec![], 8),
             BridgeOp::MediaDone { unit } => ([*unit, 0, 0], vec![], 0),
+            BridgeOp::ImageSync { handle } => ([0, 0, *handle], vec![], 0),
             BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. }
             | BridgeOp::FloppyEject { .. }
             | BridgeOp::FloppyRelease { .. } => unreachable!(),
@@ -1384,6 +1506,68 @@ fn nul_terminated(path: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn mapped_remote_images_translate_io_and_share_updated_layouts() {
+        let mut file = vec![0; 256];
+        file[1] = 1;
+        file[3] = 1;
+        file.extend(vec![0x33; 8192]);
+        file.extend(vec![0x44; 8192]);
+        let Probe::Image(image) = FloppyImage::probe(file.len(), &file) else {
+            panic!()
+        };
+        let (bridge, requests) = vm_bridge();
+        let disk = RemoteDisk::with_image(bridge, 8, file.len(), image);
+        let worker = std::thread::spawn(move || {
+            let clone = disk.clone();
+            assert_eq!(disk.read(8192, 1024).unwrap(), vec![0xE5; 1024]);
+            assert!(disk.write(8192 + 16, vec![0x7C; 512]));
+            assert_eq!(clone.read(8192 + 16, 512).unwrap(), vec![0x7C; 512]);
+            assert_eq!(clone.read(16384, 1024).unwrap(), vec![0x44; 1024]);
+            assert_eq!(disk.len(), 1_261_568);
+            assert!(!disk.write(1_261_568, vec![1]));
+        });
+        let mut syncs = 0;
+        for request in requests {
+            let (result, data) = match request.op {
+                BridgeOp::HandleRead {
+                    handle: 8,
+                    offset,
+                    len,
+                } => {
+                    assert!(len <= 32768);
+                    (len, file[offset as usize..(offset + len) as usize].to_vec())
+                }
+                BridgeOp::HandleWrite {
+                    handle: 8,
+                    offset,
+                    data,
+                } => {
+                    assert!(data.len() <= 32768);
+                    let offset = offset as usize;
+                    file.resize(file.len().max(offset + data.len()), 0);
+                    file[offset..offset + data.len()].copy_from_slice(&data);
+                    (data.len() as u32, vec![])
+                }
+                BridgeOp::ImageSync { handle: 8 } => {
+                    syncs += 1;
+                    assert_eq!(file.len(), 256 + 1_261_568);
+                    assert!(FloppyImage::decode(&file).is_some());
+                    (0, vec![])
+                }
+                op => panic!("unexpected image request: {op:?}"),
+            };
+            request
+                .reply
+                .send(Some(BridgeReply { result, data }))
+                .unwrap();
+        }
+        worker.join().unwrap();
+        assert_eq!(syncs, 1);
+        let (_, raw) = FloppyImage::decode(&file).unwrap();
+        assert_eq!(&raw[8192 + 16..8192 + 528], vec![0x7C; 512]);
+    }
+
+    #[test]
     fn icon_ejection_keeps_a_physical_lease_and_image_replacement_releases_it() {
         let mut primary = primary_with_floppies();
         let mut state = CpuState::default();
@@ -1537,21 +1721,21 @@ mod tests {
                 CustomDrive::Missing,
                 CustomDrive::Missing,
                 CustomDrive::Missing,
-                pass,
+                pass.clone(),
             ],
         );
         assert!(
             primary.vm_windows.passthrough.is_empty(),
             "do not lend an unusable fifth FD"
         );
-        primary.reserve_passthrough(1, &[pass]);
-        primary.reserve_passthrough(2, &[pass]);
+        primary.reserve_passthrough(1, &[pass.clone()]);
+        primary.reserve_passthrough(2, &[pass.clone()]);
         primary.reserve_passthrough(3, &[CustomDrive::Passthrough { drive: 1 }]);
         assert_eq!(primary.vm_windows.passthrough.len(), 1);
         let (mut bridge, _) = vm_bridge();
         primary.bind_vm_passthrough(1, &mut bridge);
         let mut child = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
-        assert!(child.install_custom_drives(bridge, &[pass]).is_empty());
+        assert!(child.install_custom_drives(bridge, &[pass.clone()]).is_empty());
         assert!(primary.fdc.drives[0].is_write_protected());
         assert!(!child.fdc.drives[0].is_write_protected());
         // The primary's actual FDC rejects writes, not only its UI/status.
@@ -1619,7 +1803,7 @@ mod tests {
             primary.fdc.drives[0].write_protected,
             "retain the replacement disk's real tab"
         );
-        primary.reserve_passthrough(2, &[pass]);
+        primary.reserve_passthrough(2, &[pass.clone()]);
         assert_eq!(primary.vm_windows.passthrough[0].owner, 2);
         primary.detach_vm_bridge(2);
         assert!(primary.fdc.drives[0].is_write_protected());

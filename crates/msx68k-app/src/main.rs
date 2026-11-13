@@ -836,13 +836,23 @@ impl Msx68kApp {
                 } => {
                     if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
                         if let Some(bridge) = guest.bridge.clone() {
+                            let image = self.vm.bus.take_vm_image(handle);
                             guest.thread.post(move |vm| {
                                 let disk = (handle != u32::MAX).then(|| {
-                                    msx68k_bus::vmx68k::RemoteDisk::with_handle(
-                                        bridge.clone(),
-                                        handle,
-                                        len as usize,
-                                    )
+                                    if let Some(image) = image {
+                                        msx68k_bus::vmx68k::RemoteDisk::with_image(
+                                            bridge.clone(),
+                                            handle,
+                                            len as usize,
+                                            image,
+                                        )
+                                    } else {
+                                        msx68k_bus::vmx68k::RemoteDisk::with_handle(
+                                            bridge.clone(),
+                                            handle,
+                                            len as usize,
+                                        )
+                                    }
                                 });
                                 vm.bus.change_vm_floppy(unit as usize, disk, &bridge);
                             });

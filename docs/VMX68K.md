@@ -223,7 +223,7 @@ windows work the same way as the primary VM.
 - **First disk.** The host read the floppy image for drive 0 of new VMs itself at first, named by
   a command-line option of the app. Images come from the primary VM's drives now that the VM's
   screen shows in its window (Section 2).
-- **Custom image files.** The settings GUI's ファイル rows now open raw floppy and HDD images on
+- **Custom image files.** The settings GUI's ファイル rows now open RAW/DIM floppy and HDD images on
   the primary's drives and pass their handles to the host at `VmOpen`/`VmRestart` in `A2.L`.
   Reads and writes go through VMX68K.X's DOS calls; images stay open until restart or exit.
   Missing files leave empty units, and three or four floppy units connect all four drives.
@@ -237,10 +237,10 @@ windows work the same way as the primary VM.
   unit to the VM at the sector level, in floppy-row order. The primary's FDC is write-protected
   while lent; the VM still respects the disk's physical write-protect tab. Ejection and media
   replacement reach the VM, including a replacement of the same geometry. Closing or restarting
-  the VM releases the unit. Remote DIM file images remain pending (see the settings UI notes).
+  the VM releases the unit. DIM file images also work directly, through the shared format layer described below.
 
 - **Live floppy controls and Boot.** Custom-mode FD icons show insertion and a per-unit access
-  lamp. Left-click ejects; a single raw image dropped from the Filer replaces it without reset.
+  lamp. Left-click ejects; a single supported floppy image dropped from the Filer replaces it without reset.
   The task opens and validates the new file first. The VM thread finishes earlier I/O, changes
   the medium, latches removal for firmware, and acknowledges with `VmPoll` kind 17 before the
   task closes the old handle. A physical eject keeps its passthrough lease; dropping a file
@@ -251,6 +251,19 @@ windows work the same way as the primary VM.
   the next reset. ROM opens an address field (up to six hex digits, even addresses only).
   SCSI IDs 1–7 have their own ROM boot handles and preserve the selected target through the
   generated IPL and Human68k driver initialization.
+
+- **One floppy format layer.** Command-line mounts and VMX68K use
+  `crates/msx68k-bus/src/floppy_image.rs` for format detection and sector translation.
+  RAW and DIM (2HD, 2HC, 2HQ) work in both, independent of filename extension. New formats
+  belong in that registry and its storage mapping; VMX68K's assembly has no size or format
+  list. `VmImage` (14) probes a file through prefixes read by the task's DOS calls. Requests
+  can span several 32 KB chunks, so the transport's buffer does not limit header size.
+  Probed geometry and layout accompany the image into the VM's FDC; remote reads and writes
+  translate sector offsets to file offsets without caching the whole image. Omitted DIM
+  tracks read as $E5. Before writing one, the format layer materializes the tracks backwards
+  in place and updates the DIM flags, preserving other header bytes and existing tracks.
+  A layout-change barrier (`VmPoll` kind 18) closes/reopens the image with the same DOS handle
+  so Human68k persists the new file length before the write completes.
 
 ## 4. First Goal
 

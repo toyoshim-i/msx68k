@@ -4,6 +4,7 @@ pub mod bus;
 pub mod crtc;
 pub mod dmac;
 pub mod fdc;
+pub mod floppy_image;
 pub mod gdb;
 pub mod guest_build;
 pub mod human_fs;

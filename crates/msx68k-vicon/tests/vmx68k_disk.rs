@@ -30,20 +30,25 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 
 #[test]
 fn a_vm_boots_from_an_image_on_the_primary_vms_drive() {
-    boot_image(false, false);
+    boot_image(false, false, false);
 }
 
 #[test]
 fn a_vm_boots_from_a_custom_image_on_the_primary_vms_drive() {
-    boot_image(true, false);
+    boot_image(true, false, false);
 }
 
 #[test]
 fn a_vm_boots_from_a_custom_hdd_on_the_primary_vms_drive() {
-    boot_image(true, true);
+    boot_image(true, true, false);
 }
 
-fn boot_image(custom: bool, hdd: bool) {
+#[test]
+fn a_vm_boots_from_a_dim_image_on_the_primary_vms_drive() {
+    boot_image(true, false, true);
+}
+
+fn boot_image(custom: bool, hdd: bool, dim: bool) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -79,6 +84,12 @@ fn boot_image(custom: bool, hdd: bool) {
         data: human.clone(),
     };
     let mut files = vec![drive0];
+    if dim {
+        let mut data = vec![1; 256];
+        data[0] = 0;
+        data.extend_from_slice(&human);
+        files[0].data = data;
+    }
     let mut sram = None;
     if hdd {
         files[0].data = msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd(&human, &[], 8);
@@ -154,8 +165,8 @@ fn boot_image(custom: bool, hdd: bool) {
                 if *len as usize == image_bytes));
         } else {
             assert!(matches!(drives.as_slice(), [
-                CustomDrive::File { len, .. }, CustomDrive::Missing, CustomDrive::File { .. }
-            ] if *len as usize == human.len()));
+                CustomDrive::Image { len, .. }, CustomDrive::Missing, CustomDrive::Image { .. }
+            ] if *len as usize == image_bytes));
         }
     } else {
         assert!(custom_drives.is_none());

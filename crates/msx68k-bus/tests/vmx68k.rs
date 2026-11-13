@@ -614,6 +614,15 @@ fn new_setup_keeps_the_running_vm_and_opens_its_own_configuration() {
 
 #[test]
 fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
+    floppy_controls(false);
+}
+
+#[test]
+fn dim_drops_write_omitted_tracks_and_keep_the_image_format() {
+    floppy_controls(true);
+}
+
+fn floppy_controls(dim: bool) {
     use msx68k_bus::sx_resource::Resource;
     use msx68k_bus::vmx68k::{vm_bridge, BridgeOp};
     let mut setup =
@@ -622,7 +631,7 @@ fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
         b"V68D",
         Resource::new(
             0,
-            msx68k_bus::vmx68k_library::setup_drives(true, &[(0, b"")]),
+            msx68k_bus::vmx68k_library::setup_drives(true, &[(0, if dim { b"A:\\X68\\ZZZ.DIM" } else { b"" })]),
         ),
     );
     let file = |dir: &[u8; 8], name: &[u8; 8], ext: &[u8; 3], data| ExtractedFile {
@@ -635,10 +644,26 @@ fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
         date: 0x5821,
         data,
     };
-    let image = vec![0x5A; 737_280];
+    let image = if dim {
+        let mut image = vec![0; 256];
+        image[1] = 1;
+        image[3] = 1;
+        image.extend(vec![0x5A; 8192]);
+        image.extend(vec![0x6B; 8192]);
+        image
+    } else {
+        vec![0x5A; 737_280]
+    };
+    let file_bytes = image.len();
+    let extension = if dim { b"DIM" } else { b"XDF" };
+    let expected_path = if dim {
+        "A:\\X68\\ZZZ.DIM"
+    } else {
+        "A:\\X68\\ZZZ.XDF"
+    };
     let Some(mut vm) = boot_with(vec![
         file(b"VMX68K  ", b"DEFAULT ", b"V68", setup.to_bytes()),
-        file(b"X68     ", b"ZZZ     ", b"XDF", image.clone()),
+        file(b"X68     ", b"ZZZ     ", extension, image.clone()),
     ]) else {
         return;
     };
@@ -680,28 +705,43 @@ fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
         id: 1,
         unit: 0,
         handle,
-        len: 737_280,
+        len,
     }] = events.as_slice()
     else {
         panic!("drop must open the image without restarting: {events:?}");
     };
+    assert_eq!(*len as usize, file_bytes);
     let handle = *handle;
+    let mut layout = vm
+        .bus
+        .take_vm_image(handle)
+        .expect("shared parser accepted the dropped image");
     assert_eq!(
         saved_drives(&vm, "DEFAULT"),
-        Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))
+        Some((true, vec![(0, expected_path.into())]))
     );
     // Acknowledge application on the VM thread, then the icon can eject again.
     let worker_bridge = bridge.clone();
     let worker = std::thread::spawn(move || {
-        let data = worker_bridge
-            .ask(BridgeOp::HandleRead {
-                handle,
-                offset: 0,
-                len: 1024,
-            })
-            .unwrap();
-        assert_eq!(data.data, vec![0x5A; 1024]);
-        worker_bridge.ask(BridgeOp::MediaDone { unit: 0 }).unwrap();
+        let disk =
+            msx68k_bus::vmx68k::RemoteDisk::with_handle(worker_bridge.clone(), handle, file_bytes);
+        assert_eq!(layout.read(&disk, 0, 1024).unwrap(), vec![0x5A; 1024]);
+        if dim {
+            // Closing the earlier image frees a lower DOS handle. ImageSync
+            // must use DUP2 when reopening so this handle keeps its identity.
+            worker_bridge.ask(BridgeOp::MediaDone { unit: 0 }).unwrap();
+            // The primary's DOS must extend a packed DIM and preserve its neighbours.
+            assert!(layout.write(&disk, 8192 + 1024, vec![0x7C; 1024]));
+            assert_eq!(layout.read(&disk, 8192, 1024).unwrap(), vec![0xE5; 1024]);
+            assert_eq!(
+                layout.read(&disk, 8192 + 1024, 1024).unwrap(),
+                vec![0x7C; 1024]
+            );
+            assert_eq!(layout.read(&disk, 16384, 1024).unwrap(), vec![0x6B; 1024]);
+        }
+        if !dim {
+            worker_bridge.ask(BridgeOp::MediaDone { unit: 0 }).unwrap();
+        }
     });
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !worker.is_finished() && std::time::Instant::now() < until {
@@ -709,6 +749,17 @@ fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
     }
     assert!(worker.is_finished());
     worker.join().unwrap();
+    if dim {
+        let mut image = vm.bus.scsi_hdd_data(0).unwrap().to_vec();
+        let file = HumanVolume::open(&mut image)
+            .unwrap()
+            .read_file(&[short_name("X68", "")], &short_name("ZZZ", "DIM"))
+            .unwrap();
+        assert_eq!(file.len(), 256 + 1_261_568);
+        let (_, raw) = msx68k_bus::floppy_image::FloppyImage::decode(&file).unwrap();
+        assert_eq!(&raw[8192 + 1024..8192 + 2048], vec![0x7C; 1024]);
+        assert_eq!(&raw[16384..16384 + 1024], vec![0x6B; 1024]);
+    }
     vm.bus.set_vm_floppies(1, 3 | 1 << 4 | 1 << 8, 0);
     vm.run_steps(2_000_000);
     assert_eq!(

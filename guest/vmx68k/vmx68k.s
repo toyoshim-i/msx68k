@@ -135,6 +135,7 @@ vm_boot:	.ds.w	1
 new_boot:	.ds.w	1
 fd_rect:	.ds.w	4
 pending_old:	.ds.w	4
+pending_paths:	.ds.b	4*(PATH_MAX+2)
 media_busy:	.ds.b	4
 size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
 	.even
@@ -1282,7 +1283,7 @@ open_custom_drives:
 	beq	open_custom_done
 	move.w	vm_drives+DRV_COUNT(a5), d7
 	cmpi.w	#DRIVE_ROWS, d7
-	bls.s	open_custom_count
+	bls	open_custom_count
 	moveq.l	#DRIVE_ROWS, d7
 open_custom_count:
 	move.w	d7, drive_table(a5)
@@ -1295,14 +1296,14 @@ open_custom_next:
 	move.w	#-1, 2(a4)
 	clr.l	4(a4)
 	tst.w	(a3)
-	bne.s	open_custom_letter
+	bne	open_custom_letter
 	moveq.l	#0, d1
 	move.b	2(a3), d1
 	cmpi.w	#PATH_MAX, d1
-	bhi.s	open_custom_advance
+	bhi	open_custom_advance
 	lea	3(a3), a0
 	lea	image_path(a5), a1
-	bra.s	open_custom_copy_test
+	bra	open_custom_copy_test
 open_custom_copy:
 	move.b	(a0)+, (a1)+
 open_custom_copy_test:
@@ -1313,7 +1314,7 @@ open_custom_copy_test:
 	DOS	_OPEN
 	addq.l	#6, sp
 	tst.l	d0
-	bmi.s	open_custom_advance
+	bmi	open_custom_advance
 	move.w	d0, 2(a4)
 	move.w	#2, -(sp)
 	clr.l	-(sp)
@@ -1321,20 +1322,29 @@ open_custom_copy_test:
 	DOS	_SEEK
 	addq.l	#8, sp
 	tst.l	d0
-	bpl.s	open_custom_size
+	bpl	open_custom_size
+open_custom_bad_file:
 	move.w	2(a4), -(sp)
 	DOS	_CLOSE
 	addq.l	#2, sp
 	move.w	#-1, 2(a4)
-	bra.s	open_custom_advance
+	bra	open_custom_advance
 open_custom_size:
-	move.l	d0, 4(a4)
-	bra.s	open_custom_advance
+	move.l	d0,4(a4)
+	moveq.l	#0,d3
+	move.w	2(a4),d3
+	bsr	probe_image
+	tst.l	d0
+	bmi	open_custom_bad_file
+	cmpi.l	#1,d0
+	bne	open_custom_advance
+	move.w	#3,(a4)		; a floppy identified by the shared parser
+	bra	open_custom_advance
 open_custom_letter:
 	cmpi.w	#2, (a3)
-	bne.s	open_custom_letter_ok
+	bne	open_custom_letter_ok
 	tst.l	pass_flush_result(a5)
-	bmi.s	open_custom_advance
+	bmi	open_custom_advance
 open_custom_letter_ok:
 	moveq.l	#0, d0
 	move.b	3(a3), d0
@@ -1354,13 +1364,16 @@ close_custom_drives:
 	move.w	drive_table(a5), d7
 	clr.w	drive_table(a5)
 	subq.w	#1, d7
-	bmi.s	close_custom_done
+	bmi	close_custom_done
 	lea	drive_table+2(a5), a4
 close_custom_next:
+	cmpi.w	#3,(a4)
+	beq	close_custom_file
 	tst.w	(a4)
-	bne.s	close_custom_advance
+	bne	close_custom_advance
+close_custom_file:
 	move.w	2(a4), d0
-	bmi.s	close_custom_advance
+	bmi	close_custom_advance
 	move.w	d0, -(sp)
 	DOS	_CLOSE
 	addq.l	#2, sp
@@ -1374,7 +1387,7 @@ close_pending:
 	move.w	(a4),d0
 	move.w	#-1,(a4)+
 	tst.w	d0
-	bmi.s	close_pending_next
+	bmi	close_pending_next
 	move.w	d0,-(sp)
 	DOS	_CLOSE
 	addq.l	#2,sp
@@ -1873,7 +1886,85 @@ serve_table:
 	.dc.w	serve_handle_write-serve_table	; 15 write a handle
 	.dc.w	serve_filedate-serve_table	; 16 _FILEDATE
 	.dc.w	serve_media_done-serve_table	; 17 old medium is no longer in use
-SERVE_KINDS	.equ	17
+	.dc.w	serve_image_sync-serve_table	; 18 commit resized image metadata
+SERVE_KINDS	.equ	18
+
+serve_image_sync:
+	* 18: commit a container's changed file length. Human68k updates the
+	* directory on _CLOSE, not _FFLUSH. Restore the same DOS handle with _DUP2.
+	movem.l	d1-d2/d4-d7/a0-a3,-(sp)
+	move.w	request_handle+2(a5),d7
+	lea	drive_table+2(a5),a1
+	lea	run_drives+DRV_ENTRIES(a5),a2
+	move.w	drive_table(a5),d6
+	subq.w	#1,d6
+	bmi	image_sync_pending
+image_sync_find:
+	tst.w	(a1)
+	beq	image_sync_compare
+	cmpi.w	#3,(a1)
+	bne	image_sync_next
+image_sync_compare:
+	cmp.w	2(a1),d7
+	beq	image_sync_row
+image_sync_next:
+	addq.l	#8,a1
+	lea	ENTRY_SIZE(a2),a2
+	dbra	d6,image_sync_find
+image_sync_pending:
+	lea	pending_old(a5),a1
+	lea	pending_paths(a5),a0
+	moveq.l	#3,d6
+image_sync_pending_find:
+	cmp.w	(a1)+,d7
+	beq	image_sync_path
+	lea	PATH_MAX+2(a0),a0
+	dbra	d6,image_sync_pending_find
+	bra	image_sync_done
+image_sync_row:
+	lea	2(a2),a0
+image_sync_path:
+	moveq.l	#0,d6
+	move.b	(a0)+,d6
+	lea	image_path(a5),a1
+	bra	image_sync_copy_test
+image_sync_copy:
+	move.b	(a0)+,(a1)+
+image_sync_copy_test:
+	dbra	d6,image_sync_copy
+	clr.b	(a1)
+	move.w	d7,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	tst.l	d0
+	bmi	image_sync_result
+	move.w	#2,-(sp)
+	pea	image_path(a5)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	image_sync_result
+	cmp.w	d7,d0
+	beq	image_sync_ok
+	move.w	d0,d1
+	move.w	d7,-(sp)
+	move.w	d1,-(sp)
+	DOS	_DUP2
+	addq.l	#4,sp
+	move.l	d0,d2
+	move.w	d1,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	move.l	d2,d0
+	tst.l	d0
+	bmi	image_sync_result
+image_sync_ok:
+	moveq.l	#0,d0
+image_sync_result:
+	move.l	d0,d3
+image_sync_done:
+	movem.l	(sp)+,d1-d2/d4-d7/a0-a3
+	bra	serve_reply
 
 serve_media_done:
 	move.l	request_offset(a5), d0
@@ -2233,18 +2324,53 @@ handle_drop:
 	addq.l	#2,sp
 	bra	event_loop
 
-* D0 raw length -> Z if supported, otherwise NZ.
-raw_floppy_size:
-	cmpi.l	#1261568,d0
-	beq	raw_floppy_done
-	cmpi.l	#1419264,d0
-	beq	raw_floppy_done
-	cmpi.l	#1474560,d0
-	beq	raw_floppy_done
-	cmpi.l	#737280,d0
-	beq	raw_floppy_done
-	cmpi.l	#655360,d0
-raw_floppy_done:
+* D0 file length, D3 DOS handle -> D0 1 floppy, 0 other, -1 read error.
+* The host requests the prefix it needs; no format constants live in this task.
+probe_image:
+	movem.l	d1-d7/a0-a2,-(sp)
+	move.l	d0,d6
+	move.l	d3,d7
+	moveq.l	#0,d5
+probe_image_next:
+	moveq.l	#MSX68K_FN_VM_IMAGE,d0
+	move.l	d7,d1
+	move.l	d6,d2
+	move.l	d5,d3
+	lea	disk_buffer(a5),a0
+	bsr	msx68k_call
+	cmpi.l	#2,d0
+	bne	probe_image_done
+	cmpi.l	#DISK_BUFFER_SIZE,d1
+	bhi	probe_image_error
+	cmp.l	d6,d1
+	bhi	probe_image_error
+	tst.l	d1
+	beq	probe_image_error
+	move.l	d1,d5
+	move.l	d2,d4
+	add.l	d1,d2
+	bcs	probe_image_error
+	cmp.l	d6,d2
+	bhi	probe_image_error
+	clr.w	-(sp)
+	move.l	d4,-(sp)
+	move.w	d7,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi	probe_image_error
+	move.l	d5,-(sp)
+	pea	disk_buffer(a5)
+	move.w	d7,-(sp)
+	DOS	_READ
+	lea	10(sp),sp
+	cmp.l	d5,d0
+	bne	probe_image_error
+	bra	probe_image_next
+probe_image_error:
+	moveq.l	#-1,d0
+probe_image_done:
+	movem.l	(sp)+,d1-d7/a0-a2
 	rts
 
 * Change the selected medium without a reset. Keep the old handle until kind 17
@@ -2270,13 +2396,13 @@ change_fd_find:
 	bcc	change_fd_append
 	cmpi.w	#2,(a4)
 	beq	change_fd_slot
+	cmpi.w	#3,(a4)
+	beq	change_fd_slot
 	tst.w	(a4)
 	bne	change_fd_find_next
 	tst.w	2(a4)
 	bmi	change_fd_slot
-	move.l	4(a4),d0
-	bsr	raw_floppy_size
-	bne	change_fd_find_next
+	bra	change_fd_find_next
 change_fd_slot:
 	tst.w	d7
 	beq	change_fd_found
@@ -2319,7 +2445,8 @@ change_fd_found:
 	DOS	_SEEK
 	addq.l	#8,sp
 	move.l	d0,d5
-	bsr	raw_floppy_size
+	bsr	probe_image
+	cmpi.l	#1,d0
 	bne	change_fd_reject
 change_fd_request:
 	move.l	d4,d2
@@ -2335,9 +2462,21 @@ change_fd_request:
 	move.w	d4,d0
 	add.w	d0,d0
 	lea	pending_old(a5),a0
+	cmpi.w	#3,(a4)
+	beq	change_fd_old_file
 	tst.w	(a4)
 	bne	change_fd_no_old
+change_fd_old_file:
 	move.w	2(a4),(a0,d0.w)
+	move.w	d4,d0
+	mulu	#PATH_MAX+2,d0
+	lea	pending_paths(a5),a0
+	adda.w	d0,a0
+	lea	2(a3),a1
+	moveq.l	#(PATH_MAX+2)/2-1,d0
+change_fd_keep_path:
+	move.w	(a1)+,(a0)+
+	dbra	d0,change_fd_keep_path
 change_fd_no_old:
 	cmp.w	drive_table(a5),d6
 	bcs	change_fd_count_kept
@@ -2353,6 +2492,10 @@ change_fd_count_kept:
 	bmi	change_fd_done
 change_fd_save:
 	clr.w	(a4)
+	tst.l	d3
+	bmi	change_fd_empty
+	move.w	#3,(a4)
+change_fd_empty:
 	move.w	d3,2(a4)
 	move.l	d5,4(a4)
 	clr.w	(a3)

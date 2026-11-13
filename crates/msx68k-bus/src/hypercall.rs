@@ -99,6 +99,8 @@ pub enum AppFunction {
     VmMedia = 12,
     /// Saves the next boot choice, or creates factory SRAM for a new setup.
     VmBoot = 13,
+    /// Detects image formats through the same registry as local floppy mounts.
+    VmImage = 14,
 }
 
 impl AppFunction {
@@ -118,6 +120,7 @@ impl AppFunction {
             11 => Some(Self::VmRestart),
             12 => Some(Self::VmMedia),
             13 => Some(Self::VmBoot),
+            14 => Some(Self::VmImage),
             _ => None,
         }
     }
@@ -209,6 +212,7 @@ impl X68kBus {
                 Some(AppFunction::VmRestart) => self.hypercall_vm_restart(state),
                 Some(AppFunction::VmMedia) => self.hypercall_vm_media(state),
                 Some(AppFunction::VmBoot) => self.hypercall_vm_boot(state),
+                Some(AppFunction::VmImage) => self.hypercall_vm_image(state),
                 None => TrapResult::Unhandled,
             },
         }
