@@ -639,11 +639,21 @@ impl X68kBus {
 
     pub(crate) fn hypercall_vm_boot(&mut self, state: &mut CpuState) -> TrapResult {
         let (id, choice, rom) = (state.d[1], state.d[2], state.a[1]);
-        if id == 0 {
-            let mut defaults = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config())
-                .sram()
-                .to_vec();
-            defaults[8..12].copy_from_slice(&(state.d[3].clamp(1, 12) << 20).to_be_bytes());
+        // 0 creates a new setup; -1 edits a staged SRAM buffer without changing
+        // any live VM. The latter preserves unrelated settings on normal OK.
+        if id == 0 || id == u32::MAX {
+            let mut defaults = if id == u32::MAX {
+                (0..VM_SRAM_BYTES as u32)
+                    .map(|i| self.peek_u8(state.a[0] + i).unwrap_or(0))
+                    .collect()
+            } else {
+                X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config())
+                    .sram()
+                    .to_vec()
+            };
+            if id == 0 {
+                defaults[8..12].copy_from_slice(&(state.d[3].clamp(1, 12) << 20).to_be_bytes());
+            }
             if apply_boot_choice(&mut defaults, choice, rom) {
                 for (i, &byte) in defaults.iter().enumerate() {
                     self.poke_u8(state.a[0] + i as u32, byte);
@@ -1729,6 +1739,30 @@ mod tests {
             .collect();
         assert_eq!(boot_choice(&saved), 11);
         assert_eq!(&saved[0x20..], &sram[0x20..]);
+    }
+
+    #[test]
+    fn staged_boot_edits_preserve_other_sram_and_do_not_change_live_vms() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let primary = bus.sram().to_vec();
+        let staged: Vec<_> = (0..VM_SRAM_BYTES).map(|i| (i * 7) as u8).collect();
+        for (i, &byte) in staged.iter().enumerate() {
+            bus.poke_u8(0x10000 + i as u32, byte);
+        }
+        let mut state = CpuState::default();
+        state.d[1] = u32::MAX;
+        state.d[2] = 11;
+        state.a[0] = 0x10000;
+        bus.hypercall_vm_boot(&mut state);
+        assert_eq!(state.d[0], 0);
+        let edited: Vec<_> = (0..VM_SRAM_BYTES)
+            .map(|i| bus.peek_u8(0x10000 + i as u32).unwrap())
+            .collect();
+        assert_eq!(boot_choice(&edited), 11);
+        assert_eq!(&edited[..12], &staged[..12]);
+        assert_eq!(&edited[0x20..], &staged[0x20..]);
+        assert_eq!(bus.sram(), primary);
+        assert!(bus.take_vm_events().is_empty());
     }
 
     fn primary_with_floppies() -> X68kBus {

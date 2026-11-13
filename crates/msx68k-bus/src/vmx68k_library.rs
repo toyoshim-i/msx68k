@@ -302,7 +302,7 @@ const D_DISABL: u8 = 0x80;
 const SLIDER_PROC: u16 = 0x13 << 4;
 
 /// Where the configuration dialog shows, centered on a 768×512 screen.
-const CONFIG_DIALOG_BOUNDS: [i16; 4] = [254, 176, 514, 336];
+const CONFIG_DIALOG_BOUNDS: [i16; 4] = [194, 81, 574, 431];
 /// Where the ドライブの詳細 dialog shows, centered on a 768×512 screen.
 const DRIVE_DIALOG_BOUNDS: [i16; 4] = [149, 118, 619, 393];
 /// Editable text items' type (`DIALOG.H`).
@@ -313,30 +313,56 @@ const D_EDTTXT: u8 = 0x10;
 fn text_field(size: u8) -> Vec<u8> {
     pascal_even(&vec![b' '; size as usize])
 }
-const MEMORY_SLIDER_BOUNDS: [i16; 4] = [70, 60, 200, 76];
+const MEMORY_SLIDER_BOUNDS: [i16; 4] = [90, 122, 254, 140];
 
 /// Items of the configuration dialog (see [`ITEM_OK`] and on), in Shift_JIS. Radio buttons are
 /// switches without a label, as in Sharp's dialogs, so their labels are static text: the
 /// title, CPU, メモリ, 68000, and 68030, items 7 to 11, and ドライブ, 共有, and カスタム, 15 to 17.
+/// Path 18, frequency 20 and boot device 21 share the same form for 設定 and 新規;
+/// the guest controls path editability and initializes the remaining labels.
 fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     vec![
-        ([150, 132, 190, 150], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
-        ([200, 132, 240, 150], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
-        ([70, 36, 103, 45], D_RADBTN, vec![0, 0]),
-        ([150, 36, 183, 45], D_RADBTN, vec![0, 0]),
-        (MEMORY_SLIDER_BOUNDS, D_RSCITM, MEMORY_SLIDER_ID.to_be_bytes().to_vec()),
-        ([206, 63, 250, 75], D_STCTXT | D_DISABL, static_text()),
-        ([100, 8, 160, 22], D_STCTXT | D_DISABL, static_text()), // VMの設定
-        ([14, 35, 64, 47], D_STCTXT | D_DISABL, static_text()),
-        ([14, 63, 64, 75], D_STCTXT | D_DISABL, static_text()), // メモリ
-        ([107, 35, 145, 47], D_STCTXT | D_DISABL, static_text()),
-        ([187, 35, 225, 47], D_STCTXT | D_DISABL, static_text()),
-        ([70, 90, 103, 99], D_RADBTN, vec![0, 0]),
-        ([70, 108, 103, 117], D_RADBTN, vec![0, 0]),
-        ([160, 104, 210, 122], D_CHRBTN, pascal_even(b"\x8F\xDA\x8D\xD7\x2E\x2E\x2E")), // 詳細...
-        ([14, 89, 64, 101], D_STCTXT | D_DISABL, static_text()), // ドライブ
-        ([107, 89, 145, 101], D_STCTXT | D_DISABL, static_text()), // 共有
-        ([107, 107, 157, 119], D_STCTXT | D_DISABL, static_text()), // カスタム
+        (
+            [164, 305, 248, 331],
+            D_CHRBTN,
+            pascal_even(b"\x90\xDD\x92\xE8"),
+        ),
+        (
+            [264, 305, 356, 331],
+            D_CHRBTN,
+            pascal_even(b"\x8E\xE6\x8F\xC1"),
+        ),
+        ([90, 88, 123, 97], D_RADBTN, vec![0, 0]),
+        ([212, 88, 245, 97], D_RADBTN, vec![0, 0]),
+        (
+            MEMORY_SLIDER_BOUNDS,
+            D_RSCITM,
+            MEMORY_SLIDER_ID.to_be_bytes().to_vec(),
+        ),
+        ([274, 123, 322, 139], D_STCTXT | D_DISABL, static_text()),
+        ([140, 8, 240, 26], D_STCTXT | D_DISABL, static_text()),
+        ([18, 86, 82, 104], D_STCTXT | D_DISABL, static_text()),
+        ([18, 123, 82, 141], D_STCTXT | D_DISABL, static_text()),
+        ([126, 86, 190, 104], D_STCTXT | D_DISABL, static_text()),
+        ([248, 86, 312, 104], D_STCTXT | D_DISABL, static_text()),
+        ([90, 162, 123, 171], D_RADBTN, vec![0, 0]),
+        ([90, 190, 123, 199], D_RADBTN, vec![0, 0]),
+        (
+            [238, 182, 348, 208],
+            D_CHRBTN,
+            pascal_even(b"\x8F\xDA\x8D\xD7..."),
+        ),
+        ([18, 160, 82, 178], D_STCTXT | D_DISABL, static_text()),
+        ([126, 160, 190, 178], D_STCTXT | D_DISABL, static_text()),
+        ([126, 188, 214, 206], D_STCTXT | D_DISABL, static_text()),
+        ([90, 42, 356, 66], D_EDTTXT | D_DISABL, text_field(91)),
+        ([18, 42, 82, 66], D_STCTXT | D_DISABL, static_text()),
+        ([90, 218, 276, 244], D_CHRBTN, pascal_even(b"10MHz")),
+        ([90, 254, 276, 280], D_CHRBTN, pascal_even(b"STD")),
+        ([18, 218, 82, 242], D_STCTXT | D_DISABL, static_text()),
+        ([18, 254, 82, 278], D_STCTXT | D_DISABL, static_text()),
+        ([252, 224, 270, 240], D_STCTXT | D_DISABL, static_text()),
+        ([252, 260, 270, 276], D_STCTXT | D_DISABL, static_text()),
     ]
 }
 
@@ -413,40 +439,15 @@ fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
     plot_image(&rows.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-fn new_setup_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
-    let mut items = vec![
-        ([330, 160, 380, 178], D_CHRBTN, pascal_even(b"OK")),
-        (
-            [390, 160, 450, 178],
-            D_CHRBTN,
-            pascal_even(b"\x8E\xE6\x8F\xC1"),
-        ),
-        ([12, 30, 450, 46], D_EDTTXT | D_DISABL, text_field(91)),
-    ];
-    let names = [
-        "STD", "FD0", "FD1", "FD2", "FD3", "SCSI0", "SCSI1", "SCSI2", "SCSI3", "SCSI4", "SCSI5",
-        "SCSI6", "SCSI7", "ROM...",
-    ];
-    for i in 0..14 {
-        let x = 12 + (i % 5) as i16 * 90;
-        let y = 72 + (i / 5) as i16 * 26;
-        items.push(([x, y, x + 16, y + 12], D_RADBTN, vec![0, 0]));
-    }
-    for (i, name) in names.iter().enumerate() {
-        let x = 30 + (i % 5) as i16 * 90;
-        let y = 72 + (i / 5) as i16 * 26;
+fn choice_items(count: usize) -> Vec<([i16; 4], u8, Vec<u8>)> {
+    let mut items = vec![([0, 0, 0, 0], D_STCTXT | D_DISABL, static_text()); 2];
+    for row in 0..count as i16 {
         items.push((
-            [x, y, x + 68, y + 12],
-            D_STCTXT | D_DISABL,
-            pascal_even(name.as_bytes()),
+            [4, 4 + row * 18, 182, 20 + row * 18],
+            D_CHRBTN,
+            pascal_even(b" "),
         ));
     }
-    items.push((
-        [12, 10, 450, 24],
-        D_STCTXT | D_DISABL,
-        pascal_even(b"\x90\x56\x82\xB5\x82\xA2\x90\xDD\x92\xE8: .V68"),
-    ));
-    items.push(([12, 54, 450, 68], D_STCTXT | D_DISABL, pascal_even(b"Boot")));
     items
 }
 
@@ -494,11 +495,6 @@ pub fn vmx68k_library() -> Vec<u8> {
     }
     library.insert(
         b"DLOG",
-        Resource::new(3, dialog_template([149, 160, 619, 350], 3)),
-    );
-    library.insert(b"DITL", Resource::new(3, dialog_items(&new_setup_items())));
-    library.insert(
-        b"DLOG",
         Resource::new(4, dialog_template([234, 200, 534, 300], 4)),
     );
     library.insert(
@@ -512,10 +508,14 @@ pub fn vmx68k_library() -> Vec<u8> {
                 (
                     [20, 12, 280, 28],
                     D_STCTXT | D_DISABL,
-                    pascal_even(b"ROM (hex)"),
+                    static_text(),
                 ),
             ])),
     );
+    for (id, count, bounds) in [(5,4,[284,325,470,405]), (6,14,[284,79,470,339])] {
+        library.insert(b"DLOG", Resource::new(id, dialog_template(bounds,id)));
+        library.insert(b"DITL", Resource::new(id, dialog_items(&choice_items(count))));
+    }
     library.to_bytes()
 }
 
@@ -592,7 +592,7 @@ mod tests {
         );
         let library = ResourceLibrary::parse(&vmx68k_library()).unwrap();
         let ditl = &library.get(b"DITL", CONFIG_DIALOG_ID).unwrap().data;
-        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 16, "seventeen items");
+        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 24, "twenty-five shared form items");
         let ditl = &library.get(b"DITL", DRIVE_DIALOG_ID).unwrap().data;
         let items = u16::from_be_bytes([ditl[0], ditl[1]]) + 1;
         assert_eq!(items, ITEM_ROWS - 1 + DRIVE_ROWS * ROW_ITEMS);

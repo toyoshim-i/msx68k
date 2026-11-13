@@ -218,10 +218,14 @@ DITGet			.equ	$A2D1	; Get an item's text (type.w, handle, buffer)
 DIHide			.equ	$A2D8	; Hide an item (dlg, no.w)
 DIShow			.equ	$A2D9	; Show an item again (dlg, no.w)
 CMShine			.equ	$A298	; Highlight a control's part (handle, part.w): 255 inactive
+TMCaret			.equ	$A311
 TMGetText		.equ	$A315	; Read the current edit buffer
 TMEvent			.equ	$A31C	; Dispatch a text edit event
 TMIdle			.equ	$A30E	; Blink a text edit's cursor (handle)
 DMError			.equ	$A2F6	; An alert (flags.w, ASCIIZ) -> D0 the button
+EMMSLoc			.equ	$A0A7
+EMLBttn			.equ	$A0A8
+CMTitleSet		.equ	$A29F
 CMCheck			.equ	$A29A	; Track a control until mouse release
 CMValueSet		.equ	$A290	; Set a control's value (handle, value.w)
 CMValueGet		.equ	$A291	; A control's value (handle) -> D0

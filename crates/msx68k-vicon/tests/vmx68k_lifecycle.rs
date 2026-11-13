@@ -27,7 +27,7 @@ fn vmx68k_lifecycle() {
         ),
         (
             "new-setup",
-            ui::new_setup_keeps_the_running_vm_and_opens_its_own_configuration,
+            ui::new_setup_uses_the_common_form_without_changing_its_creator,
         ),
         ("settings-drop", ui::settings_allow_filer_drops_and_restore_the_parent),
         (

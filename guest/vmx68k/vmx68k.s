@@ -32,6 +32,9 @@ ITEM_MEMORY	.equ	5
 ITEM_MEMORY_SIZE	.equ	6
 ITEM_SHARED	.equ	12		; The ドライブ row: 共有, カスタム, and 詳細...
 ITEM_CUSTOM	.equ	13
+ITEM_PATH	.equ	18
+ITEM_FREQUENCY	.equ	20
+ITEM_BOOT	.equ	21
 ITEM_DETAILS	.equ	14
 DRIVE_DIALOG_ID	.equ	2		; The ドライブの詳細 dialog
 ITEM_FEWER	.equ	3		; Its - and + buttons and the number of drives
@@ -49,7 +52,6 @@ DRV_COUNT	.equ	4
 DRV_ENTRIES	.equ	6
 ENTRY_SIZE	.equ	96
 DRIVES_SIZE	.equ	DRV_ENTRIES+DRIVE_ROWS*ENTRY_SIZE
-WINDOW_KIND	.equ	64		; Window.kind: W_DIALOG is bit 1
 WINDOW_UPDATE	.equ	80
 WINDOW_TASK	.equ	110
 DIALOG_ITEMS	.equ	114
@@ -94,7 +96,19 @@ drive0_fd:	.ds.w	1
 vm_speed:	.ds.w	1		; by MSX68K_FN_VM_SPEED's numbers for run_cpu
 vm_cpu:		.ds.w	1		; the setup's CPU, 0 the 68000, 1 the 68030
 vm_ram:		.ds.w	1		; the setup's RAM in MB, 1 to 12
+run_speed:	.ds.w	1		; active speed, independent of settings pending a CPU restart
 run_cpu:	.ds.w	1		; the CPU the VM runs with, whose speeds the menu shows
+config_new:	.ds.w	1
+new_result:	.ds.w	1
+cfg_old_speed:	.ds.w	1
+cfg_speed:	.ds.w	1
+cfg_boot:	.ds.w	1
+cfg_rom:	.ds.l	1
+cfg_edit:	.ds.w	1
+popup_parent:	.ds.l	1
+text_parent:	.ds.l	1
+text_record:	.ds.b	DIALOG_RECORD
+		.ds.w	1
 dlg_cpu:	.ds.w	1		; the dialog's choices
 dlg_ram:	.ds.w	1
 dialog_end:	.ds.w	1		; ENDTSK/CLOSEALL must unwind both settings windows
@@ -138,7 +152,6 @@ config_string:	.ds.b	128		; the Configuration menu's
 boot_string:	.ds.b	160
 fd_state:	.ds.l	1
 vm_boot:	.ds.w	1
-new_boot:	.ds.w	1
 fd_rect:	.ds.w	4
 pending_old:	.ds.w	4
 pending_paths:	.ds.b	4*(PATH_MAX+2)
@@ -153,6 +166,7 @@ det_drives:	.ds.b	DRIVES_SIZE	; ドライブの詳細's
 pass_flush_result:	.ds.l	1	; primary flush before FD ownership changes
 drive_table:	.ds.w	1		; count, then kind.w, handle.w, size.l
 		.ds.b	DRIVE_ROWS*8
+old_drives:	.ds.b	DRIVES_SIZE
 new_path:	.ds.b	PATH_MAX
 old_path:	.ds.b	PATH_MAX
 new_command:	.ds.b	PATH_MAX+12
@@ -302,6 +316,7 @@ vm_open_sram:
 	swap	d7
 	move.w	vm_ram(a5), d7
 	move.w	vm_cpu(a5), run_cpu(a5)
+	move.w	vm_speed(a5), run_speed(a5)
 	bsr	custom_drive_table
 	bsr	msx68k_call
 	tst.l	d0
@@ -944,10 +959,9 @@ draw_lamp_fill:
 
 * -----------------------------------------------------------------------------
 * Helper: config_menu
-* Pops up the Configuration menu where the right button went down: "設定...",
-* the configuration dialog, and the name of the CPU the VM runs with, its speeds
-* as a submenu, the current one checked. A speed chosen is applied to the VM at
-* once.
+* Pops up 新規..., a blank separator, 設定..., 起動装置, and 周波数.
+* Shared mode disables 起動装置. The current CPU's frequency submenu checks
+* its active speed; choosing a speed applies it immediately.
 * -----------------------------------------------------------------------------
 config_menu:
 	movem.l	d0-d4/a0-a2, -(sp)
@@ -961,7 +975,7 @@ config_menu:
 	lea	menu_string(a5), a1
 	moveq.l	#0, d1
 config_speed_item:
-	cmp.w	vm_speed(a5), d1
+	cmp.w	run_speed(a5), d1
 	bne.s	config_speed_copy
 	move.b	#'!', (a1)+
 config_speed_copy:
@@ -978,33 +992,21 @@ config_speed_next:
 config_speed_built:
 	clr.b	(a1)
 
-	* The menu: its head, then the CPU's name
-	lea	config_string(a5), a1
-	lea	config_menu_head(pc), a0
+	* New, blank separator, settings, boot device (disabled for shares), frequency.
+	lea	config_string(a5),a1
+	lea	config_menu_head(pc),a0
 config_head_copy:
-	move.b	(a0)+, (a1)+
+	move.b	(a0)+,(a1)+
 	bne.s	config_head_copy
-	subq.l	#1, a1
-	lea	cpu_names(pc), a0
-	move.w	run_cpu(a5), d0
-	mulu	#6, d0
-	adda.w	d0, a0
-config_name_copy:
-	move.b	(a0)+, (a1)+
-	bne.s	config_name_copy
 	subq.l	#1,a1
 	tst.l	fd_state(a5)
-	beq.s	config_no_boot
-	lea	boot_menu_head(pc),a0
-config_boot_head:
+	bne.s	config_boot_enabled
+	move.b	#'~',(a1)+
+config_boot_enabled:
+	lea	config_menu_tail(pc),a0
+config_tail_copy:
 	move.b	(a0)+,(a1)+
-	bne.s	config_boot_head
-	subq.l	#1,a1
-config_no_boot:
-	lea	new_menu_item(pc),a0
-config_new_head:
-	move.b	(a0)+,(a1)+
-	bne.s	config_new_head
+	bne.s	config_tail_copy
 	bsr	build_boot_menu
 	move.w	#SPEED_MENU_ID, -(sp)
 	move.l	#'MENU', -(sp)
@@ -1035,20 +1037,14 @@ config_new_head:
 	SXCALL	MMHdlDispose		; $A038
 	addq.l	#4, sp
 
-	* "設定...", item 1 of the menu itself, opens the dialog
-	cmpi.l	#1, d3
-	bne.s	config_menu_speed
-	bsr	config_dialog
-	bra	config_menu_done
-config_menu_speed:
-	moveq.l	#3,d0
-	tst.l	fd_state(a5)
-	beq.s	config_new_number
-	addq.w	#1,d0
-config_new_number:
-	cmp.l	d0,d3
-	bne.s	config_not_new
+	cmpi.l	#1,d3			; 新規...
+	bne.s	config_menu_settings
 	bsr	new_setup
+	bra	config_menu_done
+config_menu_settings:
+	cmpi.l	#3,d3			; 設定..., after the blank separator
+	bne.s	config_not_new
+	bsr	config_dialog
 	bra	config_menu_done
 config_not_new:
 	move.l	d3,d0
@@ -1089,8 +1085,11 @@ config_not_boot:
 	bsr	msx68k_call
 	tst.l	d0
 	bne	config_menu_done
-	lea	vm_speed(a5), a1
-	move.w	d2, (a1)
+	move.w	d2,run_speed(a5)
+	move.w	vm_cpu(a5),d0
+	cmp.w	run_cpu(a5),d0
+	bne	config_menu_done
+	move.w	d2,vm_speed(a5)
 	bsr	save_setup
 config_menu_done:
 	movem.l	(sp)+, d0-d4/a0-a2
@@ -1113,15 +1112,23 @@ speed_list_done:
 
 * -----------------------------------------------------------------------------
 * Helper: config_dialog
-* The configuration dialog: the CPU's kind and the memory. What 設定 changes is
-* saved in the setup, and, as it takes effect when the VM restarts, an alert asks
-* whether to restart it now.
+* One staged form for existing settings and new setups. config_new changes only
+* path editing, heading, and acceptance behavior. Hardware changes in existing
+* settings ask whether to restart; creation leaves its parent VM untouched.
 * -----------------------------------------------------------------------------
 config_dialog:
-	movem.l	d0-d3/a0-a2, -(sp)
+	movem.l	d0-d4/a0-a2, -(sp)
+	clr.w	dlg_edit(a5)
+	move.w	#-1,new_result(a5)
+	move.w	vm_speed(a5),cfg_speed(a5)
+	move.w	vm_speed(a5),cfg_old_speed(a5)
+	move.w	vm_boot(a5),cfg_boot(a5)
+	move.l	sram_buffer+12(a5),cfg_rom(a5)
 	clr.w	dialog_end(a5)
 	move.w	vm_cpu(a5), dlg_cpu(a5)
 	move.w	vm_ram(a5), dlg_ram(a5)
+	lea	cfg_dialog(a5),a0
+	bsr	clear_dialog_record
 	move.w	#cfg_dialog, cfg_dialog+DIALOG_RECORD(a5)
 	move.l	#-1, -(sp)		; in front
 	pea	cfg_dialog(a5)		; its record in the work area
@@ -1131,13 +1138,16 @@ config_dialog:
 	move.l	a0, d0
 	beq	config_dialog_done
 	move.l	app_task_id(a5),WINDOW_TASK(a0)	; route events to this task
-	bclr	#1,WINDOW_KIND+1(a0)		; ordinary task window: do not lock application switching
 	move.l	a0, dlg_ptr(a5)
 	lea	config_labels(pc), a1
 	bsr	dlg_labels
 	lea	vm_drives(a5), a0
 	lea	dlg_drives(a5), a1
 	bsr	copy_drives
+	tst.w	dlg_drives+DRV_MODE(a5)
+	bne.s	config_boot_initial
+	clr.w	cfg_boot(a5)
+config_boot_initial:
 	bsr	dlg_show_mode
 	bsr	dlg_show_cpu
 	moveq.l	#ITEM_MEMORY, d0
@@ -1147,14 +1157,50 @@ config_dialog:
 	SXCALL	CMValueSet		; $A290
 	addq.l	#6, sp
 	bsr	dlg_show_size
+	moveq.l	#ITEM_PATH,d0
+	bsr	dlg_item
+	lea	setup_path(a5),a0
+	tst.w	config_new(a5)
+	beq.s	config_path_initial
+	lea	new_default+1(pc),a0
+	lea	new_common_labels(pc),a1
+	bsr	dlg_labels
+	moveq.l	#ITEM_PATH,d0
+	bsr	dlg_item
+	lea	new_default+1(pc),a0
+config_path_initial:
+	lea	dlg_text+1(a5),a1
+	moveq.l	#0,d0
+config_path_copy:
+	move.b	(a0)+,(a1)+
+	beq.s	config_path_copied
+	addq.w	#1,d0
+	bra.s	config_path_copy
+config_path_copied:
+	move.b	d0,dlg_text(a5)
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITSet
+	lea	10(sp),sp
+	bsr	config_choices_draw
 	move.l	dlg_ptr(a5), -(sp)
 	SXCALL	WMShow			; $A207
 	SXCALL	WMSelect
 	SXCALL	GMSetGraph		; $A131
 	SXCALL	DMDraw			; $A2C8
 	addq.l	#4, sp
+	tst.w	config_new(a5)
+	bne.s	config_dialog_loop
+	movea.l	dlg_ptr(a5),a0
+	clr.w	-(sp)
+	move.l	DIALOG_TEDIT(a0),-(sp)
+	SXCALL	TMCaret
+	addq.l	#6,sp
 
 config_dialog_loop:
+	tst.w	dialog_end(a5)
+	bne	config_dialog_close
 	bsr	dialog_control
 	cmpi.w	#ITEM_OK, d0
 	beq	config_dialog_ok
@@ -1170,6 +1216,10 @@ config_dialog_loop:
 	beq	config_dialog_custom
 	cmpi.w	#ITEM_DETAILS, d0
 	beq	config_dialog_details
+	cmpi.w	#ITEM_FREQUENCY,d0
+	beq	config_frequency
+	cmpi.w	#ITEM_BOOT,d0
+	beq	config_boot
 	cmpi.w	#ITEM_MEMORY, d0
 	bne	config_dialog_loop
 	moveq.l	#ITEM_MEMORY, d0
@@ -1195,51 +1245,88 @@ config_dialog_max:
 config_dialog_shared:
 	clr.w	dlg_drives+DRV_MODE(a5)
 	bsr	dlg_show_mode
+	bsr	config_choices_refresh
 	bra	config_dialog_loop
 config_dialog_custom:
 	move.w	#1, dlg_drives+DRV_MODE(a5)
 	bsr	dlg_show_mode
+	bsr	config_choices_refresh
 	bra	config_dialog_loop
 config_dialog_details:
 	tst.w	dlg_drives+DRV_MODE(a5)
 	beq	config_dialog_loop
+	bsr	dialog_store_edit
 	bsr	drive_dialog
 	tst.w	dialog_end(a5)
 	bne	config_dialog_close
 	bra	config_dialog_loop
 config_dialog_68000:
+	tst.w	dlg_cpu(a5)
+	beq	config_dialog_loop
 	clr.w	dlg_cpu(a5)
+	clr.w	cfg_speed(a5)
+	bsr	config_choices_refresh
 	bsr	dlg_show_cpu
 	bra	config_dialog_loop
 config_dialog_68030:
+	cmpi.w	#1,dlg_cpu(a5)
+	beq	config_dialog_loop
 	move.w	#1, dlg_cpu(a5)
+	clr.w	cfg_speed(a5)
+	bsr	config_choices_refresh
 	bsr	dlg_show_cpu
 	bra	config_dialog_loop
 
 config_dialog_ok:
+	tst.w	config_new(a5)
+	beq.s	config_existing_ok
+	bsr	dialog_store_edit
+	moveq.l	#ITEM_PATH,d0
+	bsr	dialog_read_path
+	tst.l	d0
+	bmi	config_dialog_loop
+	clr.w	new_result(a5)
 	bsr	dlg_dispose
-	move.w	dlg_cpu(a5), d0
-	move.w	dlg_ram(a5), d1
-	cmp.w	vm_cpu(a5), d0
-	bne.s	config_dialog_changed
-	cmp.w	vm_ram(a5), d1
-	bne.s	config_dialog_changed
+	bra	config_dialog_done
+config_existing_ok:
+	bsr	dlg_dispose
+	moveq.l	#0,d4
+	move.w	dlg_cpu(a5),d0
+	cmp.w	vm_cpu(a5),d0
+	bne.s	config_requires_restart
+	move.w	dlg_ram(a5),d0
+	cmp.w	vm_ram(a5),d0
+	bne.s	config_requires_restart
 	bsr	drives_differ
-	beq	config_dialog_done
-config_dialog_changed:
-	lea	dlg_drives(a5), a0
-	lea	vm_drives(a5), a1
+	beq.s	config_commit
+config_requires_restart:
+	moveq.l	#1,d4
+config_commit:
+	lea	dlg_drives(a5),a0
+	lea	vm_drives(a5),a1
 	bsr	copy_drives
-	move.w	dlg_cpu(a5), d0
-	move.w	dlg_ram(a5), d1
-	* Another CPU starts at its first speed
-	cmp.w	vm_cpu(a5), d0
-	beq.s	config_dialog_save
-	clr.w	vm_speed(a5)
-config_dialog_save:
-	move.w	d0, vm_cpu(a5)
-	move.w	d1, vm_ram(a5)
+	move.w	dlg_cpu(a5),vm_cpu(a5)
+	move.w	dlg_ram(a5),vm_ram(a5)
+	move.w	cfg_speed(a5),vm_speed(a5)
+	bsr	config_commit_boot
 	bsr	save_setup
+	move.w	vm_cpu(a5),d0
+	cmp.w	run_cpu(a5),d0
+	bne.s	config_speed_deferred
+	move.w	vm_speed(a5),d0
+	cmp.w	cfg_old_speed(a5),d0
+	beq.s	config_speed_deferred
+	moveq.l	#MSX68K_FN_VM_SPEED,d0
+	move.l	vm_id(a5),d1
+	moveq.l	#0,d2
+	move.w	vm_speed(a5),d2
+	bsr	msx68k_call
+	tst.l	d0
+	bne.s	config_speed_deferred
+	move.w	vm_speed(a5),run_speed(a5)
+config_speed_deferred:
+	tst.w	d4
+	beq	config_dialog_done
 	pea	restart_message(pc)
 	move.w	#D_YESNO, -(sp)
 	SXCALL	DMError			; $A2F6
@@ -1260,16 +1347,275 @@ config_dialog_save:
 	tst.l	d0
 	bne	config_dialog_done
 	move.w	vm_cpu(a5), run_cpu(a5)
+	move.w	vm_speed(a5), run_speed(a5)
 	bra	config_dialog_done
 config_dialog_close:
 	bsr	dlg_dispose
 config_dialog_done:
 	move.l	win_ptr(a5), -(sp)
+	SXCALL	WMSelect
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
-	movem.l	(sp)+, d0-d3/a0-a2
+	movem.l	(sp)+, d0-d4/a0-a2
 	tst.w	dialog_end(a5)
 	bne	quit_app
+	rts
+
+* Shared selectors and staged configuration. Nothing below saves until OK.
+config_frequency:
+	move.w	dlg_cpu(a5),d0
+	bsr	speed_list
+	moveq.l	#0,d2
+	move.w	cfg_speed(a5),d2
+	moveq.l	#5,d0
+	bsr	config_selector
+	tst.l	d0
+	bmi	config_dialog_loop
+	move.w	d0,cfg_speed(a5)
+	bsr	config_choices_refresh
+	bra	config_dialog_loop
+config_boot:
+	tst.w	dlg_drives+DRV_MODE(a5)
+	beq	config_dialog_loop
+	moveq.l	#6,d0
+	moveq.l	#14,d1
+	moveq.l	#0,d2
+	move.w	cfg_boot(a5),d2
+	lea	boot_items(pc),a0
+	bsr	config_selector
+	tst.l	d0
+	bmi	config_dialog_loop
+	cmpi.w	#13,d0
+	bne.s	config_boot_selected
+	movea.l	cfg_rom(a5),a1
+	bsr	rom_dialog
+	tst.l	d0
+	bmi	config_dialog_loop
+	move.l	a1,cfg_rom(a5)
+	moveq.l	#13,d0
+config_boot_selected:
+	move.w	d0,cfg_boot(a5)
+	bsr	config_choices_refresh
+	bra	config_dialog_loop
+config_choices_refresh:
+	bsr	config_choices_draw
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	DMDraw
+	addq.l	#4,sp
+	rts
+config_choices_draw:
+	movem.l	d0-d3/a0-a1,-(sp)
+	move.w	dlg_cpu(a5),d0
+	bsr	speed_list
+	move.w	cfg_speed(a5),d1
+	moveq.l	#ITEM_FREQUENCY,d0
+	bsr	config_choice_title
+	lea	boot_items(pc),a0
+	move.w	cfg_boot(a5),d1
+	moveq.l	#ITEM_BOOT,d0
+	bsr	config_choice_title
+	moveq.l	#ITEM_BOOT,d0
+	bsr	dlg_item
+	moveq.l	#0,d0
+	tst.w	dlg_drives+DRV_MODE(a5)
+	bne.s	config_boot_shine
+	move.w	#255,d0
+config_boot_shine:
+	move.w	d0,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMShine
+	addq.l	#6,sp
+	move.w	#25,-(sp)
+	move.l	dlg_ptr(a5),-(sp)
+	tst.w	dlg_drives+DRV_MODE(a5)
+	beq.s	config_boot_arrow_hide
+	SXCALL	DIShow
+	bra.s	config_boot_arrow_done
+config_boot_arrow_hide:
+	SXCALL	DIHide
+config_boot_arrow_done:
+	addq.l	#6,sp
+	movem.l	(sp)+,d0-d3/a0-a1
+	rts
+* D0 item, D1 index, A0 NUL-separated labels.
+config_choice_title:
+	tst.w	d1
+	beq.s	config_title_copy
+config_title_skip:
+	tst.b	(a0)+
+	bne.s	config_title_skip
+	subq.w	#1,d1
+	bne.s	config_title_skip
+config_title_copy:
+	lea	dlg_text+1(a5),a1
+	moveq.l	#0,d1
+config_title_byte:
+	move.b	(a0)+,(a1)+
+	beq.s	config_title_done
+	addq.w	#1,d1
+	bra.s	config_title_byte
+config_title_done:
+	move.b	d1,dlg_text(a5)
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMTitleSet
+	addq.l	#8,sp
+	rts
+* D0 resource, D1 visible count, D2 selected index, A0 label list.
+* A small native choice window accepts left-button selection.
+config_selector:
+	movem.l	d1-d7/a0-a3,-(sp)
+	move.l	a0,a3
+	move.w	d0,d5
+	move.w	d1,d6
+	move.w	d2,d7
+	bsr	dialog_store_edit
+	move.l	dlg_ptr(a5),popup_parent(a5)
+	lea	det_dialog(a5),a0
+	bsr	clear_dialog_record
+	move.w	#det_dialog,det_dialog+DIALOG_RECORD(a5)
+	move.l	#-1,-(sp)
+	pea	det_dialog(a5)
+	move.w	d5,-(sp)
+	SXCALL	DMRefer
+	lea	10(sp),sp
+	move.l	a0,d0
+	beq	config_selector_failed
+	move.l	app_task_id(a5),WINDOW_TASK(a0)
+	move.l	a0,dlg_ptr(a5)
+	moveq.l	#0,d4
+config_selector_labels:
+	move.w	d4,d0
+	addq.w	#3,d0
+	cmp.w	d6,d4
+	bcc.s	config_selector_hide
+	lea	dlg_text+1(a5),a1
+	move.b	#' ',(a1)+
+	cmp.w	d7,d4
+	bne.s	config_selector_marked
+	move.b	#'*',-1(a1)
+config_selector_marked:
+	move.b	#' ',(a1)+
+	moveq.l	#2,d3
+config_selector_label:
+	move.b	(a3)+,(a1)+
+	beq.s	config_selector_label_done
+	addq.w	#1,d3
+	bra.s	config_selector_label
+config_selector_label_done:
+	move.b	d3,dlg_text(a5)
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMTitleSet
+	addq.l	#8,sp
+	bra.s	config_selector_next
+config_selector_hide:
+	move.w	d0,-(sp)
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	DIHide
+	addq.l	#6,sp
+config_selector_next:
+	addq.w	#1,d4
+	moveq.l	#4,d0
+	cmpi.w	#5,d5
+	beq.s	config_selector_limit
+	moveq.l	#14,d0
+config_selector_limit:
+	cmp.w	d0,d4
+	bcs	config_selector_labels
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	WMShow
+	SXCALL	WMSelect
+	SXCALL	GMSetGraph
+	SXCALL	DMDraw
+	addq.l	#4,sp
+	bsr	dialog_control
+	subi.w	#3,d0
+	move.w	d0,d4
+	bsr	dlg_dispose
+	bra.s	config_selector_restore
+config_selector_failed:
+	moveq.l	#-1,d4
+config_selector_restore:
+	move.l	popup_parent(a5),dlg_ptr(a5)
+	clr.l	popup_parent(a5)
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	WMSelect
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+	move.w	d4,d0
+	ext.l	d0
+	movem.l	(sp)+,d1-d7/a0-a3
+	rts
+* Set or retain boot fields in the setup SRAM, and notify a live custom VM.
+config_commit_boot:
+	movem.l	d0-d3/a0-a1,-(sp)
+	move.w	cfg_boot(a5),d0
+	cmp.w	vm_boot(a5),d0
+	bne.s	config_boot_modified
+	move.l	cfg_rom(a5),d0
+	cmp.l	sram_buffer+12(a5),d0
+	beq	config_commit_boot_done
+config_boot_modified:
+	tst.w	vm_drives+DRV_MODE(a5)
+	beq	config_commit_boot_done
+	moveq.l	#MSX68K_FN_VM_BOOT,d0
+	moveq.l	#-1,d1
+	tst.b	has_sram(a5)
+	bne.s	config_edit_sram
+	moveq.l	#0,d1
+config_edit_sram:
+	moveq.l	#0,d2
+	move.w	cfg_boot(a5),d2
+	moveq.l	#0,d3
+	move.w	vm_ram(a5),d3
+	lea	sram_buffer(a5),a0
+	movea.l	cfg_rom(a5),a1
+	bsr	msx68k_call
+	tst.l	d0
+	bne.s	config_commit_boot_done
+	st	has_sram(a5)
+	moveq.l	#MSX68K_FN_VM_BOOT,d0
+	move.l	vm_id(a5),d1
+	bsr	msx68k_call
+config_commit_boot_done:
+	movem.l	(sp)+,d0-d3/a0-a1
+	rts
+* Read a Pascal edit item D0 as a trimmed, NUL-terminated path.
+dialog_read_path:
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITGet
+	lea	10(sp),sp
+	moveq.l	#0,d1
+	move.b	dlg_text(a5),d1
+	cmpi.w	#PATH_MAX-1,d1
+	bls.s	dialog_path_trim
+	moveq.l	#PATH_MAX-1,d1
+dialog_path_trim:
+	tst.w	d1
+	beq.s	dialog_path_empty
+	lea	dlg_text(a5),a0
+	cmpi.b	#' ',(a0,d1.w)
+	bne.s	dialog_path_copy_start
+	subq.w	#1,d1
+	bra.s	dialog_path_trim
+dialog_path_copy_start:
+	lea	dlg_text+1(a5),a0
+	lea	image_path(a5),a1
+	subq.w	#1,d1
+dialog_path_copy:
+	move.b	(a0)+,(a1)+
+	dbra	d1,dialog_path_copy
+	clr.b	(a1)
+	moveq.l	#0,d0
+	rts
+dialog_path_empty:
+	moveq.l	#-1,d0
 	rts
 
 * The running VM's image handles belong to this task, independently of the saved
@@ -1444,11 +1790,20 @@ dlg_labels_next:
 	move.b	(a1)+, d0
 	beq.s	dlg_labels_done
 	bsr	dlg_item
+	move.l	a1,-(sp)		; preserve the label cursor across control calls
 	move.l	a1, -(sp)
 	move.l	dlg_hdl(a5), -(sp)
+	cmpi.w	#4,dlg_type(a5)
+	bne.s	dlg_label_static
+	SXCALL	CMTitleSet
+	addq.l	#8,sp
+	bra.s	dlg_label_set
+dlg_label_static:
 	move.w	dlg_type(a5), -(sp)
-	SXCALL	DITSet			; $A2D2
+	SXCALL	DITSet
 	lea	10(sp), sp
+dlg_label_set:
+	move.l	(sp)+,a1
 	moveq.l	#0, d0
 	move.b	(a1), d0
 	lea	1(a1, d0.w), a1
@@ -1499,11 +1854,14 @@ dlg_show_mode_shine:
 * -----------------------------------------------------------------------------
 drive_dialog:
 	movem.l	d0-d4/a0-a2, -(sp)
+	move.w	dlg_edit(a5),cfg_edit(a5)
 	clr.w	dlg_edit(a5)
 	lea	dlg_drives(a5), a0
 	lea	det_drives(a5), a1
 	bsr	copy_drives
 	move.l	dlg_ptr(a5), cfg_ptr(a5)
+	lea	det_dialog(a5),a0
+	bsr	clear_dialog_record
 	move.w	#det_dialog, det_dialog+DIALOG_RECORD(a5)
 	move.l	#-1, -(sp)
 	pea	det_dialog(a5)
@@ -1513,7 +1871,6 @@ drive_dialog:
 	move.l	a0, d0
 	beq	drive_dialog_back
 	move.l	app_task_id(a5),WINDOW_TASK(a0)	; route events to this task
-	bclr	#1,WINDOW_KIND+1(a0)		; ordinary task window: do not lock application switching
 	move.l	a0, dlg_ptr(a5)
 	lea	drive_labels(pc), a1
 	bsr	dlg_labels
@@ -1640,6 +1997,7 @@ drive_dialog_copy_next:
 drive_dialog_close:
 	bsr	dlg_dispose
 drive_dialog_back:
+	move.w	cfg_edit(a5),dlg_edit(a5)
 	move.l	cfg_ptr(a5), dlg_ptr(a5)
 	clr.l	cfg_ptr(a5)
 	move.l	dlg_ptr(a5), -(sp)
@@ -1730,6 +2088,15 @@ det_shown_item:
 	rts
 
 * Closes the dialog, whose record is in the work area
+clear_dialog_record:
+	movem.l	d0/a0,-(sp)
+	move.w	#DIALOG_RECORD/4-1,d0
+clear_dialog_long:
+	clr.l	(a0)+
+	dbra	d0,clear_dialog_long
+	movem.l	(sp)+,d0/a0
+	rts
+
 dlg_dispose:
 	move.l	dlg_ptr(a5), -(sp)
 	SXCALL	DMClose			; $A2C5
@@ -1831,12 +2198,21 @@ dialog_control_next:
 	move.w	event_what(a5),d0
 	beq	dialog_control_text
 	cmpi.w	#5,d0
-	beq	dialog_control_text
+	beq	dialog_control_key
 	cmpi.w	#1,d0
 	beq	dialog_control_click
 	cmpi.w	#3,d0
 	beq	dialog_control_text
 	bra	dialog_control_next
+dialog_control_key:
+	cmpi.w	#27,event_win+2(a5)
+	beq	dialog_control_cancel
+	cmpi.w	#13,event_win+2(a5)
+	bne	dialog_control_text
+	tst.l	popup_parent(a5)
+	bne	dialog_control_cancel
+	moveq.l	#ITEM_OK,d0
+	bra	dialog_control_return
 dialog_control_user:
 	bsr	serve_disk
 	bsr	update_status
@@ -1860,7 +2236,11 @@ dialog_control_system:
 dialog_control_click:
 	move.l	event_win(a5),d0
 	cmp.l	dlg_ptr(a5),d0
-	bne	dialog_control_next
+	beq.s	dialog_control_own_click
+	tst.l	popup_parent(a5)
+	bne	dialog_control_cancel
+	bra	dialog_control_next
+dialog_control_own_click:
 	SXCALL	WMActive
 	move.l	a0,d0
 	cmp.l	dlg_ptr(a5),d0
@@ -1897,7 +2277,20 @@ dialog_control_hit:
 	bcs	dialog_control_next
 	cmpi.w	#7,d0
 	bhi	dialog_control_next
-	move.l	#-1,-(sp)
+	bsr	dialog_end_edit
+	move.w	d7,d0
+	bsr	dlg_item
+	cmpi.w	#ITEM_MEMORY,d7
+	bne.s	dialog_control_button
+	tst.l	cfg_ptr(a5)
+	bne.s	dialog_control_button
+	tst.l	popup_parent(a5)
+	bne.s	dialog_control_button
+	bsr	dialog_track_memory
+	moveq.l	#ITEM_MEMORY,d0
+	bra	dialog_control_return
+dialog_control_button:
+	clr.l	-(sp)			; handlers apply changes; track/highlight only
 	move.l	d5,-(sp)
 	move.l	dlg_hdl(a5),-(sp)
 	SXCALL	CMCheck
@@ -1911,6 +2304,13 @@ dialog_control_hit_next:
 	dbra	d6,dialog_control_hit
 	bra	dialog_control_next
 dialog_control_edit:
+	cmpi.w	#ITEM_PATH,d7
+	bne.s	dialog_edit_allowed
+	tst.l	cfg_ptr(a5)
+	bne.s	dialog_edit_allowed
+	tst.w	config_new(a5)
+	beq	dialog_control_next
+dialog_edit_allowed:
 	movea.l	dlg_ptr(a5),a0
 	cmp.w	dlg_edit(a5),d7		; don't reset selection on repeated clicks
 	beq	dialog_control_text
@@ -1923,6 +2323,8 @@ dialog_control_edit:
 	SXCALL	DITSelect
 	lea	14(sp),sp
 dialog_control_text:
+	tst.w	dlg_edit(a5)
+	beq	dialog_control_next
 	SXCALL	WMActive
 	move.l	a0,d0
 	cmp.l	dlg_ptr(a5),d0
@@ -1943,8 +2345,62 @@ dialog_control_return:
 	movem.l	(sp)+,d1-d7/a0-a4
 	rts
 
+* Track the memory control explicitly. No CDEF default callback is retained
+* across closing/reopening settings; the existing control still draws its value.
+dialog_track_memory:
+	movem.l	d0-d3,-(sp)
+	moveq.l	#-1,d3
+dialog_memory_position:
+	move.l	d5,d0
+	swap	d0
+	ext.l	d0
+	subi.l	#94,d0
+	bpl.s	dialog_memory_min
+	moveq.l	#0,d0
+dialog_memory_min:
+	cmpi.l	#156,d0
+	bls.s	dialog_memory_max
+	move.l	#156,d0
+dialog_memory_max:
+	mulu	#11,d0
+	addi.l	#78,d0
+	divu	#156,d0
+	addq.w	#1,d0
+	cmp.w	d3,d0
+	beq.s	dialog_memory_wait
+	move.w	d0,d3
+	move.w	d0,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
+dialog_memory_wait:
+	SXCALL	EMLBttn
+	tst.b	d0
+	beq.s	dialog_memory_done
+	SXCALL	EMMSLoc		; already local to the current settings graph
+	move.l	d0,d5
+	bra	dialog_memory_position
+dialog_memory_done:
+	movem.l	(sp)+,d0-d3
+	rts
+
 * Commit Text Man's current buffer before switching fields or reading the rows.
 * DMControl normally performs this synchronization itself.
+dialog_end_edit:
+	movem.l	d0/a0,-(sp)
+	tst.w	dlg_edit(a5)
+	beq.s	dialog_end_edit_done
+	bsr	dialog_store_edit
+	movea.l	dlg_ptr(a5),a0
+	clr.w	-(sp)
+	move.l	DIALOG_TEDIT(a0),-(sp)
+	SXCALL	TMCaret
+	addq.l	#6,sp
+	clr.w	dlg_edit(a5)
+dialog_end_edit_done:
+	movem.l	(sp)+,d0/a0
+	rts
+
 dialog_store_edit:
 	movem.l	d0-d2/a0-a1,-(sp)
 	movea.l	dlg_ptr(a5),a0
@@ -2837,16 +3293,19 @@ boot_menu_done:
 	movem.l	(sp)+,d0-d3/a0-a1
 	rts
 
-* A small native dialog shared by New setup (3) and ROM address (4).
+* ROM address editor. It keeps its own record while settings remains open.
 * D0 resource ID, A1 Pascal initial text. Returns 0 accepted, -1 cancelled;
 * accepted text is NUL-terminated in image_path, whitespace trimmed.
 text_dialog:
 	movem.l	d1-d4/a0-a2,-(sp)
+	move.l	dlg_ptr(a5),text_parent(a5)
 	move.w	d0,d4
 	move.l	a1,a2
-	move.w	#cfg_dialog,cfg_dialog+DIALOG_RECORD(a5)
+	lea	text_record(a5),a0
+	bsr	clear_dialog_record
+	move.w	#text_record,text_record+DIALOG_RECORD(a5)
 	move.l	#-1,-(sp)
-	pea	cfg_dialog(a5)
+	pea	text_record(a5)
 	move.w	d0,-(sp)
 	SXCALL	DMRefer
 	lea	10(sp),sp
@@ -2860,9 +3319,8 @@ text_dialog:
 	move.w	dlg_type(a5),-(sp)
 	SXCALL	DITSet
 	lea	10(sp),sp
-	cmpi.w	#3,d4
-	bne	text_dialog_show
-	bsr	new_boot_draw
+	lea	rom_labels(pc),a1
+	bsr	dlg_labels
 text_dialog_show:
 	move.l	dlg_ptr(a5),-(sp)
 	SXCALL	WMShow
@@ -2877,13 +3335,6 @@ text_dialog_loop:
 	beq	text_dialog_ok
 	cmpi.w	#2,d0
 	beq	text_dialog_cancel
-	cmpi.w	#3,d4
-	bne	text_dialog_loop
-	subi.w	#4,d0
-	cmpi.w	#14,d0
-	bcc	text_dialog_loop
-	move.w	d0,new_boot(a5)
-	bsr	new_boot_draw
 	bra	text_dialog_loop
 text_dialog_ok:
 	moveq.l	#3,d0
@@ -2922,28 +3373,18 @@ text_dialog_cancel:
 text_dialog_cancelled:
 	moveq.l	#-1,d0
 text_dialog_done:
+	move.l	d0,-(sp)
+	move.l	text_parent(a5),dlg_ptr(a5)
+	clr.l	text_parent(a5)
+	tst.l	dlg_ptr(a5)
+	beq.s	text_dialog_restored
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	WMSelect
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+text_dialog_restored:
+	move.l	(sp)+,d0
 	movem.l	(sp)+,d1-d4/a0-a2
-	rts
-
-new_boot_draw:
-	movem.l	d0-d3,-(sp)
-	moveq.l	#0,d3
-new_boot_draw_next:
-	move.w	d3,d0
-	addq.w	#4,d0
-	bsr	dlg_item
-	moveq.l	#0,d0
-	cmp.w	new_boot(a5),d3
-	seq	d0
-	andi.w	#1,d0
-	move.w	d0,-(sp)
-	move.l	dlg_hdl(a5),-(sp)
-	SXCALL	CMValueSet
-	addq.l	#6,sp
-	addq.w	#1,d3
-	cmpi.w	#14,d3
-	bcs	new_boot_draw_next
-	movem.l	(sp)+,d0-d3
 	rts
 
 rom_dialog:
@@ -3014,15 +3455,14 @@ rom_dialog_done:
 	movem.l	(sp)+,d1-d4/a0
 	rts
 
-* New files inherit CPU, memory, and drives, with fresh SRAM. Choose Boot with
-* the same checked submenu before committing the file. The running VM is kept.
+* New files use the common staged form and fresh SRAM. The running VM and its
+* setup are restored after serializing the new file; cancellation writes nothing.
 new_setup:
 	movem.l	d0-d7/a0-a4,-(sp)
-	clr.w	new_boot(a5)
-	moveq.l	#3,d0
-	lea	new_default(pc),a1
-	bsr	text_dialog
-	tst.l	d0
+	move.w	#1,config_new(a5)
+	bsr	config_dialog
+	clr.w	config_new(a5)
+	tst.w	new_result(a5)
 	bmi	new_setup_done
 	lea	image_path(a5),a0
 	lea	new_path(a5),a1
@@ -3045,15 +3485,23 @@ new_path_copy:
 	bra	new_setup_done
 new_setup_boot:
 	moveq.l	#0,d6
-	move.w	new_boot(a5),d6
-	movea.l	sram_buffer+12(a5),a1
-	cmpi.w	#13,d6
-	bne	new_setup_create
-	bsr	rom_dialog
-	tst.l	d0
-	bmi	new_setup_done
+	move.w	cfg_boot(a5),d6
+	movea.l	cfg_rom(a5),a1
 new_setup_create:
 	* Snapshot current settings; no event dispatch runs while these are borrowed.
+	move.w	vm_cpu(a5),-(sp)
+	move.w	vm_ram(a5),-(sp)
+	move.w	vm_speed(a5),-(sp)
+	lea	vm_drives(a5),a0
+	lea	old_drives(a5),a1
+	bsr	copy_drives
+	lea	dlg_drives(a5),a0
+	lea	vm_drives(a5),a1
+	bsr	copy_drives
+	move.w	dlg_cpu(a5),vm_cpu(a5)
+	move.w	dlg_ram(a5),vm_ram(a5)
+	move.w	cfg_speed(a5),vm_speed(a5)
+	movea.l	cfg_rom(a5),a1
 	lea	sram_buffer(a5),a0
 	lea	disk_buffer(a5),a2
 	move.w	#SRAM_SIZE/4-1,d0
@@ -3085,11 +3533,14 @@ new_use_path:
 	bne	new_use_path
 	st	has_sram(a5)
 	clr.b	setup_is_default(a5)
-	move.w	vm_drives+DRV_MODE(a5),d6
-	move.w	#1,vm_drives+DRV_MODE(a5)
 	bsr	save_setup
-	move.w	d6,vm_drives+DRV_MODE(a5)
 new_restore:
+	move.w	(sp)+,vm_speed(a5)
+	move.w	(sp)+,vm_ram(a5)
+	move.w	(sp)+,vm_cpu(a5)
+	lea	old_drives(a5),a0
+	lea	vm_drives(a5),a1
+	bsr	copy_drives
 	move.b	d7,has_sram(a5)
 	move.b	d5,setup_is_default(a5)
 	move.b	d4,setup_found(a5)
@@ -3127,13 +3578,6 @@ new_command_copy:
 	bra	new_command_copy
 new_command_end:
 	move.b	#34,(a2)+
-	move.b	#' ',(a2)+
-	lea	setup_option(pc),a0
-	moveq.l	#5,d0
-new_command_option:
-	move.b	(a0)+,(a2)+
-	dbra	d0,new_command_option
-	addq.w	#7,d1
 	move.b	d1,new_command(a5)
 	clr.w	-(sp)		; resource ID
 	clr.l	-(sp)		; resource type
@@ -3173,16 +3617,11 @@ default_setup_path:
 	.dc.b	"A:\VMX68K\DEFAULT.V68", 0
 default_setup_dir:
 	.dc.b	"A:\VMX68K", 0
-* The Configuration menu, in Shift_JIS: "設定..." for the dialog, and the CPU with
-* its speeds, an item whose shortcut is ESC and whose check is the submenu's
-* 'MENU' ID, followed by the CPU's name
+* The configuration menu uses a disabled blank item as Sharp's samples do.
 config_menu_head:
-	.dc.b	$90, $DD, $92, $E8, "...,^", $1B, "|", SPEED_MENU_ID, 0
-* The CPUs' names, 6 bytes each
-boot_menu_head:
-	.dc.b	",^",$1B,"|",2,"Boot",0
-new_menu_item:
-	.dc.b	",",$90,$56,$82,$B5,$82,$A2,$90,$DD,$92,$E8,"...",0
+	.dc.b	$90,$56,$8B,$4B,$2E,$2E,$2E,",~ ,",$90,$DD,$92,$E8,$2E,$2E,$2E,",",0
+config_menu_tail:
+	.dc.b	"^",$1B,"|",2,$8B,$4E,$93,$AE,$91,$95,$92,$75,",^",$1B,"|",SPEED_MENU_ID,$8E,$FC,$94,$67,$90,$94,0
 boot_items:
 	.dc.b	"STD",0,"FD0",0,"FD1",0,"FD2",0,"FD3",0
 	.dc.b	"SCSI0",0,"SCSI1",0,"SCSI2",0,"SCSI3",0,"SCSI4",0,"SCSI5",0,"SCSI6",0,"SCSI7",0,"ROM...",0
@@ -3199,8 +3638,6 @@ rom_error:
 media_error:
 	.dc.b	$91, $CE, $89, $9E, $82, $B7, $82, $E9, $46, $44, $83, $43, $83, $81, $81, $5B, $83, $57, $82, $F0, $8A, $4A, $82, $AF, $82, $DC, $82, $B9, $82, $F1, $81, $42, 0
 	.even
-cpu_names:
-	.dc.b	"68000", 0, "68030", 0
 * Items of the speed submenus, in the order of MSX68K_FN_VM_SPEED's speeds;
 * Burst is "最高速"
 speed_items_68000:
@@ -3208,6 +3645,9 @@ speed_items_68000:
 speed_items_68030:
 	.dc.b	"25MHz", 0, $8D, $C5, $8D, $82, $91, $AC, 0
 * The dialogs' static texts: item.b, then a Pascal string, up to item 0
+* Static text is set with DITSet, matching configuration and drive details.
+rom_labels:
+	.dc.b	4,9,"ROM (hex)",0
 config_labels:
 	.dc.b	7, 8, $56, $4D, $82, $CC, $90, $DD, $92, $E8		; VMの設定
 	.dc.b	8, 3, "CPU"
@@ -3216,7 +3656,16 @@ config_labels:
 	.dc.b	11, 5, "68030"
 	.dc.b	15, 8, $83, $68, $83, $89, $83, $43, $83, $75		; ドライブ
 	.dc.b	16, 4, $8B, $A4, $97, $4C		; 共有
-	.dc.b	17, 8, $83, $4A, $83, $58, $83, $5E, $83, $80		; カスタム
+	.dc.b	17, 8, $83, $4A, $83, $58, $83, $5E, $83, $80
+	.dc.b	19,8,$83,$74,$83,$40,$83,$43,$83,$8B
+	.dc.b	22,6,$8E,$FC,$94,$67,$90,$94
+	.dc.b	23,8,$8B,$4E,$93,$AE,$91,$95,$92,$75
+	.dc.b	24,2,$81,$A5
+	.dc.b	25,2,$81,$A5
+	.dc.b	0
+new_common_labels:
+	.dc.b	7,4,$90,$56,$8B,$4B
+	.dc.b	1,4,$8D,$EC,$90,$AC
 	.dc.b	0
 drive_labels:
 	.dc.b	6, 14, $83, $68, $83, $89, $83, $43, $83, $75, $82, $CC, $8F, $DA, $8D, $D7		; ドライブの詳細

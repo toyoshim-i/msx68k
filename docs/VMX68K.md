@@ -43,25 +43,23 @@ run in a VM of their own from the start.
   restart is changed in a dialog, saved when the dialog closes, and followed, if anything
   changed, by a dialog saying the settings take effect when the VM restarts and asking whether
   to restart now or later by hand.
-  - **Configuration**: one icon whose menu has, in order: "設定..." to open the
-    configuration dialog; the current CPU's name (such as 68000), a submenu of that CPU's
+  - **Configuration**: one icon whose menu has, in order: "新規...", a disabled blank
+    row, "設定...", "起動装置", and "周波数". 設定 opens the configuration
+    dialog; 周波数 is a submenu of the current CPU's
     speeds, applied and saved when chosen (for the 68000: 10MHz, 16MHz, 24MHz, and 最高速,
-    msx68k's Burst); and, in custom mode only, "Boot", a submenu of the
+    msx68k's Burst). 起動装置 is a submenu of the
     boot devices kept in the VM's SRAM (STD, FD, SCSI, ROM, as `SWITCH.X` sets them), written
     and saved when chosen and taking effect at the next reset, as on the real machine. In shared
-    mode the boot device stays on msx68k's boot ROM and the item is not shown; the VM's
+    mode the boot device stays on msx68k's boot ROM and the item stays visible but disabled; the VM's
     CONFIG.SYS decides what it starts.
-  - **The configuration dialog** sets the CPU's kind, the memory size with a slider, and drive
-    assignment. It is a dialog of SX-Window's Dialog Man, `'DLOG'`/`'DITL'` resources of
-    `VMX68K.LB` with SX-Window's own controls. The CPU is the 68000 (10, 16, 24 MHz and Burst)
-    or the 68030 (25 MHz and Burst, booting from `IPLROM30.DAT`), and the menu's CPU name and
-    speeds follow it; memory is 1 to 12 MB in 1 MB steps. 設定 saves the setup (`'V68S'` version 2: speed,
-    CPU, RAM) and, when the CPU or memory changed, an alert (`DMError`, はい/いいえ) asks
-    whether to restart the VM now; はい restarts it with `VmRestart` (11), which keeps its
-    window, drives, and SRAM, and いいえ leaves the change for the VM's next start. Radio buttons
-    are label-less switches, as in Sharp's dialogs, and static texts get their text with
-    `DITSet` when the dialog opens. While it is open, its filter serves the VM's requests, so the
-    VM does not wait for it.
+  - **The configuration dialog** is shared with 新規. It shows the setup file path,
+    CPU, memory slider, shared/custom drives with the existing 詳細... window,
+    frequency, and boot device. The path is read-only for existing setups and
+    editable for new ones; the action is 設定 or 作成 respectively. Choice windows
+    use the left mouse button. 起動装置 is disabled for shared drives. All edits
+    are staged until accepted. Existing CPU/memory/drive changes ask whether to
+    restart; frequency and boot changes do not require restarting immediately.
+
   - **Drive assignment** (decided 2026-11-13, mock in the notes) is in one of two modes, chosen
     in the configuration dialog's ドライブ row: **共有** (shared mode, with the path of the
     CONFIG.SYS the VM boots with: every drive is the primary VM's, under the same letter) or
@@ -105,11 +103,12 @@ run in a VM of their own from the start.
     from the VM's thread once it stays unchanged for 0.5 s, so a program writing it byte by
     byte is saved once; the primary wakes VMX68K.SX, which takes it with `VmSram` (10) and
     writes the setup, as SXMODE.X writes `MSX68K.LB`.
-- **New VM setups.** 新しい設定... follows the CPU and Boot entries of the gear menu. Its
-  dialog takes a new path and an initial boot device (STD, FD0–3, SCSI0–7, or a ROM address).
-  It creates a custom setup with the current CPU, RAM, speed, and drive assignments and fresh
-  SRAM, without overwriting an existing file or changing the running VM. A separate VMX68K
-  task opens the file and its configuration dialog, where the new setup's drives can be edited.
+- **New VM setups.** 新規... opens the common configuration form with the current
+  settings as initial values and an editable path. CPU, memory, frequency, drive
+  assignments and boot device can all be chosen before creating the file.
+  作成 writes fresh SRAM and starts a separate VM with the selected configuration;
+  it does not reopen configuration afterwards. Cancel creates nothing, and neither
+  cancel nor creation changes the original VM/setup. Existing files are rejected.
 - **Disk images.** The first test boots `disks/HUMAN302.XDF` from the host directly. As soon as
   the VM shows its screen in the window, images come from the primary VM's drives. Floppy and hard
   disk images are read and written on every access, written through, never cached whole: still
@@ -258,7 +257,7 @@ windows work the same way as the primary VM.
   releases the lease and restores the primary's physical write protection. Changes update the
   setup immediately unless different drive assignments have already been saved for a later
   restart; those pending assignments are retained independently of the running handles.
-  The Boot submenu checks the current SRAM choice and writes/saves the selected device for
+  The 起動装置 submenu checks the current SRAM choice and writes/saves the selected device for
   the next reset. ROM opens an address field (up to six hex digits, even addresses only).
   SCSI IDs 1–7 have their own ROM boot handles and preserve the selected target through the
   generated IPL and Human68k driver initialization.

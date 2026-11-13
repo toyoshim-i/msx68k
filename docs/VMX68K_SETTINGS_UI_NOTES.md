@@ -136,8 +136,9 @@ official SX-Window programming manuals.
   `E_USER1`, and reads the VM's state with `VmStatus` (9): the access lamp, the screen's size,
   which the window follows (`WMSize`), SRAM to save, and a redraw after the primary's screen
   grew.
-- **Menu** (right button on the gear icon): 設定..., and the CPU's name with its speeds,
-  applied at once with `VmSpeed` (8) and saved; custom-only Boot; and 新しい設定....
+- **Menu** (right button on the gear icon): 新規..., a disabled blank row, 設定...,
+  起動装置, then 周波数. 起動装置 remains visible but disabled in shared mode.
+  周波数 lists the current CPU's speeds, applied at once with `VmSpeed` (8) and saved.
 - **Setups** are `*.V68` libraries (`'V68S'` speed, CPU, RAM; `'SRAM'`; `'V68D'` drives),
   opened from the Filer through `\SHELL\ICON.LB`, or `A:\VMX68K\DEFAULT.V68`; SRAM is saved as
   it changes (`VmSram` 10).
@@ -146,7 +147,7 @@ official SX-Window programming manuals.
   パススルー with a path or drive letter. 設定 saves the setup and asks whether to restart the VM
   now (`VmRestart` 11).
   Configuration and details now run on `TSEventAvail`, with the current task's ID
-  on their window records and `W_DIALOG` cleared. Other applications remain
+  on their native dialog window records. Other applications remain
   usable, including Filer activation, resizing and dragging files onto a visible
   details assignment field. `CMCheck` tracks controls; `DITSelect`/`TMEvent` edit
   fields, and the current Text Man buffer is committed before switching fields
@@ -235,24 +236,38 @@ official SX-Window programming manuals.
   prevent overlapping swaps. Native FloppyEject keeps a physical lease for reinsertion;
   FloppyRelease relinquishes it when an image replaces it. Running assignments have their
   own copy, so live exchanges cannot overwrite different assignments pending restart.
-- **Boot (4c)**: MENU 2 checks STD, FD0–3, SCSI0–7, ROM. `VmBoot` (13), D1 ID,
+- **起動装置 (4c)**: MENU 2 checks STD, FD0–3, SCSI0–7, ROM. `VmBoot` (13), D1 ID,
   D2 choice 0–13, A1 ROM address, changes the VM's SRAM and supplies it through `VmSram`
   for immediate saving. The VM thread applies it without a reset. D2=-1 queries; D1=0
   generates fresh SRAM at A0 with RAM MB in D3, for new setups. `VmStatus` returns the
   current choice in D3. SRAM $18 is $0000 for STD, $9070+(unit<<8) for FD, $A000 for ROM;
   SCSI uses ROM handles $FC0000+4*target. Each target's boot stub has Human68k metadata and
   the generated disk IPL preserves D4, so a nonzero target boots and gets its correct letter.
-- **New setup (4d)**: DLOG/DITL 3 takes the new path and the initial boot choice. DLOG/DITL 4
-  edits a ROM address, initially the current vector, rejecting odd or out-of-range values.
-  A new file inherits CPU, RAM, speed and drive assignments, uses custom mode and fresh SRAM,
-  and leaves the original VM/setup intact. Existing files are rejected. TSFock ($A351) shares
-  the R module with a separate work area (mode word $0002, a 20-byte argument block), passing
-  the quoted path and /setup to open the new task's configuration dialog. Paths accept quotes.
+- **Common settings / 新規 (4d)**: both use DLOG/DITL 1. The same form contains
+  CPU, memory, drives, setup path, frequency and boot device. Existing paths are
+  read-only; new paths accept text edits. The [approved mock](images/vmx68k_new_dialog_mock.png)
+  records the shared layout. `config_new` selects the heading and
+  設定/作成 action. Both reuse the same drive-details window. DLOG/DITL 4 edits a
+  ROM address without overwriting the open settings record; 5/6 are native
+  left-button frequency/device choice windows. Buttons track with a null callback;
+  memory drag updates its value explicitly, avoiding a stale CDEF default callback
+  when closing and reopening a form. Fields commit their text before controls run.
+  All settings are staged: cancel changes nothing. New setups inherit the displayed
+  defaults, serialize the chosen values with fresh SRAM, restore their creator's
+  settings and SRAM, then start a separate VM with TSFock. No second configuration
+  screen follows creation. Existing paths are rejected. The test edits a lowercase
+  filename, cancels and
+  reopens the form, chooses all settings before creation, checks its serialized
+  values and separate VM, and verifies the original setup and duplicate file.
+  `VmBoot` with D1=-1 edits the SRAM buffer at A0 without touching a live VM;
+  normal configuration uses this to preserve unrelated SRAM fields when staging
+  the boot device. D1=0 continues to create fresh SRAM for new setups.
+  `run_speed` keeps the active CPU's menu check separate from a frequency saved
+  for a different CPU pending restart.
 - **Verification**: the VMX68K UI test drags an actual Filer image onto an FD, reads its bytes
   through the bridge, ejects it, checks the old handle stays open until acknowledgement and
-  closes afterwards, and selects Boot/FD1 and checks saved SRAM. Another creates a setup
-  with SCSI2, checks the original assignments, and observes the second VM/configuration
-  dialog, then rejects creating the same path again without changing its bytes.
+  closes afterwards, and selects 起動装置/FD1 and checks saved SRAM. Another creates a setup
+  with SCSI2, checks the original assignments, and observes the separately configured VM, then rejects creating the same path again without changing its bytes.
   `vmx68k_disk.rs` also boots SCSI6 with SCSI0 present, checks its B: prompt, and resets
   to FD0 and checks A:; reset clears the preceding SCSI boot's target and drive-letter state.
 - Testing: `crates/msx68k-vicon/tests/vmx68k_lifecycle.rs` runs the UI, disk, shared-drive

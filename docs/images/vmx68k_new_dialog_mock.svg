@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="768" height="512" viewBox="0 0 768 512">
+<rect width="768" height="512" fill="#b8b8b8"/>
+<rect x="194" y="81" width="380" height="350" fill="#aaa" stroke="#111"/>
+<polyline points="195,430 195,82 573,82" fill="none" stroke="#fff"/>
+<polyline points="195,430 573,430 573,82" fill="none" stroke="#555"/>
+<text x="384" y="104" font-family="Noto Sans CJK JP,sans-serif" font-size="15" fill="#111" text-anchor="middle">新規</text>
+<text x="212" y="142" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">ファイル</text>
+<rect x="284" y="123" width="266" height="24" fill="#fff" stroke="#111"/>
+<polyline points="285,146 285,124 549,124" fill="none" stroke="#555"/>
+<polyline points="285,146 549,146 549,124" fill="none" stroke="#fff"/>
+<text x="291" y="141" font-family="Noto Sans CJK JP,sans-serif" font-size="13" fill="#111">A:¥VMX68K¥NEW.V68</text>
+<text x="212" y="181" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">CPU</text>
+<rect x="284" y="169" width="28" height="10" fill="#aaa" stroke="#111"/>
+<polyline points="285,178 285,170 311,170" fill="none" stroke="#555"/>
+<polyline points="285,178 311,178 311,170" fill="none" stroke="#fff"/>
+<text x="298" y="178" font-family="Noto Sans CJK JP,sans-serif" font-size="10" fill="#111" text-anchor="middle">on</text>
+<text x="320" y="181" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">68000</text>
+<rect x="406" y="169" width="28" height="10" fill="#666" stroke="#111"/>
+<polyline points="407,178 407,170 433,170" fill="none" stroke="#555"/>
+<polyline points="407,178 433,178 433,170" fill="none" stroke="#fff"/>
+<text x="442" y="181" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">68030</text>
+<text x="212" y="219" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">メモリ</text>
+<polyline points="284,212 448,212" fill="none" stroke="#111"/>
+<polyline points="284,213 448,213" fill="none" stroke="#fff"/>
+<rect x="328" y="203" width="9" height="20" fill="#aaa" stroke="#111"/>
+<polyline points="329,222 329,204 336,204" fill="none" stroke="#fff"/>
+<polyline points="329,222 336,222 336,204" fill="none" stroke="#555"/>
+<text x="468" y="219" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">4MB</text>
+<text x="212" y="255" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">ドライブ</text>
+<rect x="284" y="243" width="28" height="10" fill="#666" stroke="#111"/>
+<polyline points="285,252 285,244 311,244" fill="none" stroke="#555"/>
+<polyline points="285,252 311,252 311,244" fill="none" stroke="#fff"/>
+<text x="320" y="255" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">共有</text>
+<rect x="284" y="271" width="28" height="10" fill="#aaa" stroke="#111"/>
+<polyline points="285,280 285,272 311,272" fill="none" stroke="#555"/>
+<polyline points="285,280 311,280 311,272" fill="none" stroke="#fff"/>
+<text x="298" y="280" font-family="Noto Sans CJK JP,sans-serif" font-size="10" fill="#111" text-anchor="middle">on</text>
+<text x="320" y="283" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">カスタム</text>
+<rect x="432" y="263" width="110" height="26" fill="#aaa" stroke="#111"/>
+<polyline points="433,288 433,264 541,264" fill="none" stroke="#fff"/>
+<polyline points="433,288 541,288 541,264" fill="none" stroke="#555"/>
+<text x="487.0" y="282" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111" text-anchor="middle">詳細...</text>
+<text x="212" y="317" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">周波数</text>
+<rect x="284" y="299" width="186" height="26" fill="#bbb" stroke="#111"/>
+<polyline points="285,324 285,300 469,300" fill="none" stroke="#555"/>
+<polyline points="285,324 469,324 469,300" fill="none" stroke="#fff"/>
+<text x="294" y="318" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">10MHz</text>
+<polyline points="442,300 442,324" fill="none" stroke="#555"/>
+<polygon points="449,309 463,309 456,316" fill="#111"/>
+<text x="212" y="353" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">起動装置</text>
+<rect x="284" y="335" width="186" height="26" fill="#bbb" stroke="#111"/>
+<polyline points="285,360 285,336 469,336" fill="none" stroke="#555"/>
+<polyline points="285,360 469,360 469,336" fill="none" stroke="#fff"/>
+<text x="294" y="354" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111">STD</text>
+<polyline points="442,336 442,360" fill="none" stroke="#555"/>
+<polygon points="449,345 463,345 456,352" fill="#111"/>
+<rect x="358" y="386" width="84" height="26" fill="#aaa" stroke="#111"/>
+<polyline points="359,411 359,387 441,387" fill="none" stroke="#fff"/>
+<polyline points="359,411 441,411 441,387" fill="none" stroke="#555"/>
+<text x="400.0" y="405" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111" text-anchor="middle">作成</text>
+<rect x="458" y="386" width="92" height="26" fill="#aaa" stroke="#111"/>
+<polyline points="459,411 459,387 549,387" fill="none" stroke="#fff"/>
+<polyline points="459,411 549,411 549,387" fill="none" stroke="#555"/>
+<text x="504.0" y="405" font-family="Noto Sans CJK JP,sans-serif" font-size="14" fill="#111" text-anchor="middle">取消</text>
+</svg>

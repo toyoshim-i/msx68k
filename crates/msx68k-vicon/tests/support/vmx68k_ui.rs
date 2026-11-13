@@ -38,14 +38,14 @@ fn choose_speed(vm: &mut X68kVm, item: Option<i16>, name: &str) {
     point(vm, (56, 52), 200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
     point(vm, (56, 52), 250_000);
-    // The menu shows below the point, its CPU item second; the submenu opens over it.
-    point(vm, (90, 86), 1_500_000);
+    // The menu shows below the point, its frequency item fifth; the submenu opens over it.
+    point(vm, (90, 134), 1_500_000);
     screenshot(vm, name);
     // The menus are text over the window, which the host keeps in front of the VM's screen.
-    assert_ne!(text_index(vm, (90, 86)), 0, "the CPU's item");
-    assert_ne!(text_index(vm, (120, 104)), 0, "the submenu");
-    point(vm, (120, 86), 250_000);
-    let at = item.map_or((300, 300), |item| (120, 88 + item * 16));
+    assert_ne!(text_index(vm, (90, 134)), 0, "the frequency item");
+    assert_ne!(text_index(vm, (120, 152)), 0, "the submenu");
+    point(vm, (120, 134), 250_000);
+    let at = item.map_or((300, 300), |item| (120, 136 + item * 16));
     point(vm, at, 250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     point(vm, at, 750_000);
@@ -100,7 +100,14 @@ struct Setup {
 fn saved_setup(vm: &X68kVm, name: &str) -> Option<Setup> {
     let mut image = vm.bus.scsi_hdd_data(0)?.to_vec();
     let volume = HumanVolume::open(&mut image)?;
-    let data = volume.read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))?;
+    let data = volume
+        .read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))
+        .or_else(|| {
+            volume.read_file(
+                &[short_name("VMX68K", "")],
+                &short_name(&name.to_ascii_lowercase(), "v68"),
+            )
+        })?;
     let setup = ResourceLibrary::parse(&data)?;
     let word = |data: &[u8], at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
     let settings = &setup.get(b"V68S", 0)?.data;
@@ -117,7 +124,14 @@ fn saved_setup(vm: &X68kVm, name: &str) -> Option<Setup> {
 fn saved_drives(vm: &X68kVm, name: &str) -> Option<(bool, Vec<(u16, String)>)> {
     let mut image = vm.bus.scsi_hdd_data(0)?.to_vec();
     let volume = HumanVolume::open(&mut image)?;
-    let data = volume.read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))?;
+    let data = volume
+        .read_file(&[short_name("VMX68K", "")], &short_name(name, "V68"))
+        .or_else(|| {
+            volume.read_file(
+                &[short_name("VMX68K", "")],
+                &short_name(&name.to_ascii_lowercase(), "v68"),
+            )
+        })?;
     let setup = ResourceLibrary::parse(&data)?;
     let drives = &setup.get(b"V68D", 0)?.data;
     let word = |at: usize| u16::from_be_bytes([drives[at], drives[at + 1]]);
@@ -195,6 +209,23 @@ pub fn vmx68k_opens_a_vm_in_its_window() {
     let [VmEvent::Opened { id: 1, window, .. }] = events[..] else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
+    // Shared mode keeps 起動装置 visible but must not open or select its submenu.
+    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.run_steps(200_000);
+    vm.bus.scc.set_mouse_buttons(false, true);
+    vm.run_steps(250_000);
+    vm.bus.set_host_mouse_position(Some((90, 118)));
+    vm.run_steps(750_000);
+    screenshot(&vm, "shared_boot_disabled");
+    let disabled: Vec<_> = (111..123).flat_map(|y| (65..113).map(move |x| (x, y)))
+        .map(|at| text_index(&vm, at)).collect();
+    assert!(disabled.contains(&8) && !disabled.contains(&11),
+        "boot device must remain visible in the inactive text color");
+    vm.bus.set_host_mouse_position(Some((120, 152)));
+    vm.run_steps(250_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(500_000);
+    assert_eq!(case_events(&mut vm), [], "shared boot-device entry must be disabled");
     // The content is VMX68K.X's icon bar over the VM's 768x512 screen, at the window's bounds.
     // SX-Window's icon panel at the top left of the desktop covers a corner of it.
     let layout = vm
@@ -512,13 +543,13 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
         vm.run_steps(steps);
     };
 
-    // 設定..., the Configuration menu's first item, opens the dialog.
+    // 設定..., the Configuration menu's third item, opens the dialog.
     point(&mut vm, (56, 52), 200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
     point(&mut vm, (56, 52), 250_000);
-    point(&mut vm, (90, 70), 250_000);
+    point(&mut vm, (90, 102), 250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (90, 70), 1_500_000);
+    point(&mut vm, (90, 102), 1_500_000);
     screenshot(&vm, "dialog");
     assert_ne!(
         text_index(&vm, (300, 200)),
@@ -526,22 +557,41 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
         "the dialog over the VM's screen"
     );
 
+    let path_pixels = |vm: &X68kVm| -> Vec<u8> {
+        (125..140)
+            .flat_map(|y| (290..535).map(move |x| text_index(vm, (x, y))))
+            .collect()
+    };
+    vm.run_steps(1_000_000);
+    let readonly_path = path_pixels(&vm);
+    click(&mut vm, (300, 130), 1, 500_000);
+    type_keys(&mut vm, "bad");
+    assert_eq!(
+        path_pixels(&vm),
+        readonly_path,
+        "normal settings path must be readonly"
+    );
+
     // The 68030, and the slider's knob dragged from 4 MB to 8 MB.
-    click(&mut vm, (420, 216), 1, 500_000);
-    point(&mut vm, (361, 244), 300_000);
+    click(&mut vm, (420, 174), 1, 500_000);
+    point(&mut vm, (329, 212), 300_000);
     vm.bus.scc.set_mouse_buttons(true, false);
-    point(&mut vm, (361, 244), 300_000);
-    for x in (361..=408).step_by(4) {
-        point(&mut vm, (x, 244), 100_000);
+    point(&mut vm, (329, 212), 300_000);
+    for x in (329..=388).step_by(4) {
+        point(&mut vm, (x, 212), 100_000);
     }
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (408, 244), 250_000);
+    point(&mut vm, (388, 212), 250_000);
     screenshot(&vm, "dialog_set");
 
     // カスタム drives: 詳細... gives three, an image file, a shared drive, and a passthrough one.
-    click(&mut vm, (340, 288), 1, 500_000);
-    click(&mut vm, (439, 289), 1, 1_500_000);
-    wait_ui(&mut vm, |vm| text_index(vm, (500, 194)) == 11, "details fields drawn");
+    click(&mut vm, (300, 275), 1, 500_000);
+    click(&mut vm, (480, 275), 1, 1_500_000);
+    wait_ui(
+        &mut vm,
+        |vm| text_index(vm, (500, 194)) == 11,
+        "details fields drawn",
+    );
     screenshot(&vm, "dialog_drives");
     click(&mut vm, (275, 156), 1, 500_000);
     click(&mut vm, (275, 156), 1, 500_000);
@@ -563,7 +613,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     );
 
     // 設定 saves the setup and asks whether to restart the VM now: はい restarts it.
-    click(&mut vm, (424, 317), 1, 1_000_000);
+    click(&mut vm, (402, 399), 1, 1_000_000);
     screenshot(&vm, "dialog_restart");
     assert_eq!(case_events(&mut vm), [], "not before the answer");
     assert_eq!(
@@ -618,7 +668,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     );
 }
 
-pub fn new_setup_keeps_the_running_vm_and_opens_its_own_configuration() {
+pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     let Some(mut vm) = boot() else { return };
     vm.bus.request_screen_resolution(1024, 768);
     vm.run_steps(2_000_000);
@@ -629,72 +679,147 @@ pub fn new_setup_keeps_the_running_vm_and_opens_its_own_configuration() {
         [VmEvent::Opened { id: 1, .. }]
     ));
     let original = saved_drives(&vm, "DEFAULT");
-    // Shared-mode Configuration menu: New setup is item 3.
-    vm.bus.set_host_mouse_position(Some((56, 52)));
-    vm.bus.scc.set_mouse_buttons(false, true);
-    vm.run_steps(250_000);
-    vm.bus.set_host_mouse_position(Some((90, 102)));
-    vm.run_steps(250_000);
-    vm.bus.scc.set_mouse_buttons(false, false);
-    vm.run_steps(1_000_000);
-    screenshot(&vm, "new_setup");
-    // SCSI2 radio, then OK; default path is A:\VMX68K\NEW.V68.
-    click(&mut vm, (349, 258), 1, 250_000);
-    click(&mut vm, (500, 330), 1, 2_500_000);
-    screenshot(&vm, "new_setup_started");
+    let original_setup = saved_setup(&vm, "DEFAULT");
+    let open_new = |vm: &mut X68kVm| {
+        vm.bus.set_host_mouse_position(Some((56, 52)));
+        vm.run_steps(200_000);
+        vm.bus.scc.set_mouse_buttons(false, true);
+        vm.run_steps(250_000);
+        vm.bus.set_host_mouse_position(Some((90, 70)));
+        vm.run_steps(250_000);
+        vm.bus.scc.set_mouse_buttons(false, false);
+        vm.run_steps(2_000_000);
+        wait_ui(
+            vm,
+            |vm| {
+                let ink = |left, top, right, bottom| {
+                    (top..bottom).any(|y| (left..right).any(|x| text_index(vm, (x, y)) == 11))
+                };
+                (125..137).any(|y| (290..400).any(|x| text_index(vm, (x, y)) == 10))
+                    && ink(346, 305, 398, 317)
+                    && ink(380, 392, 420, 404)
+            },
+            "new form fully drawn",
+        );
+    };
+    let set_path = |vm: &mut X68kVm| {
+        click(vm, (290, 130), 1, 500_000);
+        vm.bus.set_host_mouse_position(Some((286, 130)));
+        vm.run_steps(200_000);
+        vm.bus.scc.set_mouse_buttons(true, false);
+        vm.run_steps(200_000);
+        for x in (286..=548).step_by(8) {
+            vm.bus.set_host_mouse_position(Some((x, 130)));
+            vm.run_steps(100_000);
+        }
+        vm.bus.scc.set_mouse_buttons(false, false);
+        vm.run_steps(300_000);
+        type_keys(vm, "a:\\vmx68k\\edit.v68");
+    };
+    open_new(&mut vm);
+    screenshot(&vm, "new_common");
+    click(&mut vm, (420, 174), 1, 500_000);
+    click(&mut vm, (504, 399), 1, 750_000);
+    assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
     assert_eq!(saved_drives(&vm, "DEFAULT"), original);
-    assert!(saved_setup(&vm, "NEW").is_some(), "new setup was saved");
+    assert!(saved_setup(&vm, "NEW").is_none());
+    assert_eq!(
+        case_events(&mut vm),
+        [],
+        "canceling new must not touch the running VM"
+    );
+
+    open_new(&mut vm);
+    set_path(&mut vm);
+    click(&mut vm, (420, 174), 1, 500_000);
+    vm.bus.set_host_mouse_position(Some((329, 212)));
+    vm.run_steps(200_000);
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(200_000);
+    for x in (329..=388).step_by(3) {
+        vm.bus.set_host_mouse_position(Some((x, 212)));
+        vm.run_steps(100_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(500_000);
+    click(&mut vm, (300, 275), 1, 500_000);
+    click(&mut vm, (480, 275), 1, 1_500_000);
+    screenshot(&vm, "new_details_before");
+    wait_ui(
+        &mut vm,
+        |vm| text_index(vm, (500, 194)) == 11,
+        "shared details are drawn",
+    );
+    click(&mut vm, (500, 202), 1, 500_000);
+    type_keys(&mut vm, "a:\\vmx68k\\raw.xdf");
+    click(&mut vm, (529, 374), 1, 1_000_000);
+    click(&mut vm, (372, 312), 1, 1_000_000);
+    screenshot(&vm, "new_frequency");
+    click(&mut vm, (360, 355), 1, 1_000_000); // 68030: highest speed, second choice
+    click(&mut vm, (372, 348), 1, 1_000_000);
+    screenshot(&vm, "new_boot");
+    click(&mut vm, (360, 217), 1, 1_000_000); // SCSI2, eighth choice
+    wait_ui(
+        &mut vm,
+        |vm| {
+            (125..137).any(|y| (290..400).any(|x| text_index(vm, (x, y)) == 10))
+                && (305..317).any(|y| (346..398).any(|x| text_index(vm, (x, y)) == 11))
+        },
+        "common form repainted after selecting a device",
+    );
+    screenshot(&vm, "new_setup");
+    click(&mut vm, (402, 399), 1, 2_500_000);
+    screenshot(&vm, "new_setup_started");
+    assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
+    assert_eq!(saved_drives(&vm, "DEFAULT"), original);
+    assert_eq!(
+        saved_setup(&vm, "EDIT"),
+        Some(Setup {
+            speed: 1,
+            cpu: 1,
+            ram_mb: 8,
+            sram: true
+        })
+    );
+    assert_eq!(
+        saved_drives(&vm, "EDIT"),
+        Some((true, vec![(0, "a:\\vmx68k\\raw.xdf".into())]))
+    );
     let events = case_events(&mut vm);
     let [VmEvent::Opened {
         id: 2,
+        cpu: CpuModel::Mc68030,
+        ram_mb: 8,
+        speed: CpuSpeedMode::Burst,
         sram: Some(sram),
-        custom: Some(_),
+        custom: Some(drives),
         ..
     }] = events.as_slice()
     else {
-        panic!("new task must open a separate VM: {events:?}");
+        panic!("new settings must create one separately configured VM: {events:?}");
     };
-    assert_eq!(
-        msx68k_bus::vmx68k::boot_choice(sram),
-        7,
-        "SCSI2 choice survives creation"
-    );
-    assert_ne!(
-        text_index(&vm, (300, 200)),
-        0,
-        "new setup opens its configuration dialog"
-    );
+    assert_eq!(msx68k_bus::vmx68k::boot_choice(sram), 7);
+    assert!(matches!(
+        drives.as_slice(),
+        [msx68k_bus::vmx68k::CustomDrive::Image { .. }]
+    ));
     let bytes = |vm: &X68kVm| {
         let mut image = vm.bus.scsi_hdd_data(0).unwrap().to_vec();
         HumanVolume::open(&mut image)
             .unwrap()
-            .read_file(&[short_name("VMX68K", "")], &short_name("NEW", "V68"))
+            .read_file(&[short_name("VMX68K", "")], &short_name("edit", "v68"))
             .unwrap()
     };
     let original_new = bytes(&vm);
-    // Cancel the new VM's configuration, then try creating the same path again.
-    click(&mut vm, (474, 317), 1, 500_000);
-    vm.bus.set_vm_floppies(case_id(2), 3, 7);
-    vm.run_steps(500_000);
-    vm.bus.set_host_mouse_position(Some((56, 52)));
-    vm.bus.scc.set_mouse_buttons(false, true);
-    vm.run_steps(250_000);
-    vm.bus.set_host_mouse_position(Some((90, 118)));
-    vm.run_steps(250_000);
-    vm.bus.scc.set_mouse_buttons(false, false);
-    vm.run_steps(1_000_000);
-    click(&mut vm, (500, 330), 1, 1_000_000);
+    open_new(&mut vm);
+    set_path(&mut vm);
+    click(&mut vm, (402, 399), 1, 1_000_000);
     assert_eq!(
         bytes(&vm),
         original_new,
-        "existing setup must not be overwritten"
+        "existing setups must not be overwritten"
     );
-    assert_eq!(
-        case_events(&mut vm),
-        [],
-        "an existing file cannot start another VM"
-    );
-    // Dismiss the expected overwrite-rejection alert before normal shutdown.
+    assert_eq!(case_events(&mut vm), []);
     vm.bus.mfp.push_keyboard_byte(0x1D);
     vm.bus.mfp.push_keyboard_byte(0x9D);
     vm.run_steps(500_000);
@@ -931,10 +1056,10 @@ fn floppy_controls(dim: bool) {
     point(&mut vm, (436, 52));
     vm.bus.scc.set_mouse_buttons(false, true);
     point(&mut vm, (436, 52));
-    point(&mut vm, (470, 102));
+    point(&mut vm, (470, 118));
     vm.run_steps(1_250_000);
     screenshot(&vm, "boot_menu");
-    point(&mut vm, (500, 136));
+    point(&mut vm, (500, 152));
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(1_000_000);
     let events = case_events(&mut vm);
@@ -962,9 +1087,9 @@ fn floppy_controls(dim: bool) {
     point(&mut vm, (436, 52));
     vm.bus.scc.set_mouse_buttons(false, true);
     point(&mut vm, (436, 52));
-    point(&mut vm, (470, 102));
+    point(&mut vm, (470, 118));
     vm.run_steps(1_250_000);
-    point(&mut vm, (500, 312)); // ROM...
+    point(&mut vm, (500, 328)); // ROM...
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(1_000_000);
     click(&mut vm, (409, 281), 1, 1_000_000); // accept the current BFFFFC address
@@ -1009,6 +1134,7 @@ fn wait_ui(vm: &mut X68kVm, ready: impl Fn(&X68kVm) -> bool, label: &str) {
         }
         vm.run_steps(50_000);
     }
+    screenshot(vm,"ui_timeout");
     assert!(ready(vm), "UI condition timed out: {label}");
 }
 
@@ -1026,18 +1152,24 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
     vm.run_steps(200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
     vm.run_steps(250_000);
-    vm.bus.set_host_mouse_position(Some((90, 70)));
+    vm.bus.set_host_mouse_position(Some((90, 102)));
     vm.run_steps(250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(1_500_000);
-    click(&mut vm, (340, 288), 1, 500_000);
+    click(&mut vm, (300, 275), 1, 500_000);
     let parent = |vm: &X68kVm| -> Vec<u8> {
-        (195..325)
-            .flat_map(|y| (275..505).map(move |x| text_index(vm, (x, y))))
+        (110..410)
+            .flat_map(|y| (210..550).map(move |x| text_index(vm, (x, y))))
             .collect()
     };
+    wait_ui(
+        &mut vm,
+        |vm| (341..354).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11)),
+        "enabled boot selector drawn",
+    );
     let expected = parent(&vm);
-    click(&mut vm, (439, 289), 1, 1_500_000);
+    screenshot(&vm, "settings_parent_before");
+    click(&mut vm, (480, 275), 1, 1_500_000);
     let details = vm.bus.active_window().unwrap();
     wait_ui(
         &mut vm,
@@ -1084,7 +1216,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         saved_drives(&vm, "DEFAULT").map(|(custom, _)| custom),
         Some(false)
     );
-    click(&mut vm, (424, 317), 1, 1_000_000);
+    click(&mut vm, (402, 399), 1, 1_000_000);
     assert_eq!(
         saved_drives(&vm, "DEFAULT"),
         Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))
