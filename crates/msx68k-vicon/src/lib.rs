@@ -35,34 +35,36 @@ pub struct ViconUniforms {
     pub height: u32,
     pub text_scroll_x: u32,
     pub text_scroll_y: u32,
-    pub gr0_scroll_x: u32,
-    pub gr0_scroll_y: u32,
+    pub gr_scroll_x: [u32; 4],
+    pub gr_scroll_y: [u32; 4],
     pub r0_mode: u32,
     pub r1_priority: u32,
     pub r2_display: u32,
     pub contrast: u32,
     pub tvram_row_bytes: u32,
     pub tvram_plane_bytes: u32,
+    pub reserved: [u32; 2],
 }
 
 impl ViconUniforms {
     /// Extracts the current CRTC, VICON, and System Port display parameters from `bus`.
     pub fn from_bus(bus: &X68kBus) -> Self {
         let (w, h) = bus.crtc.active_resolution();
-        let (gr0_x, gr0_y) = bus.crtc.graphic_scroll(0);
+        let scrolls = std::array::from_fn::<_, 4, _>(|p| bus.crtc.graphic_scroll(p));
         Self {
             width: w.clamp(256, MAX_FB_WIDTH),
             height: h.clamp(128, MAX_FB_HEIGHT),
             text_scroll_x: bus.crtc.text_scroll_x() as u32,
             text_scroll_y: bus.crtc.text_scroll_y() as u32,
-            gr0_scroll_x: gr0_x as u32,
-            gr0_scroll_y: gr0_y as u32,
+            gr_scroll_x: scrolls.map(|(x, _)| x as u32),
+            gr_scroll_y: scrolls.map(|(_, y)| y as u32),
             r0_mode: bus.vicon.r0_mode() as u32,
             r1_priority: bus.vicon.r1_priority() as u32,
             r2_display: bus.vicon.r2_display() as u32,
             contrast: (bus.sysport.contrast & 0x0F) as u32,
             tvram_row_bytes: bus.active_tvram_row_bytes() as u32,
             tvram_plane_bytes: bus.active_tvram_plane_bytes() as u32,
+            reserved: [0; 2],
         }
     }
 }
@@ -651,7 +653,6 @@ fn letterbox(width: u32, height: u32, surface_width: u32, surface_height: u32) -
     }
 }
 
-/// CPU reference compositor producing the exact same `RGBA8` framebuffer as [`ViconGpuCompositor`].
 /// Returns a copy of `tvram` with the host mouse cursor drawn over it.
 fn with_cursor_overlay(bus: &X68kBus, tvram: &[u8]) -> Vec<u8> {
     let mut screen = tvram.to_vec();
@@ -663,6 +664,92 @@ fn with_cursor_overlay(bus: &X68kBus, tvram: &[u8]) -> Vec<u8> {
     screen
 }
 
+fn sample_graphics_cpu(
+    params: &ViconUniforms,
+    gvram: Option<&[u8]>,
+    palette: &[u16; 256],
+    x: u32,
+    y: u32,
+) -> u16 {
+    let enabled = if params.r0_mode & 7 >= 4 {
+        params.r2_display & 16
+    } else {
+        params.r2_display & 15
+    };
+    if enabled == 0 {
+        return 0;
+    }
+    let nibble = |slot: u32, x: u32, y: u32, scroll: bool| -> u16 {
+        let page = (params.r1_priority >> (slot * 2)) & 3;
+        let gx = (x + if scroll {
+            params.gr_scroll_x[page as usize]
+        } else {
+            0
+        }) & 511;
+        let gy = (y + if scroll {
+            params.gr_scroll_y[page as usize]
+        } else {
+            0
+        }) & 511;
+        let addr = ((gy * 512 + gx) * 2) as usize;
+        let word = gvram.map_or(0, |bytes| {
+            u16::from_be_bytes([bytes[addr], bytes[addr + 1]])
+        });
+        (word >> (page * 4)) & 15
+    };
+    let mode = params.r0_mode & 7;
+    let mut index = 0u16;
+    if mode >= 4 {
+        if params.r2_display & 16 == 0 {
+            return 0;
+        }
+        let gx = (x + params.gr_scroll_x[0]) & 1023;
+        let gy = (y + params.gr_scroll_y[0]) & 1023;
+        index = nibble((gy >> 9) * 2 + (gx >> 9), gx, gy, false);
+    } else {
+        let lanes = if mode == 0 {
+            1
+        } else if mode == 1 {
+            2
+        } else {
+            4
+        };
+        for first in (0..4).step_by(lanes) {
+            if params.r2_display & (((1 << lanes) - 1) << first) == 0 {
+                continue;
+            }
+            let mut candidate = 0;
+            for lane in 0..lanes {
+                candidate |= nibble((first + lane) as u32, x, y, true) << (lane * 4);
+            }
+            if candidate != 0 {
+                index = candidate;
+                break;
+            }
+        }
+    }
+    if mode == 2 || mode == 3 {
+        let low = (index & 255) as usize;
+        let high = (index >> 8) as usize;
+        let lo_word = palette[low & !1];
+        let hi_word = palette[(high & !1) + 1];
+        let lo = if low & 1 == 0 {
+            lo_word >> 8
+        } else {
+            lo_word & 255
+        };
+        let hi = if high & 1 == 0 {
+            hi_word & 0xff00
+        } else {
+            hi_word << 8
+        };
+        hi | lo
+    } else {
+        palette[index as usize]
+    }
+}
+
+/// CPU reference compositor for the shared VICON shader.
 pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let params = ViconUniforms::from_bus(bus);
     let width = params.width;
@@ -670,11 +757,11 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let mut rgba8 = vec![0u8; (width * height * 4) as usize];
 
     let text_enabled = (params.r2_display & 0x0020) != 0;
-    let gr0_enabled = (params.r2_display & 0x0001) != 0;
-    let contrast = params.contrast.max(1);
-    let tx_rank = (params.r1_priority >> 8) & 3;
-    let gr_rank = (params.r1_priority >> 10) & 3;
-    let text_above_gr = tx_rank <= gr_rank;
+    let contrast = params.contrast;
+    let tx_rank = (params.r1_priority >> 10) & 3;
+    let sp_rank = (params.r1_priority >> 12) & 3;
+    let gr_rank = (params.r1_priority >> 8) & 3;
+    let text_above_gr = gr_rank == 2 || (gr_rank == 1 && tx_rank <= sp_rank);
 
     let tvram = bus.active_tvram().map(|tv| with_cursor_overlay(bus, tv));
     let tvram = tvram.as_deref();
@@ -702,7 +789,10 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             if text_enabled {
                 if let Some(tv) = tvram {
                     let (tx, ty) = if row_bytes == 128 && plane_bytes == TVRAM_PLANE_BYTES {
-                        ((x + params.text_scroll_x) & 1023, (y + params.text_scroll_y) & 1023)
+                        (
+                            (x + params.text_scroll_x) & 1023,
+                            (y + params.text_scroll_y) & 1023,
+                        )
                     } else {
                         (x, y)
                     };
@@ -718,44 +808,23 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
                 }
             }
 
-            let mut gr_idx = 0u16;
-            if gr0_enabled && x < 512 && y < 512 {
-                if let Some(gv) = gvram {
-                    let gx = (x + params.gr0_scroll_x) & 511;
-                    let gy = (y + params.gr0_scroll_y) & 511;
-                    let addr = (((gy * 512) + gx) * 2) as usize;
-                    let word = u16::from_be_bytes([gv[addr], gv[addr + 1]]);
-                    let mode = params.r0_mode & 0x07;
-                    gr_idx = if mode >= 4 {
-                        word
-                    } else if (mode & 1) == 1 {
-                        word & 0x00FF
-                    } else {
-                        word & 0x000F
-                    };
-                }
-            }
-
-            let mut final_grbi = tx_pal[0];
-            if text_above_gr {
-                if text_enabled && tx_idx != 0 {
-                    final_grbi = tx_pal[tx_idx];
-                } else if gr0_enabled && gr_idx != 0 {
-                    final_grbi = if (params.r0_mode & 0x07) >= 4 {
-                        gr_idx
-                    } else {
-                        gr_pal[(gr_idx & 0xFF) as usize]
-                    };
-                }
-            } else if gr0_enabled && gr_idx != 0 {
-                final_grbi = if (params.r0_mode & 0x07) >= 4 {
-                    gr_idx
+            let gr_color = sample_graphics_cpu(&params, gvram, gr_pal, x, y);
+            let tx_color = if text_enabled && gr_rank != 3 {
+                tx_pal[tx_idx]
+            } else {
+                0
+            };
+            let final_grbi = if text_above_gr {
+                if tx_color != 0 {
+                    tx_color
                 } else {
-                    gr_pal[(gr_idx & 0xFF) as usize]
-                };
-            } else if text_enabled && tx_idx != 0 {
-                final_grbi = tx_pal[tx_idx];
-            }
+                    gr_color
+                }
+            } else if gr_color != 0 {
+                gr_color
+            } else {
+                tx_color
+            };
 
             let out_off = ((y * width + x) * 4) as usize;
             rgba8[out_off..out_off + 4].copy_from_slice(&grbi_to_rgba(final_grbi));

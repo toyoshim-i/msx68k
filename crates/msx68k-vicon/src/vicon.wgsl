@@ -9,14 +9,15 @@ struct ViconUniforms {
     height: u32,
     text_scroll_x: u32,
     text_scroll_y: u32,
-    gr0_scroll_x: u32,
-    gr0_scroll_y: u32,
+    gr_scroll_x: vec4<u32>,
+    gr_scroll_y: vec4<u32>,
     r0_mode: u32,
     r1_priority: u32,
     r2_display: u32,
     contrast: u32,
     tvram_row_bytes: u32,
     tvram_plane_bytes: u32,
+    reserved: vec2<u32>,
 };
 
 @group(0) @binding(0)
@@ -81,22 +82,50 @@ fn sample_tvram_index(x: u32, y: u32) -> u32 {
     return b0 | (b1 << 1u) | (b2 << 2u) | (b3 << 3u);
 }
 
-fn sample_gvram_page0_index(x: u32, y: u32) -> u32 {
-    let gx = (x + params.gr0_scroll_x) & 511u;
-    let gy = (y + params.gr0_scroll_y) & 511u;
-    let byte_addr = ((gy * 512u) + gx) * 2u;
-    let word = read_gvram_u16_be(byte_addr);
-    let mode = params.r0_mode & 0x07u;
-    if (mode >= 4u) {
-        // 65536-color direct GRBI mode
-        return word;
-    } else if ((mode & 1u) == 1u) {
-        // 256-color mode
-        return word & 0xFFu;
-    } else {
-        // 16-color mode (page 0 in low nibble)
-        return word & 0x0Fu;
+fn graphics_nibble(slot: u32, x: u32, y: u32, scroll: bool) -> u32 {
+    let page = (params.r1_priority >> (slot * 2u)) & 3u;
+    var gx = x;
+    var gy = y;
+    if (scroll) {
+        gx += params.gr_scroll_x[page];
+        gy += params.gr_scroll_y[page];
     }
+    let word = read_gvram_u16_be((((gy & 511u) * 512u) + (gx & 511u)) * 2u);
+    return (word >> (page * 4u)) & 15u;
+}
+
+fn graphics_color(x: u32, y: u32) -> u32 {
+    let mode = params.r0_mode & 7u;
+    var index = 0u;
+    if (mode < 4u && (params.r2_display & 15u) == 0u) { return 0u; }
+    if (mode >= 4u) {
+        if ((params.r2_display & 16u) == 0u) { return 0u; }
+        let gx = (x + params.gr_scroll_x[0]) & 1023u;
+        let gy = (y + params.gr_scroll_y[0]) & 1023u;
+        index = graphics_nibble((gy >> 9u) * 2u + (gx >> 9u), gx, gy, false);
+    } else {
+        var lanes = 4u;
+        if (mode == 0u) { lanes = 1u; }
+        if (mode == 1u) { lanes = 2u; }
+        for (var first = 0u; first < 4u; first += lanes) {
+            if ((params.r2_display & (((1u << lanes) - 1u) << first)) == 0u) { continue; }
+            var candidate = 0u;
+            for (var lane = 0u; lane < lanes; lane++) {
+                candidate |= graphics_nibble(first + lane, x, y, true) << (lane * 4u);
+            }
+            if (candidate != 0u) { index = candidate; break; }
+        }
+    }
+    if (mode == 2u || mode == 3u) {
+        let low = index & 255u;
+        let high = index >> 8u;
+        let lo_word = palettes[256u + (low & 254u)];
+        let hi_word = palettes[257u + (high & 254u)];
+        let lo = select(lo_word & 255u, lo_word >> 8u, (low & 1u) == 0u);
+        let hi = select((hi_word << 8u) & 0xff00u, hi_word & 0xff00u, (high & 1u) == 0u);
+        return hi | lo;
+    }
+    return palettes[256u + index];
 }
 
 // Whether the text plane is clear (palette index 0, SX-Window's G_THRU) at (x, y), where
@@ -110,49 +139,20 @@ fn text_is_clear(x: u32, y: u32) -> bool {
 
 // Packed RGBA8 of the pixel at (x, y).
 fn composite(x: u32, y: u32) -> u32 {
-    let text_enabled = (params.r2_display & 0x0020u) != 0u;
-    let gr0_enabled = (params.r2_display & 0x0001u) != 0u;
-    let contrast = max(params.contrast, 1u);
-
-    var tx_idx: u32 = 0u;
-    if (text_enabled) {
-        tx_idx = sample_tvram_index(x, y);
+    let gr_rank = (params.r1_priority >> 8u) & 3u;
+    let tx_rank = (params.r1_priority >> 10u) & 3u;
+    let sp_rank = (params.r1_priority >> 12u) & 3u;
+    let text_above_gr = gr_rank == 2u || (gr_rank == 1u && tx_rank <= sp_rank);
+    var text_color = 0u;
+    if ((params.r2_display & 32u) != 0u && gr_rank != 3u) {
+        text_color = palettes[sample_tvram_index(x, y)];
     }
-
-    var gr_idx: u32 = 0u;
-    if (gr0_enabled && x < 512u && y < 512u) {
-        gr_idx = sample_gvram_page0_index(x, y);
-    }
-
-    // Priority between Text (bits 9..8 of R1) and Graphics (bits 11..10 of R1):
-    // Smaller rank number (0..2) is closer to the viewer (higher priority).
-    let tx_rank = (params.r1_priority >> 8u) & 3u;
-    let gr_rank = (params.r1_priority >> 10u) & 3u;
-    let text_above_gr = tx_rank <= gr_rank;
-
-    var final_grbi: u32 = palettes[0u]; // Backdrop color (Text palette #0)
-
+    let gr_color = graphics_color(x, y);
+    var color = text_color;
     if (text_above_gr) {
-        if (text_enabled && tx_idx != 0u) {
-            final_grbi = palettes[tx_idx];
-        } else if (gr0_enabled && gr_idx != 0u) {
-            if ((params.r0_mode & 0x07u) >= 4u) {
-                final_grbi = gr_idx;
-            } else {
-                final_grbi = palettes[256u + (gr_idx & 0xFFu)];
-            }
-        }
-    } else {
-        if (gr0_enabled && gr_idx != 0u) {
-            if ((params.r0_mode & 0x07u) >= 4u) {
-                final_grbi = gr_idx;
-            } else {
-                final_grbi = palettes[256u + (gr_idx & 0xFFu)];
-            }
-        } else if (text_enabled && tx_idx != 0u) {
-            final_grbi = palettes[tx_idx];
-        }
+        if (text_color == 0u) { color = gr_color; }
+    } else if (gr_color != 0u) {
+        color = gr_color;
     }
-
-    return grbi_to_packed_rgba8(final_grbi, contrast);
+    return grbi_to_packed_rgba8(color, params.contrast);
 }

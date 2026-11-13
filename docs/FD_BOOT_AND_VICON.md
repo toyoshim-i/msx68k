@@ -4,6 +4,8 @@ This document describes the motherboard peripheral emulation (`crates/msx68k-bus
 
 ---
 
+The graphics-mode scope and next steps are documented in [GRAPHICS](GRAPHICS.md).
+
 ## 1. Boot & Interrupt Hierarchy (`crates/msx68k-bus`)
 
 The X68000 uses four primary vectored interrupt controllers during IPL POST, Human68k floppy boot, and SX-Window GUI execution:
@@ -96,8 +98,8 @@ When booting `SXWIN311.XDF`:
 Implemented in [`crates/msx68k-vicon/src/lib.rs`](../crates/msx68k-vicon/src/lib.rs), [`crates/msx68k-vicon/src/shader.wgsl`](../crates/msx68k-vicon/src/shader.wgsl), and [`crates/msx68k-app/src/main.rs`](../crates/msx68k-app/src/main.rs):
 
 - **Compute & Surface Pipeline**:
-  - Uploads the 512 KB 4-plane `TVRAM`, 512 KB `GVRAM`, 512-entry `GGGGGRRRRRBBBBBI` Text/Graphics Palettes (`$E82000`–`$E823FF`), and `ViconUniforms` (CRTC active resolution, `R10`/`R11` text scroll, `R12`/`R13` graphic scroll, `VICON R0/R1/R2` mode/priority/enable registers, and System Port contrast) to `wgpu` buffers.
-  - Dispatches a `@compute @workgroup_size(16, 16, 1)` WGSL compute pipeline that composites the 4-plane TVRAM and GVRAM layers with 10-bit wrap-around scrolling and 6-bit-per-channel (`5-bit + I-bit`) palette expansion into an `RGBA8` storage buffer, followed by a fullscreen surface presentation pass (`vs_fullscreen` / `fs_present`) with aspect-ratio preservation.
+  - Uploads the 512 KB 4-plane `TVRAM`, 512 KB `GVRAM`, 512-entry `GGGGGRRRRRBBBBBI` Text/Graphics Palettes (`$E82000`–`$E823FF`), and `ViconUniforms` (CRTC active resolution, `R10`/`R11` text scroll, `R12`–`R19` graphic scroll, `VICON R0/R1/R2` mode/priority/enable registers, and System Port contrast) to `wgpu` buffers.
+  - Dispatches a `@compute @workgroup_size(16, 16, 1)` WGSL compute pipeline that composites the 4-plane TVRAM and GVRAM layers with mode-dependent 9/10-bit wrap-around scrolling and 6-bit-per-channel (`5-bit + I-bit`) palette expansion into an `RGBA8` storage buffer, followed by a fullscreen surface presentation pass (`vs_fullscreen` / `fs_present`) with aspect-ratio preservation.
   - Verified in [`crates/msx68k-vicon/tests/vicon_render.rs`](../crates/msx68k-vicon/tests/vicon_render.rs) for 100% pixel-exact parity between the `wgpu` GPU pipeline and the CPU reference compositor across synthetic patterns, Human68k v3.02 CLI boot, and the live SX-Window v3.1 GUI desktop.
 - **Interactive Window Controls (`msx68k-app`)**:
   - Mouse motion and left/right clicks inside the window are scaled to CRTC active resolution and forwarded to [`Scc`](../crates/msx68k-bus/src/peripherals.rs).

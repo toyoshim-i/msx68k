@@ -18,7 +18,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var rgba = composite(x, y);
-    if (text_is_clear(x, y)) {
+    if (text_is_clear(x, y) && graphics_color(x, y) == 0u) {
         rgba = rgba & 0x00FFFFFFu;
     }
     output_rgba[y * params.width + x] = rgba;
