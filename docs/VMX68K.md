@@ -60,7 +60,7 @@ run in a VM of their own from the start.
     are staged until accepted. Existing CPU/memory/drive changes ask whether to
     restart; frequency and boot changes do not require restarting immediately.
 
-  - **Drive assignment** (decided 2026-11-13, mock in the notes) is in one of two modes, chosen
+  - **Drive assignment** has two modes, chosen
     in the configuration dialog's ドライブ row: **共有** (shared mode, with the path of the
     CONFIG.SYS the VM boots with: every drive is the primary VM's, under the same letter) or
     **カスタム** (custom mode). Custom mode's 詳細... button, which shared mode greys out, opens
@@ -353,6 +353,11 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 ---
 
 ## 6. Open Questions
+
+- **HDD partition selection**: image-backed SCSI drives currently use the first Human68k
+  partition. Allow selecting another partition in the drive assignment form.
+- **Icon artwork**: review the configuration and drive icons against SX-Window's
+  visual conventions.
 
 - **Mouse input to VMs**: relative or absolute motion, pointer capture, and how to leave it.
 - **Settings file contents**: the resources in a VM's `.LB` and their layout, and how
