@@ -137,7 +137,7 @@ official SX-Window programming manuals.
   which the window follows (`WMSize`), SRAM to save, and a redraw after the primary's screen
   grew.
 - **Menu** (right button on the gear icon): 設定..., and the CPU's name with its speeds,
-  applied at once with `VmSpeed` (8) and saved.
+  applied at once with `VmSpeed` (8) and saved; custom-only Boot; and 新しい設定....
 - **Setups** are `*.V68` libraries (`'V68S'` speed, CPU, RAM; `'SRAM'`; `'V68D'` drives),
   opened from the Filer through `\SHELL\ICON.LB`, or `A:\VMX68K\DEFAULT.V68`; SRAM is saved as
   it changes (`VmSram` 10).
@@ -193,6 +193,36 @@ official SX-Window programming manuals.
   even when replacing a disk with another of the same format. Bridge detach, close, restart,
   and VM startup failure release ownership, invalidate the old VM's media state, and preserve
   the current disk's real tab (including a disk inserted while lent).
+- **Live floppy controls (4c)**: PLOT IDs 10–17 are FD0–3, empty/inserted. `VmStatus`
+  returns connected units in D2 bits 0–3, inserted media in 4–7, per-unit lamps in 8–11,
+  and passthrough sources in 12–15; shared mode returns zero. The app applies the same 0.2 s
+  afterglow as the global lamp. Left-click ejects, DRAGEND (81) accepts a single Filer path
+  with `TSGetDrag` / `TSCellToStr`. `VmMedia` (12), D1 ID, D2 unit, D3 new handle (-1 eject),
+  D4 raw length, posts a change to the VM thread. Existing I/O finishes first; kind 17
+  (`MediaDone`, D1 unit) then lets the task close its retained old handle. Per-unit busy flags
+  prevent overlapping swaps. Native FloppyEject keeps a physical lease for reinsertion;
+  FloppyRelease relinquishes it when an image replaces it. Running assignments have their
+  own copy, so live exchanges cannot overwrite different assignments pending restart.
+- **Boot (4c)**: MENU 2 checks STD, FD0–3, SCSI0–7, ROM. `VmBoot` (13), D1 ID,
+  D2 choice 0–13, A1 ROM address, changes the VM's SRAM and supplies it through `VmSram`
+  for immediate saving. The VM thread applies it without a reset. D2=-1 queries; D1=0
+  generates fresh SRAM at A0 with RAM MB in D3, for new setups. `VmStatus` returns the
+  current choice in D3. SRAM $18 is $0000 for STD, $9070+(unit<<8) for FD, $A000 for ROM;
+  SCSI uses ROM handles $FC0000+4*target. Each target's boot stub has Human68k metadata and
+  the generated disk IPL preserves D4, so a nonzero target boots and gets its correct letter.
+- **New setup (4d)**: DLOG/DITL 3 takes the new path and the initial boot choice. DLOG/DITL 4
+  edits a ROM address, initially the current vector, rejecting odd or out-of-range values.
+  A new file inherits CPU, RAM, speed and drive assignments, uses custom mode and fresh SRAM,
+  and leaves the original VM/setup intact. Existing files are rejected. TSFock ($A351) shares
+  the R module with a separate work area (mode word $0002, a 20-byte argument block), passing
+  the quoted path and /setup to open the new task's configuration dialog. Paths accept quotes.
+- **Verification**: the VMX68K UI test drags an actual Filer image onto an FD, reads its bytes
+  through the bridge, ejects it, checks the old handle stays open until acknowledgement and
+  closes afterwards, and selects Boot/FD1 and checks saved SRAM. Another creates a setup
+  with SCSI2, checks the original assignments, and observes the second VM/configuration
+  dialog, then rejects creating the same path again without changing its bytes.
+  `vmx68k_disk.rs` also boots SCSI6 with SCSI0 present, checks its B: prompt, and resets
+  to FD0 and checks A:; reset clears the preceding SCSI boot's target and drive-letter state.
 - Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
   VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
   `crates/msx68k-vicon/tests/vmx68k_disk.rs` also boots a custom raw image from the primary's
@@ -216,7 +246,7 @@ official SX-Window programming manuals.
 
 ### 2.1 Order
 1. ~~Icon bar and the Configuration menu with the CPU speed submenu, applied at once.~~ Done.
-2. ~~The access lamp.~~ Done. The floppy icons wait for custom mode, as they show only there.
+2. ~~The access lamp.~~ Done, including per-unit lamps on custom-mode floppy icons.
 3. ~~The per-VM setup (`*.V68`) with its SRAM, and `A:\VMX68K\DEFAULT.V68`.~~ Done
    ([VMX68K.md](VMX68K.md) Section 2, "A settings file per VM").
 4. In this order (decided 2026-11-13):
@@ -225,18 +255,16 @@ official SX-Window programming manuals.
    - 4b drive assignment, shared and custom mode, in the order ファイル, 共有, パススルー (mock:
      [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png)). The dialogs
      are done; 4b-1 has raw floppy and HDD/SCSI files working and 4b-2 (共有 drives) is done.
-     4b-3 (パススルー) is done too. Next is 4c, the boot submenu and floppy icons.
-   - 4c the boot device submenu and the floppy icons, which need custom mode.
-   - 4d the menu to make a new setup, which chooses the boot device it writes in the setup's
-     SRAM.
+     4b-3 (パススルー) is done too.
+   - 4c ~~the boot device submenu and the floppy icons, which need custom mode.~~ Done.
+   - 4d ~~the menu to make a new setup, which chooses the boot device it writes in the setup's
+     SRAM.~~ Done.
 
 ### 2.2 Pieces Still to Build
 - **Custom image files on the VM** (4b-1): Raw floppy and HDD/SCSI images now work through
   the existing handle bridge, including boot and writes. Add remote DIM support separately
   if needed: the remote FDC backend accepts raw image sizes only. The SCSI block driver still
   uses each image's first Human68k partition; arbitrary partition layouts need separate work.
-- **Floppy icons and the boot submenu** (4c), more `'PLOT'` icons in `VMX68K.LB`.
-- **New setup** (4d): a path input and the boot device to write in the new setup's SRAM.
 
 ### 2.3 Still Open
 - The resources in a VM's `.LB` and their layout, and how double-clicking one opens VMX68K.SX

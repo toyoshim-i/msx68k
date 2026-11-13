@@ -73,7 +73,7 @@ run in a VM of their own from the start.
     given, a path or a drive letter such as `C:`. Its 設定 keeps the changes until the
     configuration dialog's 設定 saves them with the rest and asks about the restart once; that
     dialog's 取消 drops them too. Paths are typed into text fields; dropping a file from the
-    Filer comes later. An HDD image goes on the VM's SCSI and is the VM's alone. Custom mode
+    Filer onto an FD icon is available for live media exchange. An HDD image goes on the VM's SCSI and is the VM's alone. Custom mode
     keeps the machine's own limits: two or four floppy drives, and the drive letters Human68k
     gives them. The VM boots as its SRAM says, and making a new setup (4d) chooses the boot
     device it writes there.
@@ -94,7 +94,7 @@ run in a VM of their own from the start.
   VMX68K.SX with the file; the HDD builder adds it to new disks and `install_vmx68k` to an
   existing one. Started without a setup, VMX68K.SX uses `A:\VMX68K\DEFAULT.V68`, made when
   missing. The VM's SRAM is written back to its setup whenever it changes.
-  - **Contents**: `'V68S'` 0, the version (1) and the speed (as `VmSpeed`'s), and `'SRAM'` 0,
+  - **Contents**: `'V68S'` 0, version 2 with speed, CPU and RAM size (four words), and `'SRAM'` 0,
     the VM's 16 KB of SRAM once it has one (`vmx68k_library::setup_library`).
   - **Opening**: the setup's path is VMX68K.SX's first command line word, which the Filer gives
     (`vmx68k.x %`). VMX68K.SX reads the setup, drops the library unwritten, and passes the speed
@@ -105,7 +105,11 @@ run in a VM of their own from the start.
     from the VM's thread once it stays unchanged for 0.5 s, so a program writing it byte by
     byte is saved once; the primary wakes VMX68K.SX, which takes it with `VmSram` (10) and
     writes the setup, as SXMODE.X writes `MSX68K.LB`.
-- **New VM setups.** A menu makes a new setup at a path given, and edits and starts it.
+- **New VM setups.** 新しい設定... follows the CPU and Boot entries of the gear menu. Its
+  dialog takes a new path and an initial boot device (STD, FD0–3, SCSI0–7, or a ROM address).
+  It creates a custom setup with the current CPU, RAM, speed, and drive assignments and fresh
+  SRAM, without overwriting an existing file or changing the running VM. A separate VMX68K
+  task opens the file and its configuration dialog, where the new setup's drives can be edited.
 - **Disk images.** The first test boots `disks/HUMAN302.XDF` from the host directly. As soon as
   the VM shows its screen in the window, images come from the primary VM's drives. Floppy and hard
   disk images are read and written on every access, written through, never cached whole: still
@@ -234,6 +238,19 @@ windows work the same way as the primary VM.
   while lent; the VM still respects the disk's physical write-protect tab. Ejection and media
   replacement reach the VM, including a replacement of the same geometry. Closing or restarting
   the VM releases the unit. Remote DIM file images remain pending (see the settings UI notes).
+
+- **Live floppy controls and Boot.** Custom-mode FD icons show insertion and a per-unit access
+  lamp. Left-click ejects; a single raw image dropped from the Filer replaces it without reset.
+  The task opens and validates the new file first. The VM thread finishes earlier I/O, changes
+  the medium, latches removal for firmware, and acknowledges with `VmPoll` kind 17 before the
+  task closes the old handle. A physical eject keeps its passthrough lease; dropping a file
+  releases the lease and restores the primary's physical write protection. Changes update the
+  setup immediately unless different drive assignments have already been saved for a later
+  restart; those pending assignments are retained independently of the running handles.
+  The Boot submenu checks the current SRAM choice and writes/saves the selected device for
+  the next reset. ROM opens an address field (up to six hex digits, even addresses only).
+  SCSI IDs 1–7 have their own ROM boot handles and preserve the selected target through the
+  generated IPL and Human68k driver initialization.
 
 ## 4. First Goal
 

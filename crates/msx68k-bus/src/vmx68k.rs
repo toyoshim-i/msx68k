@@ -6,8 +6,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 
 use msx68k_cpu::{CpuModel, CpuState, TrapResult};
 
@@ -90,6 +90,16 @@ pub enum BridgeOp {
     },
     /// 16: `_FILEDATE` setting `date << 16 | time` of the primary's file `handle`.
     Filedate { handle: u32, datetime: u32 },
+    /// 17: the VM has finished changing media; the task can close its old handle.
+    MediaDone {
+        unit: u32,
+    },
+    FloppyEject {
+        unit: u32,
+    },
+    FloppyRelease {
+        unit: u32,
+    },
     /// Native requests, completed by the primary bus during VmPoll.
     FloppyRead { unit: u32, offset: u32, len: u32 },
     FloppyWrite {
@@ -118,6 +128,8 @@ impl BridgeOp {
             Self::Create { .. } => 14,
             Self::HandleWrite { .. } => 15,
             Self::Filedate { .. } => 16,
+            Self::MediaDone { .. } => 17,
+            Self::FloppyEject { .. } | Self::FloppyRelease { .. } => 0,
             Self::FloppyRead { .. } | Self::FloppyWrite { .. } => 0,
         }
     }
@@ -355,6 +367,17 @@ pub enum VmEvent {
         speed: CpuSpeedMode,
         custom: Option<Vec<CustomDrive>>,
     },
+    Media {
+        id: u32,
+        unit: u32,
+        handle: u32,
+        len: u32,
+    },
+    Boot {
+        id: u32,
+        choice: u32,
+        rom: u32,
+    },
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
     /// The VM was closed.
@@ -379,7 +402,168 @@ pub enum CustomDrive {
 /// file that did not open), and the file's size.
 const DRIVE_TABLE_ENTRY: u32 = 8;
 
+/// Menu order: STD, FD0..FD3, SCSI0..SCSI7, ROM.
+pub fn boot_choice(sram: &[u8]) -> u32 {
+    let word = u16::from_be_bytes([sram[0x18], sram[0x19]]);
+    let rom = u32::from_be_bytes(sram[12..16].try_into().unwrap());
+    if word == 0 {
+        0
+    } else if word & 0xF000 == 0x9000 {
+        1 + ((word >> 8) & 3) as u32
+    } else if (word == 1 || word == 0xA000) && (0xFC0000..=0xFC001C).contains(&rom) && rom % 4 == 0
+    {
+        5 + (rom - 0xFC0000) / 4
+    } else {
+        13
+    }
+}
+
+pub fn apply_boot_choice(sram: &mut [u8], choice: u32, rom: u32) -> bool {
+    let word: u16 = match choice {
+        0 => 0,
+        1..=4 => 0x9070 + ((choice as u16 - 1) << 8),
+        5..=12 => {
+            sram[12..16].copy_from_slice(&(0xFC0000 + (choice - 5) * 4).to_be_bytes());
+            0xA000
+        }
+        13 if rom <= 0xFFFFFF && rom & 1 == 0 => {
+            sram[12..16].copy_from_slice(&rom.to_be_bytes());
+            0xA000
+        }
+        _ => return false,
+    };
+    sram[0x18..0x1A].copy_from_slice(&word.to_be_bytes());
+    true
+}
+
 impl X68kBus {
+    /// Called on a VM thread, after any earlier FDC command finished.
+    pub fn change_vm_floppy(
+        &mut self,
+        unit: usize,
+        disk: Option<RemoteDisk>,
+        bridge: &VmBridge,
+    ) -> bool {
+        let Some(drive) = self.fdc.drives.get(unit) else {
+            return false;
+        };
+        let source = drive
+            .remote
+            .as_ref()
+            .and_then(|disk| disk.floppy.as_ref().map(|(unit, _)| *unit));
+        let ok = if disk.is_none() && source.is_some() {
+            bridge
+                .ask(BridgeOp::FloppyEject {
+                    unit: source.unwrap(),
+                })
+                .is_some_and(|reply| reply.result == 0)
+        } else {
+            let ok = if let Some(disk) = disk {
+                self.fdc.insert_remote_disk(unit, disk, false)
+            } else {
+                self.fdc.eject_disk(unit);
+                true
+            };
+            if ok {
+                self.fdc.media_changed(unit);
+                if let Some(unit) = source {
+                    bridge.ask(BridgeOp::FloppyRelease { unit });
+                }
+            }
+            ok
+        };
+        bridge.ask(BridgeOp::MediaDone { unit: unit as u32 });
+        ok
+    }
+
+    pub fn floppy_state(&self) -> u32 {
+        self.fdc
+            .drives
+            .iter()
+            .enumerate()
+            .fold(0, |bits, (unit, drive)| {
+                bits | ((drive.connected as u32) << unit)
+                    | ((drive.is_inserted() as u32) << (4 + unit))
+                    | ((drive
+                        .remote
+                        .as_ref()
+                        .is_some_and(RemoteDisk::is_passthrough) as u32)
+                        << (12 + unit))
+            })
+    }
+
+    pub fn set_vm_floppies(&mut self, id: u32, packed: u32, boot: u32) {
+        if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            open.status.floppies = packed;
+            open.status.boot = boot;
+        }
+    }
+
+    pub(crate) fn hypercall_vm_media(&mut self, state: &mut CpuState) -> TrapResult {
+        let (id, unit, handle, len) = (state.d[1], state.d[2], state.d[3], state.d[4]);
+        let valid = self.vm_windows.open.iter().any(|open| {
+            open.id == id && open.custom && unit < 4 && open.status.floppies & (1 << unit) != 0
+        }) && (handle == u32::MAX
+            || crate::fdc::FloppyGeometry::from_image_len(len as usize).is_some());
+        state.d[0] = if valid {
+            self.vm_windows.events.push(VmEvent::Media {
+                id,
+                unit,
+                handle,
+                len,
+            });
+            0
+        } else {
+            u32::MAX
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    pub(crate) fn hypercall_vm_boot(&mut self, state: &mut CpuState) -> TrapResult {
+        let (id, choice, rom) = (state.d[1], state.d[2], state.a[1]);
+        if id == 0 {
+            let mut defaults = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config())
+                .sram()
+                .to_vec();
+            defaults[8..12].copy_from_slice(&(state.d[3].clamp(1, 12) << 20).to_be_bytes());
+            if apply_boot_choice(&mut defaults, choice, rom) {
+                for (i, &byte) in defaults.iter().enumerate() {
+                    self.poke_u8(state.a[0] + i as u32, byte);
+                }
+                state.d[0] = 0;
+            } else {
+                state.d[0] = u32::MAX;
+            }
+        } else if let Some(open) = self
+            .vm_windows
+            .open
+            .iter_mut()
+            .find(|open| open.id == id && open.custom)
+        {
+            if choice == u32::MAX {
+                state.d[0] = open.status.boot;
+            } else if let Some(mut sram) = open.runtime_sram.clone() {
+                if apply_boot_choice(&mut sram, choice, rom) {
+                    open.status.boot = choice;
+                    open.runtime_sram = Some(sram.clone());
+                    open.sram = Some(sram);
+                    open.status.sram = true;
+                    self.vm_windows
+                        .events
+                        .push(VmEvent::Boot { id, choice, rom });
+                    state.d[0] = 0;
+                } else {
+                    state.d[0] = u32::MAX;
+                }
+            } else {
+                state.d[0] = u32::MAX;
+            }
+        } else {
+            state.d[0] = u32::MAX;
+        }
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
     /// Installs a custom setup's raw floppy/HDD images and file-level shares.
     /// FDD units, SCSI IDs, and shares each follow row order independently, with
     /// shared drives appended after the physical disks. Missing images reserve
@@ -532,6 +716,8 @@ struct OpenVm {
     status_woken: bool,
     /// The VM's SRAM as it last changed, for VMX68K.SX to save with `VmSram`.
     sram: Option<Vec<u8>>,
+    runtime_sram: Option<Vec<u8>>,
+    custom: bool,
 }
 
 /// The state of a VM that VMX68K.SX shows: its access lamp and its screen's size.
@@ -544,6 +730,8 @@ struct VmStatus {
     redraw: bool,
     /// Width and height, `(0, 0)` until the VM shows a frame.
     screen: (u16, u16),
+    floppies: u32,
+    boot: u32,
 }
 
 /// `VmStatus` bit of a lit access lamp.
@@ -629,7 +817,10 @@ impl X68kBus {
             match drive {
                 CustomDrive::Missing => slots += 1,
                 CustomDrive::File { len, .. }
-                    if crate::fdc::FloppyGeometry::from_image_len(*len as usize).is_some() => slots += 1,
+                    if crate::fdc::FloppyGeometry::from_image_len(*len as usize).is_some() =>
+                {
+                    slots += 1
+                }
                 _ => {}
             }
             let CustomDrive::Passthrough { drive } = *drive else {
@@ -694,6 +885,25 @@ impl X68kBus {
     }
 
     fn passthrough_request(&mut self, id: u32, op: &BridgeOp) -> Option<BridgeReply> {
+        if let BridgeOp::FloppyEject { unit } | BridgeOp::FloppyRelease { unit } = op {
+            let index = self
+                .vm_windows
+                .passthrough
+                .iter()
+                .position(|lease| lease.owner == id && lease.unit == *unit)?;
+            if matches!(op, BridgeOp::FloppyEject { .. }) {
+                self.eject_floppy(*unit as usize);
+            } else {
+                let lease = self.vm_windows.passthrough.remove(index);
+                lease.media.update(0, true);
+                self.fdc.drives[*unit as usize].passthrough_media = None;
+            }
+            return Some(BridgeReply {
+                result: 0,
+                data: vec![],
+            });
+        }
+
         let (unit, offset, len) = match op {
             BridgeOp::FloppyRead { unit, offset, len } => (*unit, *offset as usize, *len as usize),
             BridgeOp::FloppyWrite { unit, offset, data } => (*unit, *offset as usize, data.len()),
@@ -773,6 +983,7 @@ impl X68kBus {
     /// wakes it with `E_USER1`, and it takes the bytes with `VmSram`.
     pub fn set_vm_sram(&mut self, id: u32, sram: Vec<u8>) {
         if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
+            open.runtime_sram = Some(sram.clone());
             open.sram = Some(sram);
             open.status.sram = true;
         }
@@ -858,6 +1069,8 @@ impl X68kBus {
             status_told: VmStatus::default(),
             status_woken: false,
             sram: None,
+            runtime_sram: None,
+            custom: state.a[2] & 0x00FF_FFFF != 0,
         });
         let sram_at = state.d[5] & 0x00FF_FFFF;
         let sram = (sram_at != 0).then(|| {
@@ -915,6 +1128,8 @@ impl X68kBus {
         if matches!(
             op,
             BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. }
+                | BridgeOp::FloppyEject { .. }
+                | BridgeOp::FloppyRelease { .. }
         ) {
             let reply = self.passthrough_request(id, &op);
             let disk = &mut self
@@ -940,30 +1155,27 @@ impl X68kBus {
         // Numbers in D1..D3, bytes for the buffer, and how many bytes the reply brings back.
         let (numbers, bytes, reply_len): ([u32; 3], Vec<BufferBytes>, u32) = match &op {
             BridgeOp::Read { offset, len } => ([*offset, *len, 0], vec![], *len),
-            BridgeOp::Write { offset, data } => ([*offset, data.len() as u32, 0], vec![(0, data.clone())], 0),
+            BridgeOp::Write { offset, data } => {
+                ([*offset, data.len() as u32, 0], vec![(0, data.clone())], 0)
+            }
             BridgeOp::Open { path, mode } => ([*mode, 0, 0], vec![(0, nul_terminated(path))], 0),
             BridgeOp::Mkdir { path } | BridgeOp::Rmdir { path } | BridgeOp::Delete { path } => {
                 ([0, 0, 0], vec![(0, nul_terminated(path))], 0)
             }
-            BridgeOp::Rename { from, to } => {
-                ([0, 0, 0], vec![(0, nul_terminated(from)), (RENAME_TO, nul_terminated(to))], 0)
-            }
+            BridgeOp::Rename { from, to } => ([0, 0, 0], vec![(0, nul_terminated(from)), (RENAME_TO, nul_terminated(to))], 0),
             BridgeOp::Chmod { path, attr } => ([*attr, 0, 0], vec![(0, nul_terminated(path))], 0),
-            BridgeOp::Create { path, attr, replace } => {
-                ([*attr, *replace as u32, 0], vec![(0, nul_terminated(path))], 0)
-            }
-            BridgeOp::HandleWrite { handle, offset, data } => {
-                ([*offset, data.len() as u32, *handle], vec![(0, data.clone())], 0)
-            }
+            BridgeOp::Create { path, attr, replace } => ([*attr, *replace as u32, 0], vec![(0, nul_terminated(path))], 0),
+            BridgeOp::HandleWrite { handle, offset, data } => ([*offset, data.len() as u32, *handle], vec![(0, data.clone())], 0),
             BridgeOp::Filedate { handle, datetime } => ([*datetime, 0, *handle], vec![], 0),
             BridgeOp::HandleRead { handle, offset, len } => ([*offset, *len, *handle], vec![], *len),
             BridgeOp::Close { handle } => ([0, 0, *handle], vec![], 0),
-            BridgeOp::Files { attr, path } => {
-                ([*attr, 0, 0], vec![(0, vec![0; 53]), (FILES_PATH, nul_terminated(path))], 53)
-            }
+            BridgeOp::Files { attr, path } => ([*attr, 0, 0], vec![(0, vec![0; 53]), (FILES_PATH, nul_terminated(path))], 53),
             BridgeOp::Nfiles { buffer } => ([0, 0, 0], vec![(0, buffer.clone())], 53),
             BridgeOp::Dskfre { drive } => ([*drive, 0, 0], vec![], 8),
-            BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. } => unreachable!(),
+            BridgeOp::MediaDone { unit } => ([*unit, 0, 0], vec![], 0),
+            BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. }
+            | BridgeOp::FloppyEject { .. }
+            | BridgeOp::FloppyRelease { .. } => unreachable!(),
         };
         let needed = bytes
             .iter()
@@ -1061,6 +1273,7 @@ impl X68kBus {
         state.d[0] = match self.vm_windows.open.iter_mut().find(|open| open.id == id) {
             Some(open) => {
                 open.cpu = cpu;
+                open.custom = custom.is_some();
                 let speed = vm_speed(cpu, state.d[3]);
                 // Retire the old requests before the task can serve another event
                 // with its newly opened image handles.
@@ -1092,6 +1305,8 @@ impl X68kBus {
             | if status.sram { STATUS_SRAM } else { 0 }
             | if status.redraw { STATUS_REDRAW } else { 0 };
         state.d[1] = (status.screen.0 as u32) << 16 | status.screen.1 as u32;
+        state.d[2] = if open.custom { status.floppies } else { 0 };
+        state.d[3] = status.boot;
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -1168,6 +1383,123 @@ fn nul_terminated(path: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn icon_ejection_keeps_a_physical_lease_and_image_replacement_releases_it() {
+        let mut primary = primary_with_floppies();
+        let mut state = CpuState::default();
+        state.a[2] = 0x6000;
+        for (at, byte) in [(0x6001, 1), (0x6003, 2), (0x6005, 2)] {
+            primary.poke_u8(at, byte);
+        }
+        primary.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        let (mut bridge, requests) = vm_bridge();
+        primary.bind_vm_passthrough(id, &mut bridge);
+        primary.attach_vm_bridge(id, requests);
+        let mut child = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        assert!(child
+            .install_custom_drives(bridge.clone(), &[CustomDrive::Passthrough { drive: 2 }])
+            .is_empty());
+        for eject in [true, false] {
+            let storage = bridge.clone();
+            let worker = std::thread::spawn(move || {
+                let disk = (!eject).then(|| RemoteDisk::with_handle(storage.clone(), 9, 737_280));
+                assert!(child.change_vm_floppy(0, disk, &storage));
+                child
+            });
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !worker.is_finished() && std::time::Instant::now() < until {
+                state.d[1] = id;
+                state.d[2] = 0x8000;
+                state.d[3] = 32768;
+                primary.hypercall_vm_poll(&mut state);
+                if state.d[0] == 17 {
+                    assert_eq!(state.d[1], 0, "the old handle's unit");
+                    state.d[1] = id;
+                    state.d[2] = 0;
+                    primary.hypercall_vm_reply(&mut state);
+                } else {
+                    assert_eq!(state.d[0], 0);
+                }
+                std::thread::yield_now();
+            }
+            if !worker.is_finished() {
+                primary.detach_vm_bridge(id);
+            }
+            assert!(
+                worker.is_finished(),
+                "media change must finish through VmPoll"
+            );
+            child = worker.join().unwrap();
+            if eject {
+                assert!(!primary.fdc.drives[0].is_inserted());
+                assert!(!child.fdc.drives[0].is_inserted());
+                assert_eq!(primary.vm_windows.passthrough.len(), 1);
+                assert!(primary.insert_floppy(0, vec![0; 1_474_560], false));
+                assert!(child.fdc.drives[0].is_inserted());
+            } else {
+                assert!(primary.vm_windows.passthrough.is_empty());
+                assert!(!primary.fdc.drives[0].is_write_protected());
+                assert!(primary.fdc.drives[0].is_inserted());
+                assert_eq!(child.fdc.drives[0].remote.as_ref().unwrap().len(), 737_280);
+            }
+        }
+        primary.detach_vm_bridge(id);
+    }
+
+    #[test]
+    fn boot_choices_preserve_other_sram_and_validate_rom_addresses() {
+        let original = vec![0x5A; VM_SRAM_BYTES];
+        for choice in 0..14 {
+            let mut sram = original.clone();
+            assert!(apply_boot_choice(&mut sram, choice, 0xBFFFFC));
+            assert_eq!(boot_choice(&sram), choice);
+            assert_eq!(&sram[0x20..], &original[0x20..]);
+        }
+        for (choice, rom) in [(14, 0), (13, 1), (13, 0x1000000)] {
+            let mut sram = original.clone();
+            assert!(!apply_boot_choice(&mut sram, choice, rom));
+            assert_eq!(sram, original, "invalid choices are atomic");
+        }
+    }
+
+    #[test]
+    fn boot_changes_are_saved_without_resetting_the_vm() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let mut state = CpuState::default();
+        state.a[2] = 0x6000; // empty custom table
+        bus.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        bus.take_vm_events();
+        let sram = bus.sram().to_vec();
+        bus.set_vm_sram(id, sram.clone());
+        state.d[1] = id;
+        state.d[2] = 11; // SCSI6
+        bus.hypercall_vm_boot(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert_eq!(
+            bus.sram(),
+            sram,
+            "the primary's own boot choice is untouched"
+        );
+        assert_eq!(
+            bus.take_vm_events(),
+            [VmEvent::Boot {
+                id,
+                choice: 11,
+                rom: 0
+            }]
+        );
+        state.d[2] = 0x8000;
+        state.d[3] = VM_SRAM_BYTES as u32;
+        bus.hypercall_vm_sram(&mut state);
+        assert_eq!(state.d[0], VM_SRAM_BYTES as u32);
+        let saved: Vec<u8> = (0..VM_SRAM_BYTES)
+            .map(|i| bus.peek_u8(0x8000 + i as u32).unwrap())
+            .collect();
+        assert_eq!(boot_choice(&saved), 11);
+        assert_eq!(&saved[0x20..], &sram[0x20..]);
+    }
 
     fn primary_with_floppies() -> X68kBus {
         let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
@@ -1198,9 +1530,20 @@ mod tests {
         use msx68k_cpu::Bus;
         let mut primary = primary_with_floppies();
         let pass = CustomDrive::Passthrough { drive: 2 };
-        primary.reserve_passthrough(4, &[CustomDrive::Missing, CustomDrive::Missing,
-            CustomDrive::Missing, CustomDrive::Missing, pass]);
-        assert!(primary.vm_windows.passthrough.is_empty(), "do not lend an unusable fifth FD");
+        primary.reserve_passthrough(
+            4,
+            &[
+                CustomDrive::Missing,
+                CustomDrive::Missing,
+                CustomDrive::Missing,
+                CustomDrive::Missing,
+                pass,
+            ],
+        );
+        assert!(
+            primary.vm_windows.passthrough.is_empty(),
+            "do not lend an unusable fifth FD"
+        );
         primary.reserve_passthrough(1, &[pass]);
         primary.reserve_passthrough(2, &[pass]);
         primary.reserve_passthrough(3, &[CustomDrive::Passthrough { drive: 1 }]);
@@ -1354,14 +1697,51 @@ mod tests {
             assert!(!disk.write(0, vec![6, 7]));
         });
         for (op, result, data) in [
-            (BridgeOp::HandleRead { handle: 17, offset: 512, len: 3 }, 3, vec![1, 2, 3]),
-            (BridgeOp::HandleWrite { handle: 17, offset: 1024, data: vec![4, 5] }, 2, vec![]),
-            (BridgeOp::HandleRead { handle: 17, offset: 0, len: 3 }, 2, vec![1, 2]),
-            (BridgeOp::HandleWrite { handle: 17, offset: 0, data: vec![6, 7] }, 1, vec![]),
+            (
+                BridgeOp::HandleRead {
+                    handle: 17,
+                    offset: 512,
+                    len: 3,
+                },
+                3,
+                vec![1, 2, 3],
+            ),
+            (
+                BridgeOp::HandleWrite {
+                    handle: 17,
+                    offset: 1024,
+                    data: vec![4, 5],
+                },
+                2,
+                vec![],
+            ),
+            (
+                BridgeOp::HandleRead {
+                    handle: 17,
+                    offset: 0,
+                    len: 3,
+                },
+                2,
+                vec![1, 2],
+            ),
+            (
+                BridgeOp::HandleWrite {
+                    handle: 17,
+                    offset: 0,
+                    data: vec![6, 7],
+                },
+                1,
+                vec![],
+            ),
         ] {
-            let request = requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            let request = requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
             assert_eq!(request.op, op);
-            request.reply.send(Some(BridgeReply { result, data })).unwrap();
+            request
+                .reply
+                .send(Some(BridgeReply { result, data }))
+                .unwrap();
         }
         worker.join().unwrap();
     }

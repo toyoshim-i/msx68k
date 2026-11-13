@@ -23,8 +23,14 @@ MSX68K_FN_VM_SPEED	.equ	8	; D1.L = VM ID, D2.L = speed: 68000 0 10 MHz, 1 16 MHz
 				; 68030 0 25 MHz, 1 Burst
 MSX68K_FN_VM_STATUS	.equ	9	; D1.L = VM ID; returns D0 bit 0 = lamp lit, bit 1 = SRAM to save,
 				; bit 2 = redraw the window, D1.L = width << 16 | height
+				; D2 bits 0..3 connected FDs, 4..7 inserted, 8..11 lamps, 12..15 passthrough
+				; D2 = 0 in shared mode; D3 = Boot menu choice
 MSX68K_FN_VM_SRAM	.equ	10	; D1.L = VM ID, D2.L/D3.L = buffer/size; returns the SRAM's size
 MSX68K_FN_VM_RESTART	.equ	11	; D1.L = VM ID, D2.L = CPU << 16 | RAM MB, D3.L = speed
+
+MSX68K_FN_VM_MEDIA	.equ	12	; D1 VM, D2 unit, D3 handle (-1 eject), D4 image length
+MSX68K_FN_VM_BOOT	.equ	13	; D1 VM, D2 menu choice (0..13), A1 ROM address
+				; D2=-1 queries; D1=0 creates SRAM at A0, with RAM MB in D3
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the
@@ -60,6 +66,7 @@ msx68k_call:
 
 	* The ROM window is reachable only in supervisor mode, which _SUPER_JSR runs the entry in
 	movem.l	(sp)+, d0-d3
+	movea.l	(sp), a1		; restore the caller's A1 argument after probing
 	pea	MSX68K_ENTRY
 	DOS	_SUPER_JSR
 	addq.l	#4, sp

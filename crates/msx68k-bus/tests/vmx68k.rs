@@ -373,7 +373,9 @@ fn vmx68k_runs_a_vm_in_each_of_its_windows() {
         .map(|id| {
             let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
             vm.bus.attach_vm_bridge(id, requests);
-            std::thread::spawn(move || bridge.ask(msx68k_bus::vmx68k::BridgeOp::Dskfre { drive: 1 }))
+            std::thread::spawn(move || {
+                bridge.ask(msx68k_bus::vmx68k::BridgeOp::Dskfre { drive: 1 })
+            })
         })
         .into_iter()
         .collect();
@@ -529,4 +531,303 @@ fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     // The menu now has the 68030's speeds, 25MHz and 最高速, the second Burst.
     choose_speed(&mut vm, Some(1), "speeds_68030");
     assert_eq!(vm.bus.take_vm_events(), [VmEvent::Speed { id: 1, mode: CpuSpeedMode::Burst }]);
+}
+
+#[test]
+fn new_setup_keeps_the_running_vm_and_opens_its_own_configuration() {
+    let Some(mut vm) = boot() else { return };
+    vm.bus.request_screen_resolution(1024, 768);
+    vm.run_steps(8_000_000);
+    click(&mut vm, DRIVE_ICON, 2, 3_000_000);
+    click(&mut vm, (104, 255), 2, 8_000_000);
+    assert!(matches!(
+        vm.bus.take_vm_events().as_slice(),
+        [VmEvent::Opened { id: 1, .. }]
+    ));
+    let original = saved_drives(&vm, "DEFAULT");
+    // Shared-mode Configuration menu: New setup is item 3.
+    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.bus.scc.set_mouse_buttons(false, true);
+    vm.run_steps(1_000_000);
+    vm.bus.set_host_mouse_position(Some((90, 102)));
+    vm.run_steps(1_000_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(4_000_000);
+    screenshot(&vm, "new_setup");
+    // SCSI2 radio, then OK; default path is A:\VMX68K\NEW.V68.
+    click(&mut vm, (349, 258), 1, 1_000_000);
+    click(&mut vm, (500, 330), 1, 10_000_000);
+    screenshot(&vm, "new_setup_started");
+    assert_eq!(saved_drives(&vm, "DEFAULT"), original);
+    assert!(saved_setup(&vm, "NEW").is_some(), "new setup was saved");
+    let events = vm.bus.take_vm_events();
+    let [VmEvent::Opened {
+        id: 2,
+        sram: Some(sram),
+        custom: Some(_),
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("new task must open a separate VM: {events:?}");
+    };
+    assert_eq!(
+        msx68k_bus::vmx68k::boot_choice(sram),
+        7,
+        "SCSI2 choice survives creation"
+    );
+    assert_ne!(
+        text_index(&vm, (300, 200)),
+        0,
+        "new setup opens its configuration dialog"
+    );
+    let bytes = |vm: &X68kVm| {
+        let mut image = vm.bus.scsi_hdd_data(0).unwrap().to_vec();
+        HumanVolume::open(&mut image)
+            .unwrap()
+            .read_file(&[short_name("VMX68K", "")], &short_name("NEW", "V68"))
+            .unwrap()
+    };
+    let original_new = bytes(&vm);
+    // Cancel the new VM's configuration, then try creating the same path again.
+    click(&mut vm, (474, 317), 1, 2_000_000);
+    vm.bus.set_vm_floppies(2, 3, 7);
+    vm.run_steps(2_000_000);
+    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.bus.scc.set_mouse_buttons(false, true);
+    vm.run_steps(1_000_000);
+    vm.bus.set_host_mouse_position(Some((90, 118)));
+    vm.run_steps(1_000_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(4_000_000);
+    click(&mut vm, (500, 330), 1, 4_000_000);
+    assert_eq!(
+        bytes(&vm),
+        original_new,
+        "existing setup must not be overwritten"
+    );
+    assert_eq!(
+        vm.bus.take_vm_events(),
+        [],
+        "an existing file cannot start another VM"
+    );
+}
+
+#[test]
+fn custom_fd_icons_accept_filer_drops_and_eject_without_reset() {
+    use msx68k_bus::sx_resource::Resource;
+    use msx68k_bus::vmx68k::{vm_bridge, BridgeOp};
+    let mut setup =
+        ResourceLibrary::parse(&msx68k_bus::vmx68k_library::setup_library(0, 0, 4, None)).unwrap();
+    setup.insert(
+        b"V68D",
+        Resource::new(
+            0,
+            msx68k_bus::vmx68k_library::setup_drives(true, &[(0, b"")]),
+        ),
+    );
+    let file = |dir: &[u8; 8], name: &[u8; 8], ext: &[u8; 3], data| ExtractedFile {
+        path_dirs: vec![(*dir, [b' '; 3], [0; 10])],
+        raw_name: *name,
+        raw_ext: *ext,
+        raw_name2: [0; 10],
+        attr: 0x20,
+        time: 0x6000,
+        date: 0x5821,
+        data,
+    };
+    let image = vec![0x5A; 737_280];
+    let Some(mut vm) = boot_with(vec![
+        file(b"VMX68K  ", b"DEFAULT ", b"V68", setup.to_bytes()),
+        file(b"X68     ", b"ZZZ     ", b"XDF", image.clone()),
+    ]) else {
+        return;
+    };
+    vm.bus.request_screen_resolution(1024, 768);
+    vm.run_steps(8_000_000);
+    click(&mut vm, DRIVE_ICON, 2, 3_000_000);
+    click(&mut vm, (104, 255), 2, 8_000_000);
+    assert!(matches!(
+        vm.bus.take_vm_events().as_slice(),
+        [VmEvent::Opened { id: 1, .. }]
+    ));
+    vm.bus.set_vm_floppies(1, 3, 0);
+    let (bridge, requests) = vm_bridge();
+    vm.bus.attach_vm_bridge(1, requests);
+    vm.run_steps(2_000_000);
+    // Move the VM right to uncover the Filer's ZZZ.XDF icon.
+    vm.bus.set_host_mouse_position(Some((300, 30)));
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(300_000);
+    for x in (310..=600).step_by(10) {
+        vm.bus.set_host_mouse_position(Some((x, 30)));
+        vm.run_steps(100_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(2_000_000);
+    click(&mut vm, (184, 255), 1, 1_000_000);
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(300_000);
+    for i in 1..=24 {
+        vm.bus
+            .set_host_mouse_position(Some((184 + 208 * i / 24, 255 - 203 * i / 24)));
+        vm.run_steps(150_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(6_000_000);
+    screenshot(&vm, "fd_drop");
+    let events = vm.bus.take_vm_events();
+    let [VmEvent::Media {
+        id: 1,
+        unit: 0,
+        handle,
+        len: 737_280,
+    }] = events.as_slice()
+    else {
+        panic!("drop must open the image without restarting: {events:?}");
+    };
+    let handle = *handle;
+    assert_eq!(
+        saved_drives(&vm, "DEFAULT"),
+        Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))
+    );
+    // Acknowledge application on the VM thread, then the icon can eject again.
+    let worker_bridge = bridge.clone();
+    let worker = std::thread::spawn(move || {
+        let data = worker_bridge
+            .ask(BridgeOp::HandleRead {
+                handle,
+                offset: 0,
+                len: 1024,
+            })
+            .unwrap();
+        assert_eq!(data.data, vec![0x5A; 1024]);
+        worker_bridge.ask(BridgeOp::MediaDone { unit: 0 }).unwrap();
+    });
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !worker.is_finished() && std::time::Instant::now() < until {
+        vm.run_steps(200_000);
+    }
+    assert!(worker.is_finished());
+    worker.join().unwrap();
+    vm.bus.set_vm_floppies(1, 3 | 1 << 4 | 1 << 8, 0);
+    vm.run_steps(2_000_000);
+    assert_eq!(
+        text_index(&vm, (403, 57)),
+        13,
+        "FD0 has its own access lamp"
+    );
+    click(&mut vm, (392, 52), 2, 4_000_000);
+    let events = vm.bus.take_vm_events();
+    assert_eq!(
+        events,
+        [VmEvent::Media {
+            id: 1,
+            unit: 0,
+            handle: u32::MAX,
+            len: 0
+        }]
+    );
+    assert_eq!(
+        saved_drives(&vm, "DEFAULT"),
+        Some((true, vec![(0, String::new())]))
+    );
+    let worker = std::thread::spawn(move || {
+        assert_eq!(
+            bridge
+                .ask(BridgeOp::HandleRead {
+                    handle,
+                    offset: 0,
+                    len: 1024
+                })
+                .unwrap()
+                .result,
+            1024,
+            "old handle lives until the VM finishes its I/O"
+        );
+        bridge.ask(BridgeOp::MediaDone { unit: 0 }).unwrap();
+        assert!(
+            (bridge
+                .ask(BridgeOp::HandleRead {
+                    handle,
+                    offset: 0,
+                    len: 1024
+                })
+                .unwrap()
+                .result as i32)
+                < 0,
+            "acknowledgement closes the old file"
+        );
+    });
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !worker.is_finished() && std::time::Instant::now() < until {
+        vm.run_steps(200_000);
+    }
+    assert!(worker.is_finished());
+    worker.join().unwrap();
+
+    let mut guest_sram = vm.bus.sram().to_vec();
+    guest_sram[12..16].copy_from_slice(&0xBFFFFCu32.to_be_bytes());
+    vm.bus.set_vm_sram(1, guest_sram);
+    vm.run_steps(2_000_000);
+    // Boot submenu, FD1: changing it saves SRAM without a Restart event.
+    let point = |vm: &mut X68kVm, at| {
+        vm.bus.set_host_mouse_position(Some(at));
+        vm.run_steps(1_000_000);
+    };
+    point(&mut vm, (356, 52));
+    vm.bus.scc.set_mouse_buttons(false, true);
+    point(&mut vm, (356, 52));
+    point(&mut vm, (390, 102));
+    vm.run_steps(5_000_000);
+    screenshot(&vm, "boot_menu");
+    point(&mut vm, (420, 136));
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(4_000_000);
+    let events = vm.bus.take_vm_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [VmEvent::Boot {
+                id: 1,
+                choice: 2,
+                ..
+            }]
+        ),
+        "Boot menu must save FD1: {events:?}"
+    );
+    let mut image = vm.bus.scsi_hdd_data(0).unwrap().to_vec();
+    let data = HumanVolume::open(&mut image)
+        .unwrap()
+        .read_file(&[short_name("VMX68K", "")], &short_name("DEFAULT", "V68"))
+        .unwrap();
+    let saved = ResourceLibrary::parse(&data).unwrap();
+    assert_eq!(
+        msx68k_bus::vmx68k::boot_choice(&saved.get(b"SRAM", 0).unwrap().data),
+        2
+    );
+    point(&mut vm, (356, 52));
+    vm.bus.scc.set_mouse_buttons(false, true);
+    point(&mut vm, (356, 52));
+    point(&mut vm, (390, 102));
+    vm.run_steps(5_000_000);
+    point(&mut vm, (420, 312)); // ROM...
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(4_000_000);
+    click(&mut vm, (409, 281), 1, 4_000_000); // accept the current BFFFFC address
+    assert_eq!(
+        vm.bus.take_vm_events(),
+        [VmEvent::Boot {
+            id: 1,
+            choice: 13,
+            rom: 0xBFFFFC
+        }]
+    );
+    vm.bus.set_vm_floppies(1, 0, 13);
+    vm.run_steps(2_000_000);
+    assert_eq!(
+        text_index(&vm, (403, 57)),
+        9,
+        "retiring the FD icons clears every lamp plane"
+    );
+    vm.bus.detach_vm_bridge(1);
 }

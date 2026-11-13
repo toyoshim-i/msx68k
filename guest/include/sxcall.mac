@@ -281,3 +281,8 @@ mwa_boundTop		.equ	52
 mwa_boundLeft		.equ	54
 mwa_boundBottom		.equ	56
 mwa_boundRight		.equ	58
+
+TSGetDrag	.equ	$A389
+TSEndDrag	.equ	$A38C
+TSCellToStr	.equ	$A427
+TSFock	.equ	$A351

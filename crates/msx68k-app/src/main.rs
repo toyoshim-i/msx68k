@@ -327,12 +327,20 @@ struct GuestVm {
     lamp_until: Option<Instant>,
     /// The VM's SRAM each time it changed, sent from its thread, and the latest not yet handed
     /// to VMX68K.X with when it came.
-    sram_changes: std::sync::mpsc::Receiver<Vec<u8>>,
-    sram_changed: Arc<std::sync::mpsc::Sender<Vec<u8>>>,
+    sram_changes: std::sync::mpsc::Receiver<(u64, Vec<u8>)>,
+    sram_changed: Arc<std::sync::mpsc::Sender<(u64, Vec<u8>)>>,
+    /// Ignore snapshots queued before a menu change to the boot device.
+    sram_epoch: u64,
     sram_pending: Option<(Vec<u8>, Instant)>,
     /// The VM's SRAM as it last was, which a restart keeps, and the primary's drives it sees.
     sram: Option<Vec<u8>>,
     drives: u32,
+    bridge: Option<msx68k_bus::vmx68k::VmBridge>,
+    fd_accesses: [Arc<AtomicU64>; 4],
+    fd_seen: [u64; 4],
+    fd_until: [Option<Instant>; 4],
+    media_states: std::sync::mpsc::Receiver<(u32, u32)>,
+    media_state: (u32, u32),
 }
 
 /// The machine a VM of VMX68K.X is set up as.
@@ -820,6 +828,42 @@ impl Msx68kApp {
                         self.vm.bus.detach_vm_bridge(id);
                     }
                 }
+                VmEvent::Media {
+                    id,
+                    unit,
+                    handle,
+                    len,
+                } => {
+                    if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
+                        if let Some(bridge) = guest.bridge.clone() {
+                            guest.thread.post(move |vm| {
+                                let disk = (handle != u32::MAX).then(|| {
+                                    msx68k_bus::vmx68k::RemoteDisk::with_handle(
+                                        bridge.clone(),
+                                        handle,
+                                        len as usize,
+                                    )
+                                });
+                                vm.bus.change_vm_floppy(unit as usize, disk, &bridge);
+                            });
+                        }
+                    }
+                }
+                VmEvent::Boot { id, choice, rom } => {
+                    if let Some(guest) = self.guest_vms.iter_mut().find(|guest| guest.id == id) {
+                        if let Some(sram) = guest.sram.as_mut() {
+                            msx68k_bus::vmx68k::apply_boot_choice(sram, choice, rom);
+                        }
+                        guest.sram_epoch = guest.sram_epoch.wrapping_add(1);
+                        guest.sram_pending = None;
+                        let epoch = guest.sram_epoch;
+                        let changed = Arc::clone(&guest.sram_changed);
+                        guest.thread.post(move |vm| {
+                            msx68k_bus::vmx68k::apply_boot_choice(vm.bus.sram_mut(), choice, rom);
+                            let _ = changed.send((epoch, vm.bus.sram().to_vec()));
+                        });
+                    }
+                }
                 VmEvent::Speed { id, mode } => {
                     if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
                         guest.thread.post(move |vm| vm.set_speed_mode(mode));
@@ -842,18 +886,39 @@ impl Msx68kApp {
             }
             let lit = guest.lamp_until.is_some_and(|until| now < until);
             self.vm.bus.set_vm_lamp(guest.id, lit);
+            while let Ok(state) = guest.media_states.try_recv() {
+                guest.media_state = state;
+            }
+            let mut packed = guest.media_state.0;
+            for unit in 0..4 {
+                let accesses = guest.fd_accesses[unit].load(Ordering::Relaxed);
+                if accesses != guest.fd_seen[unit] {
+                    guest.fd_seen[unit] = accesses;
+                    guest.fd_until[unit] = Some(now + LAMP_AFTERGLOW);
+                }
+                if guest.fd_until[unit].is_some_and(|until| now < until) {
+                    packed |= 1 << (8 + unit);
+                }
+            }
+            self.vm
+                .bus
+                .set_vm_floppies(guest.id, packed, guest.media_state.1);
             // VMX68K.X sizes its window to the VM's screen as the VM changes its mode.
             if let Some(frame) = guest.output.completed() {
                 self.vm.bus.set_vm_screen_size(guest.id, frame.width, frame.height);
             }
             // The VM's SRAM goes to VMX68K.X to save in its setup once it settles.
             let changed = Arc::clone(&guest.sram_changed);
+            let epoch = guest.sram_epoch;
             guest.thread.post(move |vm| {
                 if vm.bus.take_sram_dirty() {
-                    let _ = changed.send(vm.bus.sram().to_vec());
+                    let _ = changed.send((epoch, vm.bus.sram().to_vec()));
                 }
             });
-            while let Ok(sram) = guest.sram_changes.try_recv() {
+            while let Ok((epoch, sram)) = guest.sram_changes.try_recv() {
+                if epoch != guest.sram_epoch {
+                    continue;
+                }
                 guest.sram = Some(sram.clone());
                 guest.sram_pending = Some((sram, now));
             }
@@ -901,6 +966,7 @@ impl Msx68kApp {
         }
         vm.bus.load_cgrom(&self.guest_cgrom);
         vm.bus.load_ipl_rom(ipl);
+        let mut storage_bridge = None;
         if let Some(path) = &self.args.vm_fd0_path {
             // The debug override does not use the setup's reserved physical drives.
             self.vm.bus.detach_vm_bridge(id);
@@ -916,6 +982,7 @@ impl Msx68kApp {
         } else if let Some(custom) = custom {
             let (mut bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
             self.vm.bus.bind_vm_passthrough(id, &mut bridge);
+            storage_bridge = Some(bridge.clone());
             for drive in vm.bus.install_custom_drives(bridge, &custom) {
                 eprintln!("VM {id}: custom drive not supported yet: {drive:?}");
             }
@@ -936,10 +1003,31 @@ impl Msx68kApp {
             return None;
         }
         let accesses = vm.bus.drive_access_counter();
+        let fd_accesses = std::array::from_fn(|unit| Arc::clone(&vm.bus.fdc.drives[unit].accesses));
+        let initial_sram = vm.bus.sram().to_vec();
+        self.vm.bus.set_vm_sram(id, initial_sram.clone());
+        let custom_media = storage_bridge.is_some();
+        let initial_media = (
+            if custom_media {
+                vm.bus.floppy_state()
+            } else {
+                0
+            },
+            msx68k_bus::vmx68k::boot_choice(vm.bus.sram()),
+        );
+        let (media_state, media_states) = std::sync::mpsc::sync_channel(1);
         let (sram_changed, sram_changes) = std::sync::mpsc::channel();
         let mut screen = VmScreen::new(gpu.compositor.device(), gpu.compositor.queue());
         let output = screen.output();
         let thread = VmThread::spawn_with_vblank(vm, Pace::RealTime, move |vm| {
+            let _ = media_state.try_send((
+                if custom_media {
+                    vm.bus.floppy_state()
+                } else {
+                    0
+                },
+                msx68k_bus::vmx68k::boot_choice(vm.bus.sram()),
+            ));
             screen.present(&mut vm.bus);
         });
         println!("Started VM {id} for window ${window:06X}");
@@ -954,8 +1042,15 @@ impl Msx68kApp {
             sram_changes,
             sram_changed: Arc::new(sram_changed),
             sram_pending: None,
-            sram,
+            sram_epoch: 0,
+            sram: Some(initial_sram),
             drives,
+            bridge: storage_bridge,
+            fd_accesses,
+            fd_seen: [0; 4],
+            fd_until: [None; 4],
+            media_states,
+            media_state: initial_media,
         })
     }
 

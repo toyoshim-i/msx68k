@@ -31,6 +31,7 @@ pub enum HypercallId {
     SxMouseSync,
     /// Boot from attached SCSI HDD (`$FC0000`).
     ScsiRomBoot,
+    ScsiTargetBoot(u8),
     /// `HUMAN.SYS` `romdb` block driver builder (`JSR (A3)` at `*(P-16)`).
     ScsiRomdbBuild,
     /// `IOCS $F5` vector installer (`JSR (A0)` at `*(P-12)`).
@@ -94,6 +95,10 @@ pub enum AppFunction {
     VmSram = 10,
     /// Restarts VM `D1.L` with a new CPU, RAM, and speed from VMX68K.SX's dialog.
     VmRestart = 11,
+    /// Changes a custom VM's floppy image, with old I/O retired before handle release.
+    VmMedia = 12,
+    /// Saves the next boot choice, or creates factory SRAM for a new setup.
+    VmBoot = 13,
 }
 
 impl AppFunction {
@@ -111,6 +116,8 @@ impl AppFunction {
             9 => Some(Self::VmStatus),
             10 => Some(Self::VmSram),
             11 => Some(Self::VmRestart),
+            12 => Some(Self::VmMedia),
+            13 => Some(Self::VmBoot),
             _ => None,
         }
     }
@@ -166,6 +173,9 @@ impl X68kBus {
         match hypercall {
             HypercallId::SxMouseSync => self.hypercall_sx_mouse_sync(state),
             HypercallId::ScsiRomBoot => self.hypercall_scsi_rom_boot(state),
+            HypercallId::ScsiTargetBoot(target) => {
+                self.hypercall_scsi_target_boot(state, target as usize)
+            }
             HypercallId::ScsiRomdbBuild => self.hypercall_scsi_romdb_build(state),
             HypercallId::ScsiIocsInstall => self.hypercall_scsi_iocs_install(state),
             HypercallId::ScsiIocsDispatch => self.hypercall_scsi_iocs_dispatch(state),
@@ -197,6 +207,8 @@ impl X68kBus {
                 Some(AppFunction::VmStatus) => self.hypercall_vm_status(state),
                 Some(AppFunction::VmSram) => self.hypercall_vm_sram(state),
                 Some(AppFunction::VmRestart) => self.hypercall_vm_restart(state),
+                Some(AppFunction::VmMedia) => self.hypercall_vm_media(state),
+                Some(AppFunction::VmBoot) => self.hypercall_vm_boot(state),
                 None => TrapResult::Unhandled,
             },
         }

@@ -24,7 +24,6 @@ pub fn synthesize_scsi_ipl_sector(partition_start_record: u32) -> [u8; 1024] {
     code.extend_from_slice(&[0x24, 0x3C]); // movel #imm, %d2
     code.extend_from_slice(&partition_start_record.to_be_bytes());
     code.extend_from_slice(&[0x76, 0x01]); // moveq #1, %d3
-    code.extend_from_slice(&[0x78, 0x00]); // moveq #0, %d4
     code.extend_from_slice(&[0x7A, 0x02]); // moveq #2, %d5
     code.extend_from_slice(&[0x22, 0x7C, 0x00, 0x00, 0x30, 0x00]); // movel #0x3000, %a1
     code.extend_from_slice(&[0x4E, 0x4F]); // trap #15
@@ -77,7 +76,6 @@ pub fn synthesize_partition_boot_sector(
     code.extend_from_slice(&[0x24, 0x3C]); // movel #imm, %d2
     code.extend_from_slice(&human_start_lba.to_be_bytes());
     code.extend_from_slice(&[0x76, 0x40]); // moveq #64, %d3 (64 sectors = 64KB)
-    code.extend_from_slice(&[0x78, 0x00]); // moveq #0, %d4
     code.extend_from_slice(&[0x7A, 0x02]); // moveq #2, %d5
     code.extend_from_slice(&[0x22, 0x7C, 0x00, 0x00, 0x67, 0xC0]); // movel #0x67C0, %a1
     code.extend_from_slice(&[0x4E, 0x4F]); // trap #15
@@ -229,6 +227,7 @@ pub struct ScsiController {
     driver_targets: Vec<usize>,
     /// Whether system boots primarily from SCSI HDD instead of floppy.
     pub boot_from_scsi: bool,
+    boot_target: usize,
     /// Whether HDD target 0 has been written to since last persistence check.
     pub dirty: bool,
 }
@@ -250,6 +249,7 @@ impl ScsiController {
             driver_addr: 0,
             driver_targets: Vec::new(),
             boot_from_scsi: false,
+            boot_target: 0,
             dirty: false,
         }
     }
@@ -258,6 +258,10 @@ impl ScsiController {
         self.req_ptr = 0;
         self.driver_addr = 0;
         self.driver_targets.clear();
+        // The next IPL boot decides this again; a later FD boot must not inherit
+        // the previous SCSI boot's drive letter.
+        self.boot_from_scsi = false;
+        self.boot_target = 0;
     }
 
     /// Returns whether SCSI HDD target 0 has been modified since last persistence check, clearing the flag.
@@ -462,6 +466,19 @@ impl X68kBus {
             self.register_hypercall(0x00F0_0000 + (SCSI_ROM_OFFSET + offset) as u32, id);
         }
 
+        // SWITCH.X encodes a SCSI target as ROM handle FC0000 + target * 4.
+        for target in 1..8u32 {
+            let routine = 0x00FC_0300 + target * 0x20;
+            let handle = SCSI_ROM_OFFSET + target as usize * 4;
+            self.rom[handle..handle + 4].copy_from_slice(&routine.to_be_bytes());
+            let off = (routine - 0x00F0_0000) as usize;
+            self.rom[off - 16..off - 12].copy_from_slice(&0x00FC_0060u32.to_be_bytes());
+            self.rom[off - 12..off - 8].copy_from_slice(&0x00FC_0064u32.to_be_bytes());
+            self.rom[off - 8..off].copy_from_slice(b"Human68k");
+            self.rom[off..off + 4].copy_from_slice(&[hi, lo, 0x4E, 0x75]);
+            self.register_hypercall(routine, HypercallId::ScsiTargetBoot(target as u8));
+        }
+
         // Pre-install vector $F5 into RAM vector table at $0007D4 ($400 + $F5 * 4)
         if self.main_ram.len() >= 0x07D8 {
             self.main_ram[0x07D4..0x07D8].copy_from_slice(&0x00FC_0068u32.to_be_bytes());
@@ -470,6 +487,16 @@ impl X68kBus {
 
     /// Handles `ScsiRomBoot`: boots attached SCSI HDD into Main RAM `$002000`.
     pub(crate) fn hypercall_scsi_rom_boot(&mut self, state: &mut CpuState) -> TrapResult {
+        self.hypercall_scsi_target_boot(state, 0)
+    }
+
+    pub(crate) fn hypercall_scsi_target_boot(
+        &mut self,
+        state: &mut CpuState,
+        target: usize,
+    ) -> TrapResult {
+        self.scsi.boot_target = target;
+        state.d[4] = (target as u32) << 4;
         // Ensure vector $F5 is installed
         if self.main_ram.len() >= 0x07D8 {
             self.main_ram[0x07D4..0x07D8].copy_from_slice(&0x00FC_0068u32.to_be_bytes());
@@ -478,8 +505,8 @@ impl X68kBus {
         // The ROM was actually chosen by the IPL; keep SRAM unchanged.
         self.scsi.boot_from_scsi = true;
         // This runs on the VM thread, where waiting for VMX68K.X is safe.
-        if let Some(len) = self.scsi.len(0) {
-            if let Some(ipl) = self.scsi.read(0, 0x400, 1024) {
+        if let Some(len) = self.scsi.len(target) {
+            if let Some(ipl) = self.scsi.read(target, 0x400, 1024) {
                 if matches!(ipl[0], 0x60 | 0x4E) && self.main_ram.len() >= 0x2400 {
                     self.main_ram[0x2000..0x2400].copy_from_slice(&ipl);
                     state.pc = 0x2000;
@@ -487,7 +514,7 @@ impl X68kBus {
                 }
             }
             // Fallback: the first Human68k partition, as for resident images.
-            if let Some(header) = self.scsi.read(0, 0, len.min(0x890)) {
+            if let Some(header) = self.scsi.read(target, 0, len.min(0x890)) {
                 if let Some(part) = parse_scsi_partitions(&header)
                     .and_then(|parts| parts.into_iter().find(|p| &p.name == b"Human68k"))
                 {
@@ -497,7 +524,7 @@ impl X68kBus {
                     } else {
                         start * 512
                     };
-                    if let Some(boot) = self.scsi.read(0, off, 1024) {
+                    if let Some(boot) = self.scsi.read(target, off, 1024) {
                         if self.main_ram.len() >= 0x2400 {
                             self.main_ram[0x2000..0x2400].copy_from_slice(&boot);
                             state.pc = 0x2000;
@@ -784,7 +811,13 @@ impl X68kBus {
                 self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&0x0000u16.to_be_bytes());
 
                 if self.scsi.boot_from_scsi {
-                    self.main_ram[req_ptr + 22] = 1; // Starting letter = 1 (A:)
+                    self.main_ram[req_ptr + 22] = self
+                        .scsi
+                        .driver_targets
+                        .iter()
+                        .position(|&target| target == self.scsi.boot_target)
+                        .unwrap_or(0) as u8
+                        + 1;
                 }
             }
             1 => {

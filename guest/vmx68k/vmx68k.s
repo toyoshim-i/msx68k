@@ -123,18 +123,32 @@ lamp_lit:	.ds.b	1		; the access lamp as drawn
 has_sram:	.ds.b	1		; sram_buffer holds the VM's SRAM
 setup_found:	.ds.b	1		; the setup file is there
 setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
+start_config:	.ds.b	1
+	.even
 library_path:	.ds.b	PATH_MAX
 setup_path:	.ds.b	PATH_MAX
 menu_string:	.ds.b	64		; the speed submenu's items as MNConvert2 takes them
-config_string:	.ds.b	32		; the Configuration menu's
+config_string:	.ds.b	128		; the Configuration menu's
+boot_string:	.ds.b	160
+fd_state:	.ds.l	1
+vm_boot:	.ds.w	1
+new_boot:	.ds.w	1
+fd_rect:	.ds.w	4
+pending_old:	.ds.w	4
+media_busy:	.ds.b	4
 size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
 	.even
+run_drives:	.ds.b	DRIVES_SIZE	; choices attached to the running image handles
+media_save:	.ds.w	1
 vm_drives:	.ds.b	DRIVES_SIZE	; the setup's drives
 dlg_drives:	.ds.b	DRIVES_SIZE	; the configuration dialog's
 det_drives:	.ds.b	DRIVES_SIZE	; ドライブの詳細's
 pass_flush_result:	.ds.l	1	; primary flush before FD ownership changes
 drive_table:	.ds.w	1		; count, then kind.w, handle.w, size.l
 		.ds.b	DRIVE_ROWS*8
+new_path:	.ds.b	PATH_MAX
+old_path:	.ds.b	PATH_MAX
+new_command:	.ds.b	PATH_MAX+12
 image_path:	.ds.b	PATH_MAX+2
 dlg_text:	.ds.b	256		; a dialog item's text
 VARS_SIZE:
@@ -172,6 +186,8 @@ gui_start:
 clear_work:
 	clr.w	(a0)+
 	dbra	d0, clear_work
+	move.l	#-1, pending_old(a5)
+	move.l	#-1, pending_old+4(a5)
 	move.w	#-1, drive0_fd(a5)
 	move.l	#768 << 16 | 512, screen_size(a5)
 	move.w	#4, vm_ram(a5)		; what setups that do not say have
@@ -296,6 +312,9 @@ setup_kept:
 	addq.l	#4, sp
 	lea	win_active(a5), a1
 	st	(a1)
+	tst.b	start_config(a5)
+	beq.s	event_loop
+	bsr	config_dialog
 
 event_loop:
 
@@ -340,6 +359,8 @@ handle_system:
 	beq	quit_app
 	cmpi.w	#2, d0			; CLOSEALL
 	beq	quit_app
+	cmpi.w	#81, d0			; DRAGEND
+	beq	handle_drop
 	cmpi.w	#32, d0			; WINDOWSELECT
 	bne.s	event_loop
 	move.l	win_ptr(a5), -(sp)
@@ -370,6 +391,13 @@ handle_mouse_down:
 	addq.l	#4, sp
 	bra	event_loop
 track_window:
+	bsr	fd_hit
+	tst.l	d4
+	bmi.s	track_window_frame
+	clr.b	image_path(a5)
+	bsr	change_floppy
+	bra	event_loop
+track_window_frame:
 	* Dragging and the close box
 	pea	event_rec(a5)
 	move.l	win_ptr(a5), -(sp)
@@ -489,6 +517,7 @@ draw_bar:
 	SXCALL	GMPlotImg		; $A182
 	lea	10(sp), sp
 draw_bar_done:
+	bsr	draw_floppies
 	bsr	draw_lamp
 	movem.l	(sp)+, d0-d2/a0-a1
 	rts
@@ -511,6 +540,12 @@ update_status:
 	beq.s	update_lamp
 	bsr	resize_window
 update_lamp:
+	move.w	d3, vm_boot(a5)
+	cmp.l	fd_state(a5), d2
+	beq.s	update_media_done
+	move.l	d2, fd_state(a5)
+	bsr	draw_floppies
+update_media_done:
 	btst	#2, d0			; the primary's screen changed size
 	beq.s	update_lamp_sram
 	bsr	redraw_window
@@ -545,7 +580,7 @@ redraw_window:
 	rts
 
 * -----------------------------------------------------------------------------
-* Helper: take_sram
+* Helper:take_sram
 * Takes the VM's SRAM that changed from the host and saves it in the setup.
 * -----------------------------------------------------------------------------
 take_sram:
@@ -566,13 +601,13 @@ take_sram_done:
 	rts
 
 * -----------------------------------------------------------------------------
-* Helper: take_paths
+* Helper:take_paths
 * From this task's record in disk_buffer, makes library_path, the program's name
 * with .LB for its extension, and setup_path, the command line's first word or
 * the default setup.
 * -----------------------------------------------------------------------------
 take_paths:
-	movem.l	d0-d1/a0-a2, -(sp)
+	movem.l	d0-d2/a0-a2, -(sp)
 	lea	disk_buffer(a5), a0	; Task.name
 	lea	library_path(a5), a1
 	suba.l	a2, a2			; after the last '.'
@@ -585,7 +620,7 @@ take_name:
 	bne.s	take_name_next
 	movea.l	a1, a2
 take_name_next:
-	dbra	d1, take_name
+	dbra	d1,take_name
 	clr.b	(a1)
 take_name_done:
 	move.l	a2, d0
@@ -595,6 +630,21 @@ take_name_done:
 	clr.b	(a2)
 
 take_command:
+	* A newly created setup opens its configuration dialog in its own task.
+	lea	disk_buffer+TASK_COMMAND(a5),a0
+	moveq.l	#0,d0
+	move.b	(a0),d0
+	cmpi.w	#6,d0
+	bcs.s	take_command_start
+	lea	-5(a0,d0.w),a1
+	lea	setup_option(pc),a2
+	moveq.l	#5,d0
+take_option_compare:
+	cmpm.b	(a1)+,(a2)+
+	bne.s	take_command_start
+	dbra	d0,take_option_compare
+	st	start_config(a5)
+take_command_start:
 	lea	disk_buffer+TASK_COMMAND(a5), a0	; LASCII: its length, then its text
 	moveq.l	#0, d1
 	move.b	(a0)+, d1
@@ -605,14 +655,25 @@ take_command_skip:
 	move.b	(a0)+, d0
 	cmpi.b	#' ', d0
 	bls.s	take_command_skip
-	moveq.l	#PATH_MAX-2, d0
+	moveq.l	#PATH_MAX-2,d0
+	cmpi.b	#34,-1(a0)
+	beq.s	take_quoted_copy
 take_command_copy:
-	move.b	-1(a0), (a1)+
-	subq.w	#1, d1
+	move.b	-1(a0),(a1)+
+	subq.w	#1,d1
 	bmi.s	take_command_end
-	cmpi.b	#' ', (a0)+
+	cmpi.b	#' ',(a0)+
 	bls.s	take_command_end
-	dbra	d0, take_command_copy
+	dbra	d0,take_command_copy
+	bra.s	take_command_end
+take_quoted_copy:
+	subq.w	#1,d1
+	bmi.s	take_command_end
+	move.b	(a0)+,d2
+	cmpi.b	#34,d2
+	beq.s	take_command_end
+	move.b	d2,(a1)+
+	dbra	d0,take_quoted_copy
 take_command_end:
 	clr.b	(a1)
 	bra.s	take_paths_done
@@ -624,7 +685,7 @@ take_command_default_copy:
 	lea	setup_is_default(a5), a1
 	st	(a1)
 take_paths_done:
-	movem.l	(sp)+, d0-d1/a0-a2
+	movem.l	(sp)+, d0-d2/a0-a2
 	rts
 
 * -----------------------------------------------------------------------------
@@ -924,6 +985,20 @@ config_head_copy:
 config_name_copy:
 	move.b	(a0)+, (a1)+
 	bne.s	config_name_copy
+	subq.l	#1,a1
+	tst.l	fd_state(a5)
+	beq.s	config_no_boot
+	lea	boot_menu_head(pc),a0
+config_boot_head:
+	move.b	(a0)+,(a1)+
+	bne.s	config_boot_head
+	subq.l	#1,a1
+config_no_boot:
+	lea	new_menu_item(pc),a0
+config_new_head:
+	move.b	(a0)+,(a1)+
+	bne.s	config_new_head
+	bsr	build_boot_menu
 	move.w	#SPEED_MENU_ID, -(sp)
 	move.l	#'MENU', -(sp)
 	SXCALL	TSRscGet		; $A4AB
@@ -942,7 +1017,7 @@ config_name_copy:
 	SXCALL	MNConvert2		; $A26B
 	lea	10(sp), sp
 	move.l	a0, d0
-	beq.s	config_menu_done
+	beq	config_menu_done
 	movea.l	a0, a2
 	move.l	event_where(a5), -(sp)
 	move.l	a2, -(sp)
@@ -957,13 +1032,46 @@ config_name_copy:
 	cmpi.l	#1, d3
 	bne.s	config_menu_speed
 	bsr	config_dialog
-	bra.s	config_menu_done
+	bra	config_menu_done
 config_menu_speed:
+	moveq.l	#3,d0
+	tst.l	fd_state(a5)
+	beq.s	config_new_number
+	addq.w	#1,d0
+config_new_number:
+	cmp.l	d0,d3
+	bne.s	config_not_new
+	bsr	new_setup
+	bra	config_menu_done
+config_not_new:
+	move.l	d3,d0
+	swap	d0
+	cmpi.w	#2,d0
+	bne.s	config_not_boot
+	moveq.l	#0,d2
+	move.w	d3,d2
+	subq.w	#1,d2
+	movea.l	sram_buffer+12(a5),a1
+	cmpi.w	#13,d2
+	bne.s	config_boot_apply
+	bsr	rom_dialog
+	tst.l	d0
+	bmi	config_menu_done
+config_boot_apply:
+	moveq.l	#MSX68K_FN_VM_BOOT,d0
+	move.l	vm_id(a5),d1
+	bsr	msx68k_call
+	tst.l	d0
+	bne	config_menu_done
+	move.w	d2,vm_boot(a5)
+	bsr	take_sram
+	bra	config_menu_done
+config_not_boot:
 	* A speed: the submenu's ID in the high word and its item, from 1, in the low
 	move.l	d3, d0
 	swap	d0
 	cmpi.w	#SPEED_MENU_ID, d0
-	bne.s	config_menu_done
+	bne	config_menu_done
 	move.w	d3, d2
 	subq.w	#1, d2
 	cmp.w	d4, d2
@@ -973,7 +1081,7 @@ config_menu_speed:
 	move.l	vm_id(a5), d1
 	bsr	msx68k_call
 	tst.l	d0
-	bne.s	config_menu_done
+	bne	config_menu_done
 	lea	vm_speed(a5), a1
 	move.w	d2, (a1)
 	bsr	save_setup
@@ -1163,6 +1271,9 @@ custom_drive_table_done:
 
 open_custom_drives:
 	movem.l	d0-d7/a0-a4, -(sp)
+	lea	vm_drives(a5),a0
+	lea	run_drives(a5),a1
+	bsr	copy_drives
 	* Flush primary file-system writes before VmOpen/VmRestart lends any FD.
 	DOS	_FFLUSH
 	move.l	d0, pass_flush_result(a5)
@@ -1257,6 +1368,19 @@ close_custom_advance:
 	addq.l	#8, a4
 	dbra	d7, close_custom_next
 close_custom_done:
+	moveq.l	#3,d7
+	lea	pending_old(a5),a4
+close_pending:
+	move.w	(a4),d0
+	move.w	#-1,(a4)+
+	tst.w	d0
+	bmi.s	close_pending_next
+	move.w	d0,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+close_pending_next:
+	dbra	d7,close_pending
+	clr.l	media_busy(a5)
 	movem.l	(sp)+, d0/d7/a4
 	rts
 
@@ -1748,7 +1872,27 @@ serve_table:
 	.dc.w	serve_create-serve_table	; 14 _CREATE or _NEWFILE
 	.dc.w	serve_handle_write-serve_table	; 15 write a handle
 	.dc.w	serve_filedate-serve_table	; 16 _FILEDATE
-SERVE_KINDS	.equ	16
+	.dc.w	serve_media_done-serve_table	; 17 old medium is no longer in use
+SERVE_KINDS	.equ	17
+
+serve_media_done:
+	move.l	request_offset(a5), d0
+	cmpi.l	#4, d0
+	bcc	serve_reply
+	lea	media_busy(a5), a0
+	clr.b	(a0,d0.w)
+	add.w	d0,d0
+	lea	pending_old(a5), a0
+	move.w	(a0,d0.w), d1
+	move.w	#-1,(a0,d0.w)
+	tst.w	d1
+	bmi.s	serve_media_closed
+	move.w	d1,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+serve_media_closed:
+	moveq.l	#0,d3
+	bra	serve_reply
 
 serve_image:
 	* 1, 2: read or write drive 0's image; the reply is 0, or -1 when it fails
@@ -1937,6 +2081,673 @@ serve_done:
 	MSX68K_CALL_ROUTINE
 
 * -----------------------------------------------------------------------------
+* Per-unit FD rectangles and state. D4 is the unit, preserved by SX calls.
+fd_rectangle:
+	move.w	d4,d0
+	mulu	#36,d0
+	addi.w	#40,d0
+	lea	fd_rect(a5),a0
+	move.w	d0,(a0)+
+	move.w	#2,(a0)+
+	addi.w	#30,d0
+	move.w	d0,(a0)+
+	move.w	#22,(a0)
+	rts
+
+draw_floppies:
+	movem.l	d0-d5/a0-a1,-(sp)
+	move.l	win_ptr(a5),-(sp)
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+	moveq.l	#0,d4
+draw_fd_next:
+	move.l	fd_state(a5),d5
+	bsr	fd_rectangle
+	* Erase retired icons and all lamp planes when the connected set changes.
+	move.w	#$000F,-(sp)
+	SXCALL	GMAPage
+	addq.l	#2,sp
+	move.w	d0,-(sp)
+	move.w	#G_LGRAY,-(sp)
+	SXCALL	GMForeColor
+	addq.l	#2,sp
+	clr.w	-(sp)
+	SXCALL	GMPenMode
+	addq.l	#2,sp
+	pea	fd_rect(a5)
+	SXCALL	GMFillRect
+	addq.l	#4,sp
+	SXCALL	GMAPage
+	addq.l	#2,sp
+	btst	d4,d5
+	beq	draw_fd_skip
+	move.w	d4,d0
+	add.w	d0,d0
+	addi.w	#10,d0
+	move.w	d4,d1
+	addq.w	#4,d1
+	btst	d1,d5
+	beq	draw_fd_resource
+	addq.w	#1,d0
+draw_fd_resource:
+	move.w	d0,-(sp)
+	move.l	#'PLOT',-(sp)
+	SXCALL	TSRscGet
+	addq.l	#6,sp
+	move.l	a0,d0
+	beq	draw_fd_skip
+	movea.l	(a0),a0
+	clr.w	-(sp)
+	pea	fd_rect(a5)
+	pea	8(a0)
+	SXCALL	GMPlotImg
+	lea	10(sp),sp
+	addi.w	#21,fd_rect(a5)
+	subi.w	#3,fd_rect+4(a5)
+	move.w	#16,fd_rect+2(a5)
+	move.w	#19,fd_rect+6(a5)
+	moveq.l	#G_DGRAY,d0
+	move.w	d4,d1
+	addq.w	#8,d1
+	btst	d1,d5
+	beq	draw_fd_lamp
+	moveq.l	#G_RED,d0
+draw_fd_lamp:
+	move.w	d0,d3
+	move.w	#$000F,-(sp)
+	SXCALL	GMAPage
+	addq.l	#2,sp
+	move.w	d0,-(sp)
+	move.w	d3,-(sp)
+	SXCALL	GMForeColor
+	addq.l	#2,sp
+	clr.w	-(sp)
+	SXCALL	GMPenMode
+	addq.l	#2,sp
+	pea	fd_rect(a5)
+	SXCALL	GMFillRect
+	addq.l	#4,sp
+	SXCALL	GMAPage
+	addq.l	#2,sp
+draw_fd_skip:
+	addq.w	#1,d4
+	cmpi.w	#4,d4
+	bcs	draw_fd_next
+	movem.l	(sp)+,d0-d5/a0-a1
+	rts
+
+* Returns unit in D4, -1 outside connected custom-mode FD icons.
+fd_hit:
+	move.l	win_ptr(a5),-(sp)
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+	move.l	event_where(a5),-(sp)
+	SXCALL	GMGlobalToLocal
+	addq.l	#4,sp
+	move.l	d0,d5
+	moveq.l	#0,d4
+fd_hit_next:
+	move.l	fd_state(a5),d0
+	btst	d4,d0
+	beq	fd_hit_skip
+	bsr	fd_rectangle
+	move.l	d5,-(sp)
+	pea	fd_rect(a5)
+	SXCALL	GMPtInRect
+	addq.l	#8,sp
+	tst.b	d0
+	bne	fd_hit_done
+fd_hit_skip:
+	addq.w	#1,d4
+	cmpi.w	#4,d4
+	bcs	fd_hit_next
+	moveq.l	#-1,d4
+fd_hit_done:
+	rts
+
+handle_drop:
+	move.l	event_win(a5),d0
+	cmp.l	win_ptr(a5),d0
+	bne	event_loop
+	bsr	fd_hit
+	tst.l	d4
+	bmi	event_loop
+	SXCALL	TSGetDrag
+	tst.l	d0
+	bne	event_loop
+	move.l	#PATH_MAX,-(sp)
+	pea	image_path(a5)
+	move.l	4(a0),-(sp)
+	SXCALL	TSCellToStr
+	lea	12(sp),sp
+	tst.l	d0
+	ble	event_loop
+	cmpi.l	#PATH_MAX,d0
+	bcc	event_loop
+	* Filer strings contain the file's full name; reject multiple cells.
+	lea	image_path(a5),a0
+	clr.b	(a0,d0.w)
+	bsr	change_floppy
+	move.w	#1,-(sp)
+	SXCALL	TSEndDrag
+	addq.l	#2,sp
+	bra	event_loop
+
+* D0 raw length -> Z if supported, otherwise NZ.
+raw_floppy_size:
+	cmpi.l	#1261568,d0
+	beq	raw_floppy_done
+	cmpi.l	#1419264,d0
+	beq	raw_floppy_done
+	cmpi.l	#1474560,d0
+	beq	raw_floppy_done
+	cmpi.l	#737280,d0
+	beq	raw_floppy_done
+	cmpi.l	#655360,d0
+raw_floppy_done:
+	rts
+
+* Change the selected medium without a reset. Keep the old handle until kind 17
+* acknowledges completion of earlier I/O on the VM thread.
+change_floppy:
+	movem.l	d0-d7/a0-a4,-(sp)
+	lea	media_busy(a5),a0
+	tst.b	(a0,d4.w)
+	bne	change_fd_done
+	lea	run_drives(a5),a0
+	lea	vm_drives(a5),a1
+	move.w	#DRIVES_SIZE/2-1,d0
+change_fd_compare:
+	cmpm.w	(a0)+,(a1)+
+	dbne	d0,change_fd_compare
+	seq	media_save(a5)
+	move.w	d4,d7
+	moveq.l	#0,d6
+	lea	drive_table+2(a5),a4
+	lea	run_drives+DRV_ENTRIES(a5),a3
+change_fd_find:
+	cmp.w	drive_table(a5),d6
+	bcc	change_fd_append
+	cmpi.w	#2,(a4)
+	beq	change_fd_slot
+	tst.w	(a4)
+	bne	change_fd_find_next
+	tst.w	2(a4)
+	bmi	change_fd_slot
+	move.l	4(a4),d0
+	bsr	raw_floppy_size
+	bne	change_fd_find_next
+change_fd_slot:
+	tst.w	d7
+	beq	change_fd_found
+	subq.w	#1,d7
+change_fd_find_next:
+	addq.w	#1,d6
+	addq.l	#8,a4
+	lea	ENTRY_SIZE(a3),a3
+	bra	change_fd_find
+change_fd_append:
+	move.w	d6,d0
+	add.w	d7,d0
+	cmpi.w	#DRIVE_ROWS,d0
+	bcc	change_fd_done
+	* Spare controller units need an explicit empty row in the saved setup.
+	clr.w	(a4)
+	move.w	#-1,2(a4)
+	clr.l	4(a4)
+	clr.w	(a3)
+	clr.b	2(a3)
+	tst.w	d7
+	beq	change_fd_found
+	subq.w	#1,d7
+	bra	change_fd_find_next
+change_fd_found:
+	moveq.l	#-1,d3
+	moveq.l	#0,d5
+	tst.b	image_path(a5)
+	beq	change_fd_request
+	move.w	#2,-(sp)
+	pea	image_path(a5)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	change_fd_error
+	move.l	d0,d3
+	move.w	#2,-(sp)
+	clr.l	-(sp)
+	move.w	d3,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	move.l	d0,d5
+	bsr	raw_floppy_size
+	bne	change_fd_reject
+change_fd_request:
+	move.l	d4,d2
+	move.l	d5,d4
+	moveq.l	#MSX68K_FN_VM_MEDIA,d0
+	move.l	vm_id(a5),d1
+	bsr	msx68k_call
+	move.l	d2,d4
+	tst.l	d0
+	bne	change_fd_reject
+	lea	media_busy(a5),a0
+	st	(a0,d4.w)
+	move.w	d4,d0
+	add.w	d0,d0
+	lea	pending_old(a5),a0
+	tst.w	(a4)
+	bne	change_fd_no_old
+	move.w	2(a4),(a0,d0.w)
+change_fd_no_old:
+	cmp.w	drive_table(a5),d6
+	bcs	change_fd_count_kept
+	move.w	d6,d0
+	addq.w	#1,d0
+	move.w	d0,drive_table(a5)
+	move.w	d0,run_drives+DRV_COUNT(a5)
+change_fd_count_kept:
+	* Physical eject keeps its passthrough row for reinsertion by the primary.
+	cmpi.w	#2,(a4)
+	bne	change_fd_save
+	tst.l	d3
+	bmi	change_fd_done
+change_fd_save:
+	clr.w	(a4)
+	move.w	d3,2(a4)
+	move.l	d5,4(a4)
+	clr.w	(a3)
+	lea	image_path(a5),a0
+	lea	3(a3),a1
+	moveq.l	#0,d0
+change_fd_path:
+	move.b	(a0)+,(a1)+
+	beq	change_fd_path_done
+	addq.w	#1,d0
+	bra	change_fd_path
+change_fd_path_done:
+	move.b	d0,2(a3)
+	tst.b	media_save(a5)
+	beq	change_fd_done
+	lea	run_drives(a5),a0
+	lea	vm_drives(a5),a1
+	bsr	copy_drives
+	bsr	save_setup
+	bra	change_fd_done
+change_fd_reject:
+	tst.l	d3
+	bmi	change_fd_error
+	move.w	d3,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+change_fd_error:
+	pea	media_error(pc)
+	bsr	show_error
+	addq.l	#4,sp
+change_fd_done:
+	movem.l	(sp)+,d0-d7/a0-a4
+	rts
+
+build_boot_menu:
+	movem.l	d0-d3/a0-a1,-(sp)
+	lea	boot_items(pc),a0
+	lea	boot_string(a5),a1
+	moveq.l	#0,d3
+boot_menu_item:
+	cmp.w	vm_boot(a5),d3
+	bne	boot_menu_copy
+	move.b	#'!',(a1)+
+boot_menu_copy:
+	move.b	(a0)+,d0
+	beq	boot_menu_next
+	move.b	d0,(a1)+
+	bra	boot_menu_copy
+boot_menu_next:
+	addq.w	#1,d3
+	cmpi.w	#14,d3
+	bcc	boot_menu_built
+	move.b	#',',(a1)+
+	bra	boot_menu_item
+boot_menu_built:
+	clr.b	(a1)
+	move.w	#2,-(sp)
+	move.l	#'MENU',-(sp)
+	SXCALL	TSRscGet
+	addq.l	#6,sp
+	move.l	a0,d0
+	beq	boot_menu_done
+	clr.w	-(sp)
+	pea	boot_string(a5)
+	move.l	a0,-(sp)
+	SXCALL	MNConvert2
+	lea	10(sp),sp
+boot_menu_done:
+	movem.l	(sp)+,d0-d3/a0-a1
+	rts
+
+* A small native dialog shared by New setup (3) and ROM address (4).
+* D0 resource ID, A1 Pascal initial text. Returns 0 accepted, -1 cancelled;
+* accepted text is NUL-terminated in image_path, whitespace trimmed.
+text_dialog:
+	movem.l	d1-d4/a0-a2,-(sp)
+	move.w	d0,d4
+	move.l	a1,a2
+	move.w	#cfg_dialog,cfg_dialog+DIALOG_RECORD(a5)
+	move.l	#-1,-(sp)
+	pea	cfg_dialog(a5)
+	move.w	d0,-(sp)
+	SXCALL	DMRefer
+	lea	10(sp),sp
+	move.l	a0,d0
+	beq	text_dialog_cancelled
+	move.l	a0,dlg_ptr(a5)
+	moveq.l	#3,d0
+	bsr	dlg_item
+	move.l	a2,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITSet
+	lea	10(sp),sp
+	cmpi.w	#3,d4
+	bne	text_dialog_show
+	bsr	new_boot_draw
+text_dialog_show:
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	WMShow
+	SXCALL	GMSetGraph
+	SXCALL	DMDraw
+	addq.l	#4,sp
+text_dialog_loop:
+	pea	dialog_filter(pc)
+	SXCALL	DMControl
+	addq.l	#4,sp
+	cmpi.w	#1,d0
+	beq	text_dialog_ok
+	cmpi.w	#2,d0
+	beq	text_dialog_cancel
+	cmpi.w	#3,d4
+	bne	text_dialog_loop
+	subi.w	#4,d0
+	cmpi.w	#14,d0
+	bcc	text_dialog_loop
+	move.w	d0,new_boot(a5)
+	bsr	new_boot_draw
+	bra	text_dialog_loop
+text_dialog_ok:
+	moveq.l	#3,d0
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITGet
+	lea	10(sp),sp
+	moveq.l	#0,d1
+	move.b	dlg_text(a5),d1
+	cmpi.w	#PATH_MAX-1,d1
+	bls	text_dialog_trim
+	moveq.l	#PATH_MAX-1,d1
+text_dialog_trim:
+	lea	dlg_text(a5),a0
+	tst.w	d1
+	beq	text_dialog_cancel
+	cmpi.b	#' ',(a0,d1.w)
+	bne	text_dialog_copy_start
+	subq.w	#1,d1
+	bra	text_dialog_trim
+text_dialog_copy_start:
+	lea	image_path(a5),a1
+	addq.l	#1,a0
+	subq.w	#1,d1
+text_dialog_copy:
+	move.b	(a0)+,(a1)+
+	dbra	d1,text_dialog_copy
+	clr.b	(a1)
+	bsr	dlg_dispose
+	moveq.l	#0,d0
+	bra	text_dialog_done
+text_dialog_cancel:
+	bsr	dlg_dispose
+text_dialog_cancelled:
+	moveq.l	#-1,d0
+text_dialog_done:
+	movem.l	(sp)+,d1-d4/a0-a2
+	rts
+
+new_boot_draw:
+	movem.l	d0-d3,-(sp)
+	moveq.l	#0,d3
+new_boot_draw_next:
+	move.w	d3,d0
+	addq.w	#4,d0
+	bsr	dlg_item
+	moveq.l	#0,d0
+	cmp.w	new_boot(a5),d3
+	seq	d0
+	andi.w	#1,d0
+	move.w	d0,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
+	addq.w	#1,d3
+	cmpi.w	#14,d3
+	bcs	new_boot_draw_next
+	movem.l	(sp)+,d0-d3
+	rts
+
+rom_dialog:
+	movem.l	d1-d4/a0,-(sp)
+	move.l	a1,d1
+	lsl.l	#8,d1
+	lea	dlg_text(a5),a0
+	move.b	#6,(a0)+
+	moveq.l	#5,d3
+rom_address_digit:
+	rol.l	#4,d1
+	moveq.l	#0,d0
+	move.b	d1,d0
+	andi.w	#15,d0
+	addi.w	#'0',d0
+	cmpi.w	#'9',d0
+	bls	rom_address_store
+	addq.w	#7,d0
+rom_address_store:
+	move.b	d0,(a0)+
+	dbra	d3,rom_address_digit
+	moveq.l	#4,d0
+	lea	dlg_text(a5),a1
+	bsr	text_dialog
+	tst.l	d0
+	bmi	rom_dialog_done
+	lea	image_path(a5),a0
+	moveq.l	#0,d1
+	moveq.l	#0,d3
+rom_parse:
+	moveq.l	#0,d0
+	move.b	(a0)+,d0
+	beq	rom_parse_end
+	subi.w	#'0',d0
+	cmpi.w	#9,d0
+	bls	rom_digit
+	subi.w	#7,d0
+	cmpi.w	#10,d0
+	bcs	rom_invalid
+	cmpi.w	#15,d0
+	bls	rom_digit
+	subi.w	#32,d0
+	cmpi.w	#10,d0
+	bcs	rom_invalid
+	cmpi.w	#15,d0
+	bhi	rom_invalid
+rom_digit:
+	addq.w	#1,d3
+	cmpi.w	#6,d3
+	bhi	rom_invalid
+	lsl.l	#4,d1
+	or.w	d0,d1
+	bra	rom_parse
+rom_parse_end:
+	tst.w	d3
+	beq	rom_invalid
+	btst	#0,d1
+	bne	rom_invalid
+	movea.l	d1,a1
+	moveq.l	#0,d0
+	bra	rom_dialog_done
+rom_invalid:
+	pea	rom_error(pc)
+	bsr	show_error
+	addq.l	#4,sp
+	moveq.l	#-1,d0
+rom_dialog_done:
+	movem.l	(sp)+,d1-d4/a0
+	rts
+
+* New files inherit CPU, memory, and drives, with fresh SRAM. Choose Boot with
+* the same checked submenu before committing the file. The running VM is kept.
+new_setup:
+	movem.l	d0-d7/a0-a4,-(sp)
+	clr.w	new_boot(a5)
+	moveq.l	#3,d0
+	lea	new_default(pc),a1
+	bsr	text_dialog
+	tst.l	d0
+	bmi	new_setup_done
+	lea	image_path(a5),a0
+	lea	new_path(a5),a1
+new_path_copy:
+	move.b	(a0)+,(a1)+
+	bne	new_path_copy
+	* Never overwrite another setup.
+	clr.w	-(sp)
+	pea	new_path(a5)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	new_setup_boot
+	move.w	d0,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	pea	new_exists(pc)
+	bsr	show_error
+	addq.l	#4,sp
+	bra	new_setup_done
+new_setup_boot:
+	moveq.l	#0,d6
+	move.w	new_boot(a5),d6
+	movea.l	sram_buffer+12(a5),a1
+	cmpi.w	#13,d6
+	bne	new_setup_create
+	bsr	rom_dialog
+	tst.l	d0
+	bmi	new_setup_done
+new_setup_create:
+	* Snapshot current settings; no event dispatch runs while these are borrowed.
+	lea	sram_buffer(a5),a0
+	lea	disk_buffer(a5),a2
+	move.w	#SRAM_SIZE/4-1,d0
+new_backup_sram:
+	move.l	(a0)+,(a2)+
+	dbra	d0,new_backup_sram
+	lea	setup_path(a5),a0
+	lea	old_path(a5),a2
+	moveq.l	#PATH_MAX/2-1,d0
+new_backup_path:
+	move.w	(a0)+,(a2)+
+	dbra	d0,new_backup_path
+	move.b	has_sram(a5),d7
+	move.b	setup_is_default(a5),d5
+	move.b	setup_found(a5),d4
+	moveq.l	#MSX68K_FN_VM_BOOT,d0
+	moveq.l	#0,d1
+	move.l	d6,d2
+	moveq.l	#0,d3
+	move.w	vm_ram(a5),d3
+	lea	sram_buffer(a5),a0
+	bsr	msx68k_call
+	tst.l	d0
+	bmi	new_restore
+	lea	new_path(a5),a0
+	lea	setup_path(a5),a2
+new_use_path:
+	move.b	(a0)+,(a2)+
+	bne	new_use_path
+	st	has_sram(a5)
+	clr.b	setup_is_default(a5)
+	move.w	vm_drives+DRV_MODE(a5),d6
+	move.w	#1,vm_drives+DRV_MODE(a5)
+	bsr	save_setup
+	move.w	d6,vm_drives+DRV_MODE(a5)
+new_restore:
+	move.b	d7,has_sram(a5)
+	move.b	d5,setup_is_default(a5)
+	move.b	d4,setup_found(a5)
+	lea	old_path(a5),a0
+	lea	setup_path(a5),a2
+	moveq.l	#PATH_MAX/2-1,d0
+new_restore_path:
+	move.w	(a0)+,(a2)+
+	dbra	d0,new_restore_path
+	lea	disk_buffer(a5),a0
+	lea	sram_buffer(a5),a2
+	move.w	#SRAM_SIZE/4-1,d0
+new_restore_sram:
+	move.l	(a0)+,(a2)+
+	dbra	d0,new_restore_sram
+	clr.w	-(sp)
+	pea	new_path(a5)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	new_setup_failed
+	move.w	d0,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	* The task manager takes a Pascal command line. Quote paths containing spaces.
+	lea	new_command+1(a5),a2
+	move.b	#34,(a2)+
+	lea	new_path(a5),a0
+	moveq.l	#2,d1
+new_command_copy:
+	move.b	(a0)+,d0
+	beq	new_command_end
+	move.b	d0,(a2)+
+	addq.w	#1,d1
+	bra	new_command_copy
+new_command_end:
+	move.b	#34,(a2)+
+	move.b	#' ',(a2)+
+	lea	setup_option(pc),a0
+	moveq.l	#5,d0
+new_command_option:
+	move.b	(a0)+,(a2)+
+	dbra	d0,new_command_option
+	addq.w	#7,d1
+	move.b	d1,new_command(a5)
+	clr.w	-(sp)		; resource ID
+	clr.l	-(sp)		; resource type
+	clr.l	-(sp)		; inherited environment
+	pea	new_command(a5)
+	move.l	app_task_id(a5),-(sp)
+	move.w	#2,-(sp)		; mode1.b = 0, mode2.b = 2: share this R module
+	SXCALL	TSFock
+	lea	20(sp),sp
+	tst.l	d0
+	bpl	new_setup_done
+new_setup_failed:
+	pea	new_error(pc)
+	bsr	show_error
+	addq.l	#4,sp
+new_setup_done:
+	movem.l	(sp)+,d0-d7/a0-a4
+	rts
+
+* Pointer argument is on the caller's stack.
+show_error:
+	move.l	4(sp),-(sp)
+	move.w	#1,-(sp)
+	SXCALL	DMError
+	addq.l	#6,sp
+	rts
+
 * Data
 * -----------------------------------------------------------------------------
 str_needs_sx:
@@ -1955,6 +2766,26 @@ default_setup_dir:
 config_menu_head:
 	.dc.b	$90, $DD, $92, $E8, "...,^", $1B, "|", SPEED_MENU_ID, 0
 * The CPUs' names, 6 bytes each
+boot_menu_head:
+	.dc.b	",^",$1B,"|",2,"Boot",0
+new_menu_item:
+	.dc.b	",",$90,$56,$82,$B5,$82,$A2,$90,$DD,$92,$E8,"...",0
+boot_items:
+	.dc.b	"STD",0,"FD0",0,"FD1",0,"FD2",0,"FD3",0
+	.dc.b	"SCSI0",0,"SCSI1",0,"SCSI2",0,"SCSI3",0,"SCSI4",0,"SCSI5",0,"SCSI6",0,"SCSI7",0,"ROM...",0
+setup_option:
+	.dc.b	"/setup"
+new_default:
+	.dc.b	17,"A:\VMX68K\NEW.V68",0
+new_exists:
+	.dc.b	$93, $AF, $82, $B6, $96, $BC, $91, $4F, $82, $CC, $90, $DD, $92, $E8, $83, $74, $83, $40, $83, $43, $83, $8B, $82, $AA, $82, $A0, $82, $E8, $82, $DC, $82, $B7, $81, $42, 0
+new_error:
+	.dc.b	$90, $DD, $92, $E8, $82, $CC, $8D, $EC, $90, $AC, $82, $DC, $82, $BD, $82, $CD, $8B, $4E, $93, $AE, $82, $AA, $82, $C5, $82, $AB, $82, $DC, $82, $B9, $82, $F1, $81, $42, 0
+rom_error:
+	.dc.b	$8B, $F4, $90, $94, $82, $CC, $52, $4F, $4D, $83, $41, $83, $68, $83, $8C, $83, $58, $82, $F0, $31, $36, $90, $69, $90, $94, $36, $8C, $85, $88, $C8, $93, $E0, $82, $C5, $93, $FC, $97, $CD, $82, $B5, $82, $C4, $82, $AD, $82, $BE, $82, $B3, $82, $A2, $81, $42, 0
+media_error:
+	.dc.b	$91, $CE, $89, $9E, $82, $B7, $82, $E9, $46, $44, $83, $43, $83, $81, $81, $5B, $83, $57, $82, $F0, $8A, $4A, $82, $AF, $82, $DC, $82, $B9, $82, $F1, $81, $42, 0
+	.even
 cpu_names:
 	.dc.b	"68000", 0, "68030", 0
 * Items of the speed submenus, in the order of MSX68K_FN_VM_SPEED's speeds;

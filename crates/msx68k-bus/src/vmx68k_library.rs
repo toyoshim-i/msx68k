@@ -371,6 +371,85 @@ fn drive_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
 }
 
 /// Builds `VMX68K.LB`.
+
+/// Diskette silhouettes use the same two-plane PLOT palette as the gear.
+fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
+    let mut pixels = vec![vec![b'o'; 30]; 20];
+    for (y, row) in pixels.iter_mut().enumerate().take(19).skip(1) {
+        for (x, dot) in row.iter_mut().enumerate().take(28).skip(2) {
+            *dot = if x == 2 || x == 27 || y == 1 || y == 18 {
+                b'#'
+            } else if inserted {
+                b'+'
+            } else {
+                b'.'
+            };
+        }
+    }
+    for row in pixels.iter_mut().take(8).skip(2) {
+        row[7..23].fill(b'o');
+        row[19..22].fill(b'#');
+    }
+    for row in pixels.iter_mut().take(17).skip(10) {
+        row[6..24].fill(b'o');
+    }
+    let digits = [
+        [7, 5, 5, 5, 7],
+        [2, 6, 2, 2, 7],
+        [7, 1, 7, 4, 7],
+        [7, 1, 7, 1, 7],
+    ];
+    for (y, bits) in digits[unit].iter().enumerate() {
+        for x in 0..3 {
+            if bits & (4 >> x) != 0 {
+                pixels[y + 11][x + 9] = b'#';
+            }
+        }
+    }
+    let rows: Vec<String> = pixels
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap())
+        .collect();
+    plot_image(&rows.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+fn new_setup_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
+    let mut items = vec![
+        ([330, 160, 380, 178], D_CHRBTN, pascal_even(b"OK")),
+        (
+            [390, 160, 450, 178],
+            D_CHRBTN,
+            pascal_even(b"\x8E\xE6\x8F\xC1"),
+        ),
+        ([12, 30, 450, 46], D_EDTTXT | D_DISABL, text_field(91)),
+    ];
+    let names = [
+        "STD", "FD0", "FD1", "FD2", "FD3", "SCSI0", "SCSI1", "SCSI2", "SCSI3", "SCSI4", "SCSI5",
+        "SCSI6", "SCSI7", "ROM...",
+    ];
+    for i in 0..14 {
+        let x = 12 + (i % 5) as i16 * 90;
+        let y = 72 + (i / 5) as i16 * 26;
+        items.push(([x, y, x + 16, y + 12], D_RADBTN, vec![0, 0]));
+    }
+    for (i, name) in names.iter().enumerate() {
+        let x = 30 + (i % 5) as i16 * 90;
+        let y = 72 + (i / 5) as i16 * 26;
+        items.push((
+            [x, y, x + 68, y + 12],
+            D_STCTXT | D_DISABL,
+            pascal_even(name.as_bytes()),
+        ));
+    }
+    items.push((
+        [12, 10, 450, 24],
+        D_STCTXT | D_DISABL,
+        pascal_even(b"\x90\x56\x82\xB5\x82\xA2\x90\xDD\x92\xE8: .V68"),
+    ));
+    items.push(([12, 54, 450, 68], D_STCTXT | D_DISABL, pascal_even(b"Boot")));
+    items
+}
+
 pub fn vmx68k_library() -> Vec<u8> {
     let mut library = ResourceLibrary::new();
     library.insert(b"MENU", Resource::new(SPEED_MENU_ID, menu(&SPEEDS)));
@@ -391,6 +470,51 @@ pub fn vmx68k_library() -> Vec<u8> {
     library.insert(
         b"PLOT",
         Resource::new(CONFIGURATION_ICON_ID, plot_image(&CONFIGURATION_ICON)),
+    );
+    library.insert(
+        b"MENU",
+        Resource::new(
+            2,
+            menu(&[
+                b"STD", b"FD0", b"FD1", b"FD2", b"FD3", b"SCSI0", b"SCSI1", b"SCSI2", b"SCSI3",
+                b"SCSI4", b"SCSI5", b"SCSI6", b"SCSI7", b"ROM...",
+            ]),
+        ),
+    );
+    for unit in 0..4 {
+        for inserted in [false, true] {
+            library.insert(
+                b"PLOT",
+                Resource::new(
+                    10 + unit as u16 * 2 + inserted as u16,
+                    floppy_icon(unit, inserted),
+                ),
+            );
+        }
+    }
+    library.insert(
+        b"DLOG",
+        Resource::new(3, dialog_template([149, 160, 619, 350], 3)),
+    );
+    library.insert(b"DITL", Resource::new(3, dialog_items(&new_setup_items())));
+    library.insert(
+        b"DLOG",
+        Resource::new(4, dialog_template([234, 200, 534, 300], 4)),
+    );
+    library.insert(
+        b"DITL",
+        Resource::new(
+            4,
+            dialog_items(&[
+                ([150, 72, 200, 90], D_CHRBTN, pascal_even(b"OK")),
+                ([210, 72, 280, 90], D_CHRBTN, pascal_even(b"Cancel")),
+                ([20, 38, 280, 54], D_EDTTXT | D_DISABL, text_field(6)),
+                (
+                    [20, 12, 280, 28],
+                    D_STCTXT | D_DISABL,
+                    pascal_even(b"ROM (hex)"),
+                ),
+            ])),
     );
     library.to_bytes()
 }

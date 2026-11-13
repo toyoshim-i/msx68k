@@ -320,6 +320,8 @@ pub struct FloppyDrive {
     pub motor_on: bool,
     /// Write-protect tab state.
     pub write_protected: bool,
+    /// Commands issued to this unit, for its icon's access lamp.
+    pub accesses: Arc<AtomicU64>,
     /// Raw disk image data (`None` if no floppy is inserted).
     pub image: Option<Vec<u8>>,
     /// An image or physical floppy unit kept by the primary (`docs/VMX68K.md` Section 3.1).
@@ -342,6 +344,7 @@ impl FloppyDrive {
             id_cursor: 0,
             motor_on: false,
             write_protected: false,
+            accesses: Arc::new(AtomicU64::new(0)),
             image: None,
             remote: None,
             passthrough_media: None,
@@ -525,6 +528,13 @@ impl Fdc {
         }
     }
 
+    /// Latches removal until firmware reads it before announcing the new medium.
+    pub fn media_changed(&mut self, unit: usize) {
+        if let Some(drive) = self.drives.get_mut(unit) {
+            drive.remote_change = 1;
+        }
+    }
+
     pub(crate) fn refresh_remote_media(&mut self, ioi: &mut IoInterruptController) {
         let mut changed = false;
         for drive in &mut self.drives {
@@ -593,6 +603,9 @@ impl Fdc {
         // and the scans.
         if matches!(op, 0x02 | 0x05 | 0x06 | 0x09 | 0x0A | 0x0C | 0x0D | 0x11 | 0x19 | 0x1D) {
             self.drive_accesses.fetch_add(1, Ordering::Relaxed);
+            self.drives[(self.cmd_buf[1] & 3) as usize]
+                .accesses
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         match op {

@@ -191,7 +191,9 @@ impl X68kBus {
         if self.has_custom_remote_drives()
             && matches!(self.peek_u32(0x0638), Some(0x00FE_0000..=0x00FF_FFFF))
             && self.peek_u8(0x09E0) == Some(1)
-            && self.sram[0x0C..0x10] == ROM_BASE.to_be_bytes()
+            && (ROM_BASE..=ROM_BASE + 28)
+                .contains(&u32::from_be_bytes(self.sram[12..16].try_into().unwrap()))
+            && self.sram[15] & 3 == 0
         {
             state.d[0] = (self.peek_u8(0x09DF).unwrap_or(0) as u32) << 24 | CUSTOM_BOOT_HEADER;
             // Match the IPL handler's final OR.L condition codes (X unchanged).
