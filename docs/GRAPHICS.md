@@ -99,7 +99,16 @@ next-line rule or delay count to every attribute.
 
 The data stored in a line buffer matters: palette codes and converted colors
 respond differently to later palette writes. Buffer count alone does not specify
-latency. Keep CPU history independent of GPU representation. A future timestamped change
+latency. Keep CPU bus waits separate from display-pipeline delays, and distinguish
+guest scanout timing from host output buffering. Model-dependent fetch points
+need validation in each supported screen mode.
+
+Display-output suppression and internal pipeline progress are separate concerns.
+The current blank-frame snapshot/upload optimization must not automatically stop
+future BG/sprite buffers or prefetch stages; their behavior while disabled needs
+its own definition.
+
+Keep CPU history independent of GPU representation. A future timestamped change
 history should feed attribute-specific latches and delays, then produce display
 state. Current row snapshots describe output state, not complete write timing.
 Small row values can use fixed-size records, with large palettes or PCG data
