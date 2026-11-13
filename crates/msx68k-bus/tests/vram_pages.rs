@@ -17,6 +17,7 @@ fn cpu_writes_mark_the_pages_they_reach() {
 
     vm.bus.write_u8(0x00E0_1234, 0xFF, true).unwrap();
     vm.bus.write_u16(0x00E2_0000, 0xFFFF, true).unwrap();
+    vm.bus.crtc.regs[20] = 0; // 512-dot indexed addressing.
     vm.bus.write_u16(0x00C0_3000, 0x1234, true).unwrap();
     let pages = vm.bus.take_written_vram_pages();
     assert_eq!(

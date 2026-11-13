@@ -129,7 +129,7 @@ impl Crtc {
     #[inline]
     pub const fn graphic_scroll(&self, page: usize) -> (u16, u16) {
         let p = page & 3;
-        let mask = if p == 0 && (self.regs[20] & 0x0300) != 0 {
+        let mask = if p == 0 && (self.regs[20] & 0x0400) != 0 {
             0x03FF
         } else {
             0x01FF

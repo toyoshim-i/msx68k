@@ -403,7 +403,7 @@ impl X68kBus {
             || (self.sram.get(0x7E).copied().unwrap_or(0) & 0x3F) == 0x30
     }
 
-    /// Direct slice access to GVRAM (`512 KB`, `$C00000`–`$DFFFFF`) if allocated.
+    /// Packed physical GVRAM (`512 KiB`), independent of the CPU window mode.
     #[inline]
     pub fn gvram(&self) -> Option<&[u8]> {
         self.gvram.as_deref()
@@ -570,8 +570,8 @@ impl X68kBus {
         match MemoryRegion::from_addr(a) {
             MemoryRegion::MainRam => self.main_ram.get(a as usize).copied(),
             MemoryRegion::Gvram => {
-                let offset = (a as usize) & (GVRAM_BYTES - 1);
-                Some(self.gvram.as_ref().map_or(0, |buf| buf[offset]))
+                crate::gvram::byte_lane(a, self.crtc.regs[20])
+                    .map(|lane| lane.read(self.gvram.as_deref()))
             }
             MemoryRegion::Tvram => {
                 let offset = (a as usize) & (TVRAM_BYTES - 1);
@@ -752,8 +752,12 @@ impl Bus for X68kBus {
                 })
             }
             MemoryRegion::Gvram => {
-                let offset = (a as usize) & (GVRAM_BYTES - 1);
-                Ok(self.gvram.as_ref().map_or(0, |buf| buf[offset]))
+                let lane = crate::gvram::byte_lane(a, self.crtc.regs[20])
+                    .ok_or(BusFault::BusError {
+                        addr: a,
+                        is_write: false,
+                    })?;
+                Ok(lane.read(self.gvram.as_deref()))
             }
             MemoryRegion::Tvram => {
                 let offset = (a as usize) & (TVRAM_BYTES - 1);
@@ -954,11 +958,18 @@ impl Bus for X68kBus {
                 Ok(())
             }
             MemoryRegion::Gvram => {
-                let buf = self
-                    .gvram
-                    .get_or_insert_with(|| vec![0u8; GVRAM_BYTES].into_boxed_slice());
-                buf[(a as usize) & (GVRAM_BYTES - 1)] = val;
-                self.vram_written.mark_gvram((a as usize) & (GVRAM_BYTES - 1));
+                let lane = crate::gvram::byte_lane(a, self.crtc.regs[20])
+                    .ok_or(BusFault::BusError {
+                        addr: a,
+                        is_write: true,
+                    })?;
+                if lane.mask != 0 {
+                    let buf = self
+                        .gvram
+                        .get_or_insert_with(|| vec![0u8; GVRAM_BYTES].into_boxed_slice());
+                    lane.write(buf, val);
+                    self.vram_written.mark_gvram(lane.offset);
+                }
                 Ok(())
             }
             MemoryRegion::Tvram => {

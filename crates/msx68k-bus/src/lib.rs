@@ -7,6 +7,7 @@ pub mod fdc;
 pub mod floppy_image;
 pub mod gdb;
 pub mod guest_build;
+mod gvram;
 pub mod human_fs;
 pub mod hypercall;
 pub mod mfp;
