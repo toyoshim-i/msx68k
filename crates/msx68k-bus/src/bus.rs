@@ -106,6 +106,7 @@ pub struct X68kBus {
     pub(crate) app_entry_installed: bool,
     /// TVRAM and GVRAM pages written since the last [`Self::take_written_vram_pages`].
     vram_written: DirtyVramPages,
+    raster: crate::raster::RasterCapture,
     /// Lazily allocated Sprite / PCG / BG space (`64 KB`, `$EB0000`–`$EBFFFF`).
     sprite_bg: Option<Box<[u8]>>,
     /// Battery-backed SRAM (`$ED0000`–`$ED3FFF`, 16 KB).
@@ -231,6 +232,7 @@ impl X68kBus {
             gvram: None,
             tvram: None,
             vram_written: DirtyVramPages::default(),
+            raster: crate::raster::RasterCapture::default(),
             hypercall_sites: Default::default(),
             app_entry_installed: false,
             remote_fs: None,
@@ -456,6 +458,7 @@ impl X68kBus {
         self.scsi.reset_driver();
 
         self.crtc = Crtc::new();
+        self.raster = crate::raster::RasterCapture::default();
         self.vicon = Vicon::new();
         self.dmac.reset();
         self.mfp.reset();
@@ -603,18 +606,41 @@ impl X68kBus {
         }
     }
 
-    /// Advances CRTC scanlines, MFP timers, and OPM timers by `cycles_10mhz` (10 MHz clock cycles).
-    pub fn advance_peripherals(&mut self, cycles_10mhz: u32) {
-        let sync = self
-            .crtc
-            .advance(cycles_10mhz, &mut self.tvram, &mut self.gvram, &mut self.vram_written);
-        if sync.v_disp_fell {
-            self.fdc.refresh_remote_media(&mut self.ioi);
+    /// Most recently completed register/palette history. VRAM itself is still frame-final.
+    pub fn raster_frame(&self) -> Option<&crate::raster::RasterFrame> {
+        self.raster.completed()
+    }
+
+    /// Advances peripherals without skipping scanline edges, even for a large host-time batch.
+    pub fn advance_peripherals(&mut self, mut cycles_10mhz: u32) {
+        while cycles_10mhz != 0 {
+            let until_sync = self.crtc.cycles_to_next_sync();
+            let step = cycles_10mhz.min(until_sync);
+            let previous_raster = self.crtc.current_raster();
+            let sync = self.crtc.advance(
+                step,
+                &mut self.tvram,
+                &mut self.gvram,
+                &mut self.vram_written,
+            );
+            if self.crtc.current_raster() != previous_raster {
+                self.raster.boundary(
+                    &self.crtc,
+                    &self.vicon,
+                    self.sysport.contrast,
+                    sync.v_disp_rose,
+                    sync.v_disp_fell,
+                );
+            }
+            if sync.v_disp_fell {
+                self.fdc.refresh_remote_media(&mut self.ioi);
+            }
+            self.mfp.update_crtc_sync(sync);
+            self.opm.advance(step);
+            self.mfp.set_opm_irq(self.opm.irq_active());
+            self.mfp.advance(step);
+            cycles_10mhz -= step;
         }
-        self.mfp.update_crtc_sync(sync);
-        self.opm.advance(cycles_10mhz);
-        self.mfp.set_opm_irq(self.opm.irq_active());
-        self.mfp.advance(cycles_10mhz);
     }
 
     /// Returns the highest pending hardware interrupt priority level (`0..=7`) across all peripherals:

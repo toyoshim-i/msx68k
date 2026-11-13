@@ -448,6 +448,30 @@ impl Crtc {
         }
     }
 
+    /// Remaining cycles to the next line boundary, including a possible clock-mode change.
+    pub(crate) fn cycles_to_next_line(&self) -> u32 {
+        self.scanline_cycles()
+            .saturating_sub(self.cycle_in_raster)
+            .max(1)
+    }
+
+    pub(crate) fn cycles_to_next_sync(&self) -> u32 {
+        let line = self.cycles_to_next_line();
+        if self.cycle_in_raster < 40 {
+            line.min(40 - self.cycle_in_raster)
+        } else {
+            line
+        }
+    }
+
+    fn scanline_cycles(&self) -> u32 {
+        if self.regs[20] & 0x10 != 0 {
+            317
+        } else {
+            625
+        }
+    }
+
     /// Advances the CRTC timing state by `cycles_10mhz` (10 MHz clock cycles)
     /// and returns any sync transitions for the MFP.
     pub fn advance(
@@ -460,11 +484,7 @@ impl Crtc {
         // Approximate 10 MHz cycles per scanline:
         // In 31.5 kHz high-res mode, 1 scanline is ~317 cycles (10_000_000 / 31_500).
         // In 15.98 kHz low-res mode, 1 scanline is ~625 cycles.
-        let scanline_cycles: u32 = if (self.regs[20] & 0x0010) != 0 {
-            317
-        } else {
-            625
-        };
+        let scanline_cycles = self.scanline_cycles();
         let h_sync_cycles: u32 = 40;
 
         self.cycle_in_raster = self.cycle_in_raster.saturating_add(cycles_10mhz);

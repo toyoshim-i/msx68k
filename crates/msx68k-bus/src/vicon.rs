@@ -24,6 +24,7 @@ pub const fn grbi_to_rgba8(color: u16) -> [u8; 4] {
 pub struct Vicon {
     /// Graphics palette (`256` entries × 16-bit `GGGGGRRRRRBBBBBI`).
     graphic_palette: [u16; 256],
+    palette_revision: u64,
     /// Text / Sprite / BG palette (`256` entries × 16-bit `GGGGGRRRRRBBBBBI`).
     text_palette: [u16; 256],
     /// VICON `R0` (`$E82400`): Screen mode (`bits 2..0`).
@@ -51,6 +52,7 @@ impl Vicon {
         text_palette[3] = 0xFFFE; // Bright White
         Self {
             graphic_palette: [0u16; 256],
+            palette_revision: 0,
             text_palette,
             r0_mode: 0x0004,
             r1_priority: 0x12E4,
@@ -61,6 +63,10 @@ impl Vicon {
     /// Resets VICON state.
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    pub(crate) fn palette_revision(&self) -> u64 {
+        self.palette_revision
     }
 
     /// Returns the 256-entry Graphics Palette.
@@ -149,9 +155,11 @@ impl Vicon {
         };
 
         if offset < 0x0200 {
+            self.palette_revision = self.palette_revision.wrapping_add(1);
             let idx = (offset >> 1) & 0xFF;
             self.graphic_palette[idx] = update_word(self.graphic_palette[idx]);
         } else if offset < 0x0400 {
+            self.palette_revision = self.palette_revision.wrapping_add(1);
             let idx = ((offset - 0x0200) >> 1) & 0xFF;
             self.text_palette[idx] = update_word(self.text_palette[idx]);
         } else if offset < 0x0500 {
