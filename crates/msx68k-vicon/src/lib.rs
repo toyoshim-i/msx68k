@@ -44,7 +44,7 @@ pub struct ViconUniforms {
     pub contrast: u32,
     pub tvram_row_bytes: u32,
     pub tvram_plane_bytes: u32,
-    /// Raster row-map height (zero for a uniform frame), then padding.
+    /// Raster row-map height (zero for a uniform frame), then BG code buffer offset.
     pub reserved: [u32; 2],
 }
 
@@ -747,6 +747,7 @@ fn sample_graphics_cpu(
 pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let mut params = ViconUniforms::from_bus(bus);
     let frame = raster::completed_frame(bus, &params);
+    let background = raster::background_input(bus, &params);
     let mut next_line = 0;
     let width = params.width;
     let height = params.height;
@@ -774,7 +775,6 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
         let tx_rank = (params.r1_priority >> 10) & 3;
         let sp_rank = (params.r1_priority >> 12) & 3;
         let gr_rank = (params.r1_priority >> 8) & 3;
-        let text_above_gr = gr_rank == 2 || (gr_rank == 1 && tx_rank <= sp_rank);
 
         let grbi_to_rgba = |grbi: u16| -> [u8; 4] {
             let i_bit = (grbi & 1) as u32;
@@ -818,17 +818,31 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             } else {
                 0
             };
-            let final_grbi = if text_above_gr {
-                if tx_color != 0 {
-                    tx_color
-                } else {
-                    gr_color
-                }
-            } else if gr_color != 0 {
-                gr_color
+            let bg_code = if params.r2_display & 0x40 != 0 && x < msx68k_bus::bg::BG_WIDTH as u32 {
+                background
+                    .get(y as usize * msx68k_bus::bg::BG_WIDTH + x as usize)
+                    .copied()
+                    .unwrap_or(0)
             } else {
-                tx_color
+                0
             };
+            let bg_color = if bg_code != 0 && gr_rank != 3 {
+                tx_pal[bg_code as usize]
+            } else {
+                0
+            };
+            let (front, back) = if tx_rank <= sp_rank {
+                (tx_color, bg_color)
+            } else {
+                (bg_color, tx_color)
+            };
+            let colors = match gr_rank {
+                0 => [gr_color, front, back],
+                1 => [front, gr_color, back],
+                2 => [front, back, gr_color],
+                _ => [gr_color, 0, 0],
+            };
+            let final_grbi = colors.into_iter().find(|&color| color != 0).unwrap_or(0);
 
             let out_off = ((y * width + x) * 4) as usize;
             rgba8[out_off..out_off + 4].copy_from_slice(&grbi_to_rgba(final_grbi));

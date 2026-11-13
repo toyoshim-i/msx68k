@@ -21,7 +21,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let state = raster_params(offset);
     let palette_base = raster_palette_base(offset);
     var rgba = composite(x, y, state, palette_base);
-    if (text_is_clear(x, y, state) && graphics_color(x, y, state, palette_base) == 0u) {
+    if (text_is_clear(x, y, state) && graphics_color(x, y, state, palette_base) == 0u && background_color(x, y, state, palette_base) == 0u) {
         rgba = rgba & 0x00FFFFFFu;
     }
     output_rgba[y * params.width + x] = rgba;

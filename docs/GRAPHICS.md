@@ -9,12 +9,12 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
 
 1. Implemented basic GVRAM access and display: 512-dot 16/256/65536-color modes, 1024-dot
    16-color mode, page assignment, independent scrolling and text priority.
-2. Implemented scanline approximation and next refinement: mid-frame scroll, palette and display-control changes. The
-   current implementation separates line-start address fetch from horizontal
-   display sampling. Before adding BG, validate mode-specific fetch timing. Mid-frame VRAM writes
-   need a separate history.
-3. BG, PCG and sprites: extend GPU composition and model display limits, fetch
-   stages and line buffers.
+2. Implemented scanline approximation: mid-frame scroll, palette and display
+   control changes. Line-start address fetch is separate from horizontal display
+   sampling. Mode-specific fetch timing still needs validation, and mid-frame
+   text/graphics VRAM writes need a separate history.
+3. Implemented BG/PCG address generation and palette-code line buffering for
+   8-dot BG0/BG1 and 16-dot BG0. Sprite selection and rendering remain pending.
 4. Special priority, half transparency, interlace and precise boundary timing.
 
 ## Physical GVRAM and CPU views
@@ -91,20 +91,51 @@ Peripheral advancement visits horizontal-sync edges, line boundaries and vertica
 display transitions even in a large time batch. Passing over the raster-IRQ line
 in one update must not lose its interrupt.
 
-VRAM itself is still read at render time. Register history alone cannot reproduce
-mid-frame VRAM writes or the exact relationship between fast clear and pixels
-that were already displayed.
+Text and graphics VRAM are still read at render time. Register history alone
+cannot reproduce mid-frame VRAM writes or the exact relationship between fast
+clear and pixels that were already displayed.
+
+## BG and PCG scanout
+
+The shared sprite/PCG RAM window provides two 64-by-64 tile maps at `$EBC000`
+and `$EBE000`. BG control selects each map independently. Horizontal mode zero
+uses 8-by-8 tiles and two BG planes; mode one uses 16-by-16 tiles and BG0 only.
+Tile entries select a pattern, a 16-color palette block, and independent flips.
+PCG stores packed 4-bit pixels; 16-dot patterns contain four 8-dot quadrants.
+Scroll wraps in the 512-dot or 1024-dot virtual map. BG start registers align
+its coordinates with the CRTC display origin. The visible BG line is limited to
+512 pixels. Mixed-resolution scaling, interlace and reserved modes are not yet
+validated.
+
+At horizontal display start, scanout fetches the next physical raster's BG
+patterns into two independent palette-code line buffers. The last blanking
+raster prepares the first active row. This is an explicit scheduling
+approximation; mode-specific hardware fetch cycles remain to be validated.
+Both buffers progress with output disabled. BG enable bits and the controller's
+master display gate are evaluated for the displayed row, independently of fetch.
+A zero pattern nibble is transparent regardless of the palette block.
+
+The completed frame retains fetched codes, so subsequent PCG/map writes cannot
+replace already fetched pixels. Color conversion uses that output row's shared
+text/sprite palette. BG0 appears above BG1; their combined output participates
+in VICON text/sprite priority and graphics insertion. Sprite priorities between
+the two BG planes and special palette-zero interactions remain future work.
+
+GPU input packs four BG codes per word with a fixed 512-pixel row stride and
+bounded lookup. Blank BG frames add no code upload. The main display and VM
+textures share composition, including BG opacity for VM-layer visibility.
+Before a complete scanout history exists, rendering samples current BG memory;
+native extended TVRAM retains its existing path.
 
 ## Next implementation steps
 
 1. Validate address-fetch and display-sampling positions for each screen mode,
    including doubled lines and writes on either side of each edge. Keep the
    current timing approximation explicit until measured timing is available.
-2. Add BG/PCG address generation and palette-code line buffers, followed by
-   sprite selection and composition. Define each stage's fetch point and output
-   row independently; output disable must not freeze internal buffers.
-3. Add VRAM/PCG write history where rendering from final memory would lose
-   already fetched data. Keep CPU bus waits independent of pipeline latency.
+2. Add sprite selection, its display limits and composition around BG0/BG1.
+   Define sprite attribute and pattern fetch points independently of BG fetch.
+3. Add text/graphics VRAM write history where rendering from final memory would
+   lose already fetched data. Keep CPU bus waits independent of pipeline latency.
 4. Extend final composition with special priority and half transparency, then
    complete interlace and mode-specific boundary behavior.
 
@@ -123,9 +154,9 @@ guest scanout timing from host output buffering. Model-dependent fetch points
 need validation in each supported screen mode.
 
 Display-output suppression and internal pipeline progress are separate concerns.
-The current blank-frame snapshot/upload optimization must not automatically stop
-future BG/sprite buffers or prefetch stages; their behavior while disabled needs
-its own definition.
+BG buffers continue fetching while display output is disabled. The blank-frame
+snapshot/upload optimization must not automatically stop future sprite buffers;
+their behavior while disabled needs its own definition.
 
 Keep CPU history independent of GPU representation. A future timestamped change
 history should feed attribute-specific latches and delays, then produce display
@@ -145,9 +176,9 @@ approximation, not evidence of exact hardware latency.
 
 Validate writes immediately before and after each hardware-backed fetch point,
 checking which output row changes. VRAM write history, precise interlace,
-BG/sprite rendering and special effects remain outside the current scope.
+sprite rendering and special effects remain outside the current scope.
 
 ```sh
-cargo test -p msx68k-bus --test gvram --test vram_pages --test raster -- --test-threads=1
+cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test raster -- --test-threads=1
 cargo test --release -p msx68k-vicon --test graphics_modes --test raster -- --test-threads=1
 ```

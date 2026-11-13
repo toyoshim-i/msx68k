@@ -35,6 +35,7 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
     // over part of the VM's window.
     let primary = X68kVm::new_app_vm();
     let mut primary_bus = primary.bus;
+    primary_bus.sysport.contrast = 15;
     primary_bus.write_u16(0x00E8_2200, 0x07C0, true).unwrap();
     primary_bus.write_u16(0x00E8_2202, 0xF800, true).unwrap();
     primary_bus.write_u16(0x00E8_2600, 0x0020, true).unwrap();
@@ -44,6 +45,17 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
             primary_bus.write_u8(0x00E0_0000 + y * 128 + byte, 0b1010_1010, true).unwrap();
         }
     }
+
+    // One opaque BG dot also covers the VM layer, independently of text opacity.
+    for (addr, value) in [
+        (0xeb080c, 32), (0xeb080e, 40), (0xeb0810, 0x14),
+        (0xeb0808, 0x201), (0xebc000 + (7 * 64 + 13) * 2, 0x0201),
+        (0xeb8020, 0x1000), (0xe82242, 0xffc0),
+        (0xe82500, 0x0600), (0xe82600, 0x60),
+    ] {
+        primary_bus.write_u16(addr, value, true).unwrap();
+    }
+    let bg_dot = |x: i32, y: i32| x == 104 && y == 56;
 
     // The VM shows white text dots on a blue backdrop.
     let mut vm = X68kVm::new_app_vm();
@@ -74,6 +86,8 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
     assert_eq!(red[1..3], [0, 0]);
     let green = pixel(&primary_frame, 120, 60);
     assert_ne!(green, red);
+    let yellow = pixel(&primary_frame, 104, 56);
+    assert_eq!(yellow, [251, 251, 0, 255]);
 
     for scale in [1u32, 2] {
         let (width, height) = (768 * scale, 512 * scale);
@@ -109,7 +123,9 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
 
         for y in 0..512 {
             for x in 0..768 {
-                let expected = if text_dot(x, y) {
+                let expected = if bg_dot(x, y) {
+                    yellow
+                } else if text_dot(x, y) {
                     green
                 } else if shown(x, y) {
                     pixel(&vm_frame, (x - left) as u32, (y - top) as u32)

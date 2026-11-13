@@ -1,0 +1,101 @@
+//! Background address generation and palette-code line buffers.
+use crate::Crtc;
+
+pub const BG_WIDTH: usize = 512;
+
+#[derive(Debug, Clone)]
+pub struct BgLine {
+    planes: [[u8; BG_WIDTH]; 2],
+}
+
+fn word(ram: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes([ram[offset], ram[offset + 1]])
+}
+
+impl Default for BgLine {
+    fn default() -> Self {
+        Self {
+            planes: [[0; BG_WIDTH]; 2],
+        }
+    }
+}
+
+impl BgLine {
+    /// Fetch both planes independently of their final display gates.
+    pub fn fetch(crtc: &Crtc, ram: Option<&[u8]>, y: u32) -> Self {
+        let mut line = Self::default();
+        let Some(ram) = ram.filter(|ram| ram.len() >= 0x10000) else {
+            return line;
+        };
+        let resolution = word(ram, 0x810);
+        // Reserved horizontal/vertical modes have no defined BG scanout here.
+        if resolution & 0x0a != 0 {
+            return line;
+        }
+        let large = resolution & 1 != 0;
+        let size = if large { 16 } else { 8 };
+        let mask = size * 64 - 1;
+        let control = word(ram, 0x808);
+        let origin_x = ((word(ram, 0x80c) & 63) as i32 - (crtc.regs[2] & 0xfff) as i32 - 4) * 8;
+        let source_y = y as i32 + (word(ram, 0x80e) & 255) as i32 - (crtc.regs[6] & 0xfff) as i32;
+        if !(0..1024).contains(&source_y) {
+            return line;
+        }
+        for plane in 0..if large { 1 } else { 2 } {
+            let scroll_x = (word(ram, 0x800 + plane * 4) & 1023) as usize;
+            let scroll_y = (word(ram, 0x802 + plane * 4) & 1023) as usize;
+            let select = (control >> (1 + plane * 3)) & 3;
+            let map = if select == 0 { 0xc000 } else { 0xe000 };
+            let sy = (source_y as usize + scroll_y) & mask;
+            for x in 0..BG_WIDTH {
+                let sx = (x as i32 - origin_x + scroll_x as i32) as usize & mask;
+                let tile = word(ram, map + ((sy / size) * 64 + sx / size) * 2);
+                let mut px = sx & (size - 1);
+                let mut py = sy & (size - 1);
+                if tile & 0x4000 != 0 {
+                    px = size - 1 - px;
+                }
+                if tile & 0x8000 != 0 {
+                    py = size - 1 - py;
+                }
+                let pattern = (tile & 255) as usize;
+                let offset = if large {
+                    pattern * 128 + (px / 8) * 64 + (py / 8) * 32 + (py & 7) * 4 + (px & 7) / 2
+                } else {
+                    pattern * 32 + py * 4 + px / 2
+                };
+                let nibble = (ram[0x8000 + offset] >> (4 * (1 - (px & 1)))) & 15;
+                if nibble != 0 {
+                    line.planes[plane][x] = ((tile >> 4) as u8 & 0xf0) | nibble;
+                }
+            }
+        }
+        line
+    }
+
+    /// Resolve BG0 over BG1, retaining palette codes until final color conversion.
+    pub fn output(&self, control: u16) -> [u8; BG_WIDTH] {
+        if control & 0x200 == 0 {
+            return [0; BG_WIDTH];
+        }
+        std::array::from_fn(|x| {
+            let front = if control & 1 != 0 {
+                self.planes[0][x]
+            } else {
+                0
+            };
+            if front != 0 {
+                front
+            } else if control & 8 != 0 {
+                self.planes[1][x]
+            } else {
+                0
+            }
+        })
+    }
+}
+
+pub fn control(ram: Option<&[u8]>) -> u16 {
+    ram.filter(|ram| ram.len() >= 0x10000)
+        .map_or(0, |ram| word(ram, 0x808))
+}

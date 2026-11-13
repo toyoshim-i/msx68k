@@ -606,7 +606,7 @@ impl X68kBus {
         }
     }
 
-    /// Most recently completed register/palette history. VRAM itself is still frame-final.
+    /// Most recently completed register/palette and BG code history. Text/graphics VRAM is frame-final.
     pub fn raster_frame(&self) -> Option<&crate::raster::RasterFrame> {
         self.raster.completed()
     }
@@ -633,7 +633,13 @@ impl X68kBus {
                 );
             }
             if self.crtc.at_display_start() {
-                self.raster.display(&self.crtc, &self.vicon, self.sysport.contrast);
+                self.raster.display(
+                    &self.crtc,
+                    &self.vicon,
+                    self.sysport.contrast,
+                    self.sprite_bg.as_deref(),
+                );
+                self.raster.fetch_background(&self.crtc, self.sprite_bg.as_deref());
             }
             if sync.v_disp_fell {
                 self.fdc.refresh_remote_media(&mut self.ioi);

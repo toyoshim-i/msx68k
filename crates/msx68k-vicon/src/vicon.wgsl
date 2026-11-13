@@ -163,22 +163,36 @@ fn text_is_clear(x: u32, y: u32, state: ViconUniforms) -> bool {
     return sample_tvram_index(x, y, state) == 0u;
 }
 
+// BG buffers retain palette codes; the current row's palette converts them here.
+fn background_color(x: u32, y: u32, state: ViconUniforms, palette_base: u32) -> u32 {
+    if (params.reserved.y == 0u || x >= 512u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) { return 0u; }
+    let pixel = y * 512u + x;
+    let code = (palettes[params.reserved.y + pixel / 4u] >> ((pixel & 3u) * 8u)) & 255u;
+    if (code == 0u) { return 0u; }
+    return palettes[palette_base + code];
+}
+
 // Packed RGBA8 of the pixel at (x, y).
 fn composite(x: u32, y: u32, state: ViconUniforms, palette_base: u32) -> u32 {
     let gr_rank = (state.r1_priority >> 8u) & 3u;
     let tx_rank = (state.r1_priority >> 10u) & 3u;
     let sp_rank = (state.r1_priority >> 12u) & 3u;
-    let text_above_gr = gr_rank == 2u || (gr_rank == 1u && tx_rank <= sp_rank);
     var text_color = 0u;
-    if ((state.r2_display & 32u) != 0u && gr_rank != 3u) {
-        text_color = palettes[palette_base + sample_tvram_index(x, y, state)];
+    var bg_color = 0u;
+    if (gr_rank != 3u) {
+        if ((state.r2_display & 32u) != 0u) {
+            text_color = palettes[palette_base + sample_tvram_index(x, y, state)];
+        }
+        bg_color = background_color(x, y, state, palette_base);
     }
     let gr_color = graphics_color(x, y, state, palette_base);
-    var color = text_color;
-    if (text_above_gr) {
-        if (text_color == 0u) { color = gr_color; }
-    } else if (gr_color != 0u) {
-        color = gr_color;
-    }
+    let front = select(bg_color, text_color, tx_rank <= sp_rank);
+    let back = select(text_color, bg_color, tx_rank <= sp_rank);
+    var colors = vec3<u32>(gr_color, front, back);
+    if (gr_rank == 1u) { colors = vec3<u32>(front, gr_color, back); }
+    if (gr_rank == 2u) { colors = vec3<u32>(front, back, gr_color); }
+    var color = colors.x;
+    if (color == 0u) { color = colors.y; }
+    if (color == 0u) { color = colors.z; }
     return grbi_to_packed_rgba8(color, state.contrast);
 }

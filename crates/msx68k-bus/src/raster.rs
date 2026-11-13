@@ -1,5 +1,8 @@
 //! Frame-stable register/palette history, sampled at separate fetch and display stages.
-use crate::{Crtc, Vicon};
+use crate::{
+    bg::{self, BgLine, BG_WIDTH},
+    Crtc, Vicon,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RasterRegisters {
@@ -30,6 +33,8 @@ pub struct RasterFrame {
     pub width: u32,
     pub height: u32,
     pub lines: Vec<RasterLine>,
+    /// Fetched BG palette codes, with a fixed 512-pixel row stride; empty when blank.
+    pub background: Vec<u8>,
     vertical_timing: [u16; 3],
 }
 
@@ -40,6 +45,7 @@ pub(crate) struct RasterCapture {
     palette_revision: u64,
     text_scroll: (u16, u16),
     graphic_scroll: [(u16, u16); 4],
+    background: Option<(u16, BgLine)>,
 }
 
 impl RasterCapture {
@@ -57,6 +63,7 @@ impl RasterCapture {
                 width,
                 height,
                 lines: Vec::new(),
+                background: Vec::new(),
                 vertical_timing: [crtc.regs[4], crtc.regs[6], crtc.regs[7]],
             });
         }
@@ -65,7 +72,7 @@ impl RasterCapture {
         self.graphic_scroll = std::array::from_fn(|p| crtc.graphic_scroll(p));
     }
 
-    pub fn display(&mut self, crtc: &Crtc, vicon: &Vicon, contrast: u8) {
+    pub fn display(&mut self, crtc: &Crtc, vicon: &Vicon, contrast: u8, ram: Option<&[u8]>) {
         if !crtc.sync_state().v_disp {
             return;
         }
@@ -87,6 +94,20 @@ impl RasterCapture {
         let y = crtc.current_raster().saturating_sub(start) as u32 * height / span;
         if y >= height {
             return;
+        }
+        if vicon.r2_display() & 0x40 != 0 {
+            if let Some((raster, line)) = &self.background {
+                if *raster == crtc.current_raster() {
+                    let codes = line.output(bg::control(ram));
+                    if !frame.background.is_empty() || codes.iter().any(|&code| code != 0) {
+                        frame.background.resize(height as usize * BG_WIDTH, 0);
+                        frame.background[y as usize * BG_WIDTH..(y as usize + 1) * BG_WIDTH]
+                            .copy_from_slice(&codes);
+                    }
+                }
+            }
+        } else if !frame.background.is_empty() {
+            frame.background[y as usize * BG_WIDTH..(y as usize + 1) * BG_WIDTH].fill(0);
         }
         // Blank runs need only one OFF marker. Do not sample unrelated registers
         // or copy palettes until a display plane is enabled again.
@@ -133,6 +154,26 @@ impl RasterCapture {
             return;
         }
         Self::push(frame, y, state);
+    }
+
+    /// Prepare the following physical raster before its final display gates are known.
+    pub fn fetch_background(&mut self, crtc: &Crtc, ram: Option<&[u8]>) {
+        self.background = None;
+        if ram.is_none() {
+            return;
+        }
+        let next = if crtc.current_raster() >= (crtc.regs[4] & 0xfff).max(256) {
+            0
+        } else {
+            crtc.current_raster() + 1
+        };
+        let start = (crtc.regs[6] & 0xfff) + 1;
+        let end = (crtc.regs[7] & 0xfff) + 1;
+        if next >= start && next < end {
+            let (_, height) = crtc.active_resolution();
+            let y = (next - start) as u32 * height / (end - start) as u32;
+            self.background = Some((next, BgLine::fetch(crtc, ram, y)));
+        }
     }
 
     fn push(frame: &mut RasterFrame, y: u32, state: RasterState) {

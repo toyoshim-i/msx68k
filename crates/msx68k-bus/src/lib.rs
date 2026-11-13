@@ -1,5 +1,6 @@
 //! X68000 24-bit system bus, region-aware memory wait-state model, and VM runner (`msx68k-bus`).
 
+pub mod bg;
 pub mod bus;
 pub mod crtc;
 pub mod dmac;

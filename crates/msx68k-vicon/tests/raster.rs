@@ -199,3 +199,74 @@ fn a_blank_frame_skips_palette_upload_and_reenable_uses_latest_palette() {
     vm.bus.advance_peripherals(568 * LINE);
     verify(&mut vm, &[(0, 0, GREEN), (0, 127, GREEN)]);
 }
+
+fn background_fixture() -> X68kVm {
+    let mut vm = fixture();
+    vm.bus.crtc.regs[20] = 0x0314;
+    write(&mut vm, 0xeb080c, 32); // Align BG with CRTC horizontal display.
+    write(&mut vm, 0xeb0810, 0x14);
+    write(&mut vm, 0xeb0808, 0x201);
+    write(&mut vm, 0xe82600, 0x40);
+    write(&mut vm, 0xe82202, 0x07c0);
+    write(&mut vm, 0xe82204, 0x003e);
+    write(&mut vm, 0xe82206, 0x07c0);
+    for offset in (0..32).step_by(2) {
+        write(&mut vm, 0xeb8000 + offset, 0x1111);
+    }
+    vm
+}
+
+#[test]
+fn background_prefetch_preserves_codes_but_uses_the_display_rows_palette() {
+    let mut vm = background_fixture();
+    write(&mut vm, 0xeb8004, 0x2222);
+    vm.bus.advance_peripherals(66); // Prefetch row zero before active display.
+    write(&mut vm, 0xeb8000, 0x2222);
+    write(&mut vm, 0xe82202, 0xf800); // Palette conversion has not happened yet.
+    vm.bus.advance_peripherals(LINE); // Display row zero, prefetch row one.
+    write(&mut vm, 0xe82202, 0x07c0); // Later rows use a different palette snapshot.
+    write(&mut vm, 0xeb8004, 0x3333); // Row one is already buffered.
+    vm.bus.advance_peripherals(128 * LINE);
+    // Changes after the frame completed must not replace fetched codes or colors.
+    write(&mut vm, 0xeb8000, 0);
+    write(&mut vm, 0xe82202, 0);
+    verify(&mut vm, &[(0, 0, GREEN), (0, 1, BLUE), (0, 2, RED)]);
+    let frame = vm.bus.raster_frame().unwrap();
+    assert_eq!(frame.background[0], 1);
+    assert_eq!(frame.background[512], 2);
+}
+
+#[test]
+fn background_fetch_continues_while_output_is_disabled() {
+    let mut vm = background_fixture();
+    write(&mut vm, 0xe82600, 0);
+    write(&mut vm, 0xeb0808, 0); // Both final gates are off during prefetch.
+    vm.bus.advance_peripherals(66);
+    write(&mut vm, 0xeb8000, 0x2222);
+    write(&mut vm, 0xeb0808, 0x201);
+    write(&mut vm, 0xe82600, 0x40);
+    vm.bus.advance_peripherals(129 * LINE);
+    verify(&mut vm, &[(0, 0, RED), (1, 0, RED)]);
+}
+
+#[test]
+fn background_text_and_graphics_share_the_final_priority_order() {
+    let mut vm = background_fixture();
+    for y in 0..128 {
+        vm.bus.write_u8(0xe00000 + y * 128, 0x80, true).unwrap();
+    }
+    write(&mut vm, 0xe82202, 0xf800); // Text green.
+    write(&mut vm, 0xebc000, 0x0100); // BG palette block one, blue.
+    write(&mut vm, 0xe82222, 0x003e);
+    write(&mut vm, 0xe82600, 0x61);
+    // Graphics red, text green and BG blue at the same pixel.
+    for (priority, expected) in [
+        (0x1200, GREEN),
+        (0x0600, BLUE),
+        (0x1000, RED),
+        (0x1600, GREEN),
+    ] {
+        write(&mut vm, 0xe82500, priority);
+        verify(&mut vm, &[(0, 0, expected)]);
+    }
+}
