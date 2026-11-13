@@ -773,6 +773,11 @@ impl X68kBus {
 
     /// Reads the drive table at `at`, or `None` for shared mode (0).
     fn custom_drives(&mut self, at: u32) -> Option<Vec<CustomDrive>> {
+        // A2 was unspecified before custom drives existed. Do not interpret an
+        // older guest's leftover address as a drive table (even an empty one).
+        if at >> 24 != 0x56 {
+            return None;
+        }
         let at = at & 0x00FF_FFFF;
         if at == 0 {
             return None;
@@ -1195,7 +1200,7 @@ impl X68kBus {
     /// the top of the window's content, the 16 KB of its SRAM at `D5.L` (0 for none yet), and
     /// the speed `D6.L` (as `VmSpeed`'s), its CPU and RAM `D7.L` (`cpu << 16 | MB`, see
     /// [`setup_machine`]), and custom mode's drive table at `A2.L` (0 in shared mode, see
-    /// [`CustomDrive`]), and returns its ID in `D0.L`.
+    /// [`CustomDrive`], with tag $56 in A2's high byte), and returns its ID in `D0.L`.
     pub(crate) fn hypercall_vm_open(&mut self, state: &mut CpuState) -> TrapResult {
         let windows = &mut self.vm_windows;
         windows.next_id += 1;
@@ -1212,7 +1217,7 @@ impl X68kBus {
             status_woken: false,
             sram: None,
             runtime_sram: None,
-            custom: state.a[2] & 0x00FF_FFFF != 0,
+            custom: state.a[2] >> 24 == 0x56 && state.a[2] & 0x00FF_FFFF != 0,
         });
         let sram_at = state.d[5] & 0x00FF_FFFF;
         let sram = (sram_at != 0).then(|| {
@@ -1592,7 +1597,7 @@ mod tests {
     fn icon_ejection_keeps_a_physical_lease_and_image_replacement_releases_it() {
         let mut primary = primary_with_floppies();
         let mut state = CpuState::default();
-        state.a[2] = 0x6000;
+        state.a[2] = 0x56006000;
         for (at, byte) in [(0x6001, 1), (0x6003, 2), (0x6005, 2)] {
             primary.poke_u8(at, byte);
         }
@@ -1669,10 +1674,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_guests_ignore_unspecified_a2_on_open_and_restart() {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        let mut state = CpuState::default();
+        // An old guest may leave a valid RAM address pointing at zeroed memory.
+        // Previously this was mistaken for an empty custom drive table.
+        state.a[2] = 0x6000;
+        bus.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        assert!(!bus.vm_windows.open[0].custom);
+        assert!(matches!(bus.take_vm_events().as_slice(),
+            [VmEvent::Opened { custom: None, .. }]));
+        state.d[1] = id;
+        bus.hypercall_vm_restart(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert!(!bus.vm_windows.open[0].custom);
+        assert!(matches!(bus.take_vm_events().as_slice(),
+            [VmEvent::Restart { custom: None, .. }]));
+    }
+
+    #[test]
     fn boot_changes_are_saved_without_resetting_the_vm() {
         let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
         let mut state = CpuState::default();
-        state.a[2] = 0x6000; // empty custom table
+        state.a[2] = 0x56006000; // empty custom table
         bus.hypercall_vm_open(&mut state);
         let id = state.d[0];
         bus.take_vm_events();
@@ -1835,7 +1860,7 @@ mod tests {
         let mut primary = primary_with_floppies();
         let mut state = CpuState::default();
         // A2's table contains one passthrough of the primary's B:.
-        state.a[2] = 0x6000;
+        state.a[2] = 0x56006000;
         for (at, byte) in [(0x6001, 1), (0x6003, 2), (0x6005, 2)] {
             primary.poke_u8(at, byte);
         }

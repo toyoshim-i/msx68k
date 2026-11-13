@@ -225,6 +225,10 @@ windows work the same way as the primary VM.
   screen shows in its window (Section 2).
 - **Custom image files.** The settings GUI's ファイル rows now open RAW/DIM floppy and HDD images on
   the primary's drives and pass their handles to the host at `VmOpen`/`VmRestart` in `A2.L`.
+  Custom tables carry `$56` in A2's high byte; the low 24 bits are the address.
+  Untagged A2 values select shared mode, because older VMX68K.X versions left
+  this register unspecified. Update both VMX68K.X and VMX68K.LB on existing
+  disks with `cargo run --release -p msx68k-bus --example install_vmx68k -- <image.HDS>`.
   Reads and writes go through VMX68K.X's DOS calls; images stay open until restart or exit.
   Missing files leave empty units, and three or four floppy units connect all four drives.
   HDD files use the same handles through SCSI IOCS and the block driver, without a whole-image

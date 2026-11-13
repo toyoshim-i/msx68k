@@ -1267,6 +1267,10 @@ custom_drive_table:
 	tst.w	vm_drives+DRV_MODE(a5)
 	beq.s	custom_drive_table_done
 	lea	drive_table(a5), a2
+	* Older guests leave A2 unspecified. Tag this extension explicitly.
+	move.l	a2,-(sp)
+	move.b	#$56,(sp)
+	movea.l	(sp)+,a2
 custom_drive_table_done:
 	rts
 
