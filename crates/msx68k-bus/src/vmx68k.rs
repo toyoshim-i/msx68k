@@ -267,9 +267,10 @@ pub enum CustomDrive {
 const DRIVE_TABLE_ENTRY: u32 = 8;
 
 impl X68kBus {
-    /// Installs raw floppy and HDD images from a custom setup, assigning FDD units
-    /// and SCSI IDs independently in row order. Missing images reserve an empty
-    /// floppy unit. Returns unsupported rows or images beyond the device limits.
+    /// Installs a custom setup's raw floppy/HDD images and file-level shares.
+    /// FDD units, SCSI IDs, and shares each follow row order independently, with
+    /// shared drives appended after the physical disks. Missing images reserve
+    /// empty floppy units. Returns unsupported rows or images beyond the limits.
     /// Mounting performs no I/O and preserves the setup's SRAM boot choice.
     pub fn install_custom_drives(
         &mut self,
@@ -279,6 +280,7 @@ impl X68kBus {
         let mut unit = 0;
         let mut target = 0;
         let mut unsupported = Vec::new();
+        let mut shared = Vec::new();
         for &drive in drives {
             match drive {
                 CustomDrive::File { handle, len }
@@ -301,6 +303,7 @@ impl X68kBus {
                     target += 1;
                 }
                 CustomDrive::Missing if unit < 4 => unit += 1,
+                CustomDrive::Shared { drive } if (1..=26).contains(&drive) => shared.push(drive),
                 _ => unsupported.push(drive),
             }
         }
@@ -308,6 +311,9 @@ impl X68kBus {
         let count = if unit > 2 { 4 } else { 2 };
         for (i, drive) in self.fdc.drives.iter_mut().enumerate() {
             drive.connected = i < count;
+        }
+        if !shared.is_empty() {
+            self.install_remote_drives(bridge, shared);
         }
         unsupported
     }

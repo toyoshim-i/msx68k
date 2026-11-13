@@ -158,8 +158,21 @@ official SX-Window programming manuals.
   not rewrite SRAM; image data and partition/BPB metadata are read on the VM thread. SCSI
   transfers are split at the existing 32 KB bridge buffer limit and writes go through at once.
   The block driver exposes one unit per HDD target, using each image's first Human68k
-  partition (as the resident backend did for target 0). Custom shared and passthrough rows
-  remain unsupported; remote DIM images are not handled yet.
+  partition (as the resident backend did for target 0). Custom 共有 rows now map each selected
+  primary drive, in row order, to file-level remote units after the VM's own FD and SCSI
+  drives. They reuse shared mode's DOS bridge, expose the primary's real CONFIG.SYS, and
+  preserve SRAM and the physical drives. Passthrough rows and remote DIM remain unsupported.
+- **Custom driver installation**: Human68k installs a ROM boot device before its built-in FD
+  driver, and non-boot ROM interfaces afterwards. For HDD boot with custom shares, `_BOOTINF`
+  reports the HDD-only ROM anchor at `$FC0200` instead of `$FC0000`, preserving the IPL's boot
+  flags and leaving SRAM unchanged. The standard `$FC0000` interface then installs shares
+  after the built-in FD driver, and also installs any HDDs not already registered (FD boot).
+  Its `CustomInstall` stub is at `$FC0108`, with the remote strategy/interrupt at `$FC0100` /
+  `$FC0104`. The normal IPL `_BOOTINF` handles other boot devices and guest-installed handlers.
+  A reset clears the SCSI driver enumeration state so non-boot HDDs are installed again.
+  Verified against Human68k 3.02's `$7E70` (boot/built-in driver setup), `$7F0C` (ROM driver
+  enumeration), and `$6AC2` (non-boot SCSI registration). The IPL's `_BOOTINF` reads its flags
+  from `$09DF`/`$09E0` and its ROM boot address from SRAM `$ED000C`.
 - Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
   VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
   `crates/msx68k-vicon/tests/vmx68k_disk.rs` also boots a custom raw image from the primary's
@@ -169,6 +182,10 @@ official SX-Window programming manuals.
   test covers the generated IPL: its next sector loads at `$003000`, not over the executing
   IPL at `$002000` and its trap return PC. The bus tests cover handle counts, 512/1024-byte
   partition metadata, SCSI capacity/ranges, multiple targets, and disconnected bridges.
+  `vmx68k_shared.rs` tests FD boot, HDD boot, and FD boot with an extra HDD, each with reversed
+  primary drive assignments. It checks the resulting letters, file creation/rename/listing,
+  and the original CONFIG.SYS through the first shared unit, alongside the existing shared
+  boot test. Unit tests cover ROM coexistence, boot metadata, and driver enumeration on reset.
 ---
 
 ## 2. Proposed Implementation (not decided)
@@ -183,8 +200,8 @@ official SX-Window programming manuals.
      question.~~ Done.
    - 4b drive assignment, shared and custom mode, in the order ファイル, 共有, パススルー (mock:
      [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png)). The dialogs
-     are done; 4b-1 has raw floppy and HDD/SCSI files working, followed by 4b-2 (共有 drives)
-     and 4b-3 (パススルー).
+     are done; 4b-1 has raw floppy and HDD/SCSI files working and 4b-2 (共有 drives) is done.
+     Next is 4b-3 (パススルー).
    - 4c the boot device submenu and the floppy icons, which need custom mode.
    - 4d the menu to make a new setup, which chooses the boot device it writes in the setup's
      SRAM.
@@ -194,7 +211,6 @@ official SX-Window programming manuals.
   the existing handle bridge, including boot and writes. Add remote DIM support separately
   if needed: the remote FDC backend accepts raw image sizes only. The SCSI block driver still
   uses each image's first Human68k partition; arbitrary partition layouts need separate work.
-- **共有 drives** (4b-2) as remote drives of the VM, after its floppy and SCSI drives.
 - **パススルー** (4b-3): a primary floppy drive handed to the VM sector by sector, write-
   protected on the primary meanwhile.
 - **Floppy icons and the boot submenu** (4c), more `'PLOT'` icons in `VMX68K.LB`.

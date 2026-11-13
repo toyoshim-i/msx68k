@@ -61,6 +61,8 @@ pub enum HypercallId {
     RemoteInstall,
     RemoteStrategy,
     RemoteInterrupt,
+    /// Non-boot driver enumeration for custom disks and shares.
+    CustomInstall,
 }
 
 /// Functions of the application entry, selected by `D0.L`.
@@ -174,6 +176,7 @@ impl X68kBus {
             HypercallId::AlertRowCopy => self.hypercall_alert_row_copy(state),
             HypercallId::AlertIconCopy => self.hypercall_alert_icon_copy(state),
             HypercallId::AlertGlyphOr => self.hypercall_alert_glyph_or(state),
+            HypercallId::CustomInstall => self.hypercall_custom_install(state),
             HypercallId::RemoteBoot => self.hypercall_remote_boot(state),
             HypercallId::RemoteInstall => self.hypercall_remote_install(state),
             HypercallId::RemoteStrategy => self.hypercall_remote_strategy(state),

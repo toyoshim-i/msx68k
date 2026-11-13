@@ -254,6 +254,12 @@ impl ScsiController {
         }
     }
 
+    pub(crate) fn reset_driver(&mut self) {
+        self.req_ptr = 0;
+        self.driver_addr = 0;
+        self.driver_targets.clear();
+    }
+
     /// Returns whether SCSI HDD target 0 has been modified since last persistence check, clearing the flag.
     pub fn take_dirty(&mut self) -> bool {
         let d = self.dirty;
@@ -556,6 +562,28 @@ impl X68kBus {
         }
 
         state.d[2] = 0xFFFF_FFFF;
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// The non-boot ROM interface: physical disks first, then custom shares.
+    pub(crate) fn hypercall_custom_install(&mut self, state: &mut CpuState) -> TrapResult {
+        if state.d[2] == 0 && self.scsi.driver_targets.is_empty() {
+            let a4 = state.a[4];
+            state.a[4] = state.a[1];
+            let result = self.hypercall_scsi_romdb_build(state);
+            state.a[4] = a4;
+            if state.d[2] != u32::MAX {
+                return result;
+            }
+            state.d[2] = 0;
+        }
+        if state.d[2] <= 1 && self.has_custom_remote_drives() {
+            state.d[2] = 0;
+            let result = self.hypercall_remote_install(state);
+            state.d[2] = 2;
+            return result;
+        }
+        state.d[2] = u32::MAX;
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -1710,6 +1738,29 @@ mod remote_tests {
         drop(bus);
         let image = server.join().unwrap();
         assert!(image[24 * 512..25 * 512].iter().all(|&b| b == 0xA5));
+    }
+
+    #[test]
+    fn custom_disks_are_enumerated_again_after_reset() {
+        let (bridge, _) = vm_bridge();
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        assert!(bus.insert_scsi_hdd(0, image(1024)));
+        bus.install_remote_drives(bridge, vec![1]);
+        for _ in 0..2 {
+            let mut state = CpuState::default();
+            state.a[1] = 0x10000;
+            bus.hypercall_custom_install(&mut state);
+            assert_eq!(state.d[2], 1, "the HDD comes before the shares");
+            assert_eq!(bus.peek_u16(0x10004), Some(0));
+            state.a[1] = 0x20000;
+            bus.hypercall_custom_install(&mut state);
+            assert_eq!(state.d[2], 2);
+            assert_eq!(bus.peek_u16(0x20004), Some(0x2000));
+            bus.hypercall_custom_install(&mut state);
+            assert_eq!(state.d[2], u32::MAX);
+            bus.soft_reset();
+            assert!(bus.scsi.driver_targets.is_empty());
+        }
     }
 
     #[test]

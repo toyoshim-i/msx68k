@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use msx68k_bus::human_fs::{short_name, HumanVolume};
 use msx68k_bus::remote_fs::RemoteFs;
-use msx68k_bus::scsi::build_bootable_sxwin_scsi_hdd;
+use msx68k_bus::scsi::{
+    build_bootable_sxwin_scsi_hdd, build_bootable_sxwin_scsi_hdd_with_files, ExtractedFile,
+};
+use msx68k_bus::sx_resource::{Resource, ResourceLibrary};
 use msx68k_bus::vm_thread::{Pace, VmThread};
 use msx68k_bus::vmx68k::vm_bridge;
 use msx68k_bus::{CpuSpeedMode, VmConfig, VmEvent, X68kVm};
@@ -22,10 +25,13 @@ fn scancodes(text: &str) -> Vec<(u8, bool)> {
             'a'..='z' => {
                 let row = b"qwertyuiopasdfghjklzxcvbnm";
                 let codes = [
-                    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1E, 0x1F, 0x20, 0x21,
-                    0x22, 0x23, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30,
+                    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1E, 0x1F, 0x20,
+                    0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30,
                 ];
-                (codes[row.iter().position(|&b| b == c as u8).unwrap()], false)
+                (
+                    codes[row.iter().position(|&b| b == c as u8).unwrap()],
+                    false,
+                )
             }
             ' ' => (0x35, false),
             '.' => (0x32, false),
@@ -89,6 +95,25 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 
 #[test]
 fn a_vm_boots_from_the_primary_vms_drive_a() {
+    shared_drives(None, false);
+}
+
+#[test]
+fn custom_shared_drives_follow_the_floppy_drives() {
+    shared_drives(Some(false), false);
+}
+
+#[test]
+fn custom_shared_drives_follow_the_hdd_and_floppy_drives() {
+    shared_drives(Some(true), false);
+}
+
+#[test]
+fn custom_shared_drives_follow_the_floppy_and_nonboot_hdd() {
+    shared_drives(Some(false), true);
+}
+
+fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -108,6 +133,80 @@ fn a_vm_boots_from_the_primary_vms_drive_a() {
     }
     let sx_refs: Vec<(&str, &[u8])> = sx.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
 
+    let mut extra = Vec::new();
+    if let Some(hdd) = custom {
+        let image = if hdd {
+            build_bootable_sxwin_scsi_hdd(&human, &[], 8)
+        } else {
+            human.clone()
+        };
+        let file = ExtractedFile {
+            path_dirs: vec![(*b"VMX68K  ", *b"   ", [0; 10])],
+            raw_name: *b"BOOT    ",
+            raw_ext: *b"IMG",
+            raw_name2: [0; 10],
+            attr: 0x20,
+            time: 0x6000,
+            date: 0x5821,
+            data: image,
+        };
+        let mut machine = X68kVm::new(VmConfig::app_vm().with_ram_mb(4));
+        if hdd {
+            machine.bus.set_boot_from_scsi(true);
+        }
+        let sram = hdd.then(|| machine.bus.sram().to_vec());
+        let mut setup = ResourceLibrary::parse(&msx68k_bus::vmx68k_library::setup_library(
+            0,
+            0,
+            4,
+            sram.as_deref(),
+        ))
+        .unwrap();
+        // Deliberately reverse the primary's A: and B: in the shared rows.
+        let mut rows: Vec<(u16, &[u8])> = vec![(0, b"A:\\VMX68K\\BOOT.IMG")];
+        if extra_hdd {
+            extra.push(ExtractedFile {
+                raw_name: *b"DISK    ",
+                data: build_bootable_sxwin_scsi_hdd(&human, &[], 8),
+                ..file.clone()
+            });
+            rows.push((0, b"A:\\VMX68K\\DISK.IMG"));
+        }
+        rows.extend([(1, b"B:".as_slice()), (1, b"A:".as_slice())]);
+        setup.insert(
+            b"V68D",
+            Resource::new(0, msx68k_bus::vmx68k_library::setup_drives(true, &rows)),
+        );
+        extra.push(ExtractedFile {
+            raw_name: *b"DEFAULT ",
+            raw_ext: *b"V68",
+            data: setup.to_bytes(),
+            ..file.clone()
+        });
+        extra.push(file);
+    }
+    let has_hdd = custom == Some(true) || extra_hdd;
+    let shared_hdd = if custom.is_none() {
+        'a'
+    } else if has_hdd {
+        'e'
+    } else {
+        'd'
+    };
+    let shared_floppy = if custom.is_none() {
+        'b'
+    } else if has_hdd {
+        'd'
+    } else {
+        'c'
+    };
+    let absent = if custom.is_none() {
+        'd'
+    } else if has_hdd {
+        'f'
+    } else {
+        'e'
+    };
     let mut primary = X68kVm::new(
         VmConfig::primary_sx()
             .with_speed_mode(CpuSpeedMode::Burst)
@@ -117,7 +216,7 @@ fn a_vm_boots_from_the_primary_vms_drive_a() {
     primary.bus.load_ipl_rom(&ipl);
     assert!(primary.bus.insert_scsi_hdd(
         0,
-        build_bootable_sxwin_scsi_hdd(&human, &sx_refs, 32)
+        build_bootable_sxwin_scsi_hdd_with_files(&human, &sx_refs, 32, extra)
     ));
     primary.bus.set_boot_from_scsi(true);
     primary.reset().unwrap();
@@ -130,10 +229,21 @@ fn a_vm_boots_from_the_primary_vms_drive_a() {
     click(&mut primary, (22, 340), 2, 3_000_000);
     click(&mut primary, (104, 255), 2, 8_000_000);
     let events = primary.bus.take_vm_events();
-    let [VmEvent::Opened { id, window, drives, .. }] = events[..] else {
+    let [VmEvent::Opened {
+        id,
+        window,
+        drives,
+        custom: ref custom_drives,
+        sram: ref setup_sram,
+        ..
+    }] = events[..]
+    else {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
-    assert_eq!(drives, 3, "the primary has A: and the floppy drives B: and C:");
+    assert_eq!(
+        drives, 3,
+        "the primary has A: and the floppy drives B: and C:"
+    );
     // Another window in front: the host's E_USER1 must still reach VMX68K.X behind it.
     click(&mut primary, (22, 340), 2, 3_000_000);
     assert_ne!(primary.bus.active_window(), Some(window));
@@ -148,7 +258,21 @@ fn a_vm_boots_from_the_primary_vms_drive_a() {
     );
     vm.bus.load_cgrom(&cgrom);
     vm.bus.load_ipl_rom(&ipl);
-    vm.bus.install_remote_boot(RemoteFs::new(bridge, (1..=drives).collect()));
+    if let Some(sram) = setup_sram {
+        vm.bus.sram_mut().copy_from_slice(sram);
+    }
+    if let Some(drives) = custom_drives {
+        let sram = vm.bus.sram().to_vec();
+        assert!(vm.bus.install_custom_drives(bridge, drives).is_empty());
+        assert_eq!(
+            vm.bus.sram(),
+            sram,
+            "custom shares must preserve the boot choice"
+        );
+    } else {
+        vm.bus
+            .install_remote_boot(RemoteFs::new(bridge, (1..=drives).collect()));
+    }
     vm.reset().unwrap();
 
     // The VM's thread waits while the primary serves it, so the prompt is looked for there.
@@ -177,53 +301,109 @@ fn a_vm_boots_from_the_primary_vms_drive_a() {
         primary.run_steps(200_000);
     }
     // Its remote drives' requests count for the access lamp.
-    assert!(accesses.load(Ordering::Relaxed) > 0, "the remote drive's requests must count");
-    // The VM's own floppy drives get no letters after the primary's: D: is no drive.
-    type_text(&thread, &mut primary, "d:\n");
+    assert!(
+        accesses.load(Ordering::Relaxed) > 0,
+        "the remote drive's requests must count"
+    );
+    // No drive is added beyond the configured shared units and physical drives.
+    type_text(&thread, &mut primary, &format!("{absent}:\n"));
     let until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < until {
         primary.run_steps(200_000);
     }
     let lines = thread_screen.lock().unwrap().clone();
     let prompts: Vec<_> = lines.iter().filter(|l| l.ends_with('>')).collect();
-    assert_eq!(prompts.last().map(|l| l.as_str()), Some("A>"), "D: must not exist: {lines:#?}");
+    assert_eq!(
+        prompts.last().map(|l| l.as_str()),
+        Some("A>"),
+        "{absent}: must not exist: {lines:#?}"
+    );
 
     // What the VM writes goes to the primary's drive, through the primary's Human68k, which keeps
     // names as typed.
     let dir = [short_name("vmtest", "")];
-    type_text(&thread, &mut primary, "md vmtest\n");
+    type_text(
+        &thread,
+        &mut primary,
+        &format!("md {shared_hdd}:\\vmtest\n"),
+    );
     assert!(
-        wait_for_disk(&mut primary, |v| v.read_file(&[], &short_name("vmtest", "")).is_some()),
+        wait_for_disk(&mut primary, |v| v
+            .read_file(&[], &short_name("vmtest", ""))
+            .is_some()),
         "MD must make VMTEST on the primary's drive: {:#?}",
         thread_screen.lock().unwrap()
     );
-    type_text(&thread, &mut primary, "echo hello>vmtest\\hi.txt\n");
+    type_text(
+        &thread,
+        &mut primary,
+        &format!("echo hello>{shared_hdd}:\\vmtest\\hi.txt\n"),
+    );
     assert!(
-        wait_for_disk(&mut primary, |v| v.read_file(&dir, &short_name("hi", "txt")).as_deref() == Some(&b"hello\r\n"[..])),
+        wait_for_disk(&mut primary, |v| v
+            .read_file(&dir, &short_name("hi", "txt"))
+            .as_deref()
+            == Some(&b"hello\r\n"[..])),
         "ECHO must create VMTEST\\HI.TXT on the primary's drive"
     );
-    type_text(&thread, &mut primary, "ren vmtest\\hi.txt bye.txt\n");
+    type_text(
+        &thread,
+        &mut primary,
+        &format!("ren {shared_hdd}:\\vmtest\\hi.txt bye.txt\n"),
+    );
     assert!(
-        wait_for_disk(&mut primary, |v| v.read_file(&dir, &short_name("bye", "txt")).is_some()
+        wait_for_disk(&mut primary, |v| v
+            .read_file(&dir, &short_name("bye", "txt"))
+            .is_some()
             && v.read_file(&dir, &short_name("hi", "txt")).is_none()),
         "REN must rename it on the primary's drive"
     );
 
-    // B: is the primary's B:: a listing of its floppy, by its volume name and files (HUMAN.SYS
-    // is a system file DIR leaves out), written to A:.
-    type_text(&thread, &mut primary, "dir b: >dirb.txt\n");
+    // The configured floppy share lists the primary's B:, by its volume name and files
+    // (HUMAN.SYS is a system file DIR leaves out), written to the configured HDD share.
+    type_text(
+        &thread,
+        &mut primary,
+        &format!("dir {shared_floppy}: >{shared_hdd}:\\dirb.txt\n"),
+    );
     assert!(
         wait_for_disk(&mut primary, |v| v
             .read_file(&[], &short_name("dirb", "txt"))
-            .is_some_and(|listing| listing.windows(15).any(|w| w == b"Human68k_Ver3  ")
+            .is_some_and(|listing| listing
+                .windows(15)
+                .any(|w| w == b"Human68k_Ver3  ")
                 && listing.windows(7).any(|w| w == b"COMMAND"))),
         "DIR B: must list the primary's floppy: {:?}",
         {
             let mut image = primary.bus.scsi_hdd_data(0).unwrap().to_vec();
-            let file = HumanVolume::open(&mut image).unwrap().read_file(&[], &short_name("dirb", "txt"));
+            let file = HumanVolume::open(&mut image)
+                .unwrap()
+                .read_file(&[], &short_name("dirb", "txt"));
             file.map(|f| String::from_utf8_lossy(&f).into_owned())
         }
     );
+
+    if custom.is_some() {
+        // A custom share exposes the primary's real CONFIG.SYS, without the
+        // boot-only substitution used by shared mode, including its first unit.
+        let expected = msx68k_bus::scsi::extract_files_from_xdf(&human)
+            .into_iter()
+            .find(|f| f.path_dirs.is_empty() && f.raw_name == *b"CONFIG  " && f.raw_ext == *b"SYS")
+            .unwrap()
+            .data;
+        type_text(
+            &thread,
+            &mut primary,
+            &format!("copy {shared_floppy}:\\config.sys {shared_hdd}:\\cfgcopy.txt\n"),
+        );
+        assert!(
+            wait_for_disk(&mut primary, |v| v
+                .read_file(&[], &short_name("cfgcopy", "txt"))
+                .is_some_and(|contents| contents == expected)),
+            "custom shares must expose the original CONFIG.SYS: {:#?}",
+            thread_screen.lock().unwrap()
+        );
+    }
 
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
     primary.bus.detach_vm_bridge(id);

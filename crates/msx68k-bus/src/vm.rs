@@ -57,6 +57,9 @@ impl TrapHandler<X68kBus> for BusTrapHandler {
         trap_no: u8,
         _pc: u32,
     ) -> msx68k_cpu::TrapResult {
+        if trap_no == 15 && (state.d[0] & 0xFF) == 0x8E {
+            return bus.custom_boot_info(state);
+        }
         if trap_no == 15 && (state.d[0] & 0xFF) == 0x10 {
             return bus.handle_iocs_crtmod(state);
         }

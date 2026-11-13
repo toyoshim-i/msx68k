@@ -1,5 +1,6 @@
-//! A VM's remote drives in shared mode (`docs/VMX68K.md` Section 2): the primary VM's
-//! drives under the same letters, bridged at the file level, and booted from.
+//! File-level remote drives (`docs/VMX68K.md` Section 2): in shared mode, the
+//! primary's drives under the same letters, booted from; in custom mode, selected
+//! primary drives appended after the VM's own floppy and SCSI drives.
 //!
 //! The VM boots through a ROM msx68k provides at `$FC0000`, laid out like the internal SCSI ROM
 //! that Human68k already knows how to boot from: the IPL boot routine loads `HUMAN.SYS` from
@@ -25,6 +26,14 @@ const BOOT_ROUTINE: u32 = ROM_BASE + 0x14;
 const INSTALL_ROUTINE: u32 = ROM_BASE + 0x18;
 const STRATEGY_ROUTINE: u32 = ROM_BASE + 0x1C;
 const INTERRUPT_ROUTINE: u32 = ROM_BASE + 0x20;
+// Custom mode shares the SCSI ROM, leaving its header and entry points intact.
+const CUSTOM_STRATEGY: u32 = ROM_BASE + 0x100;
+const CUSTOM_INTERRUPT: u32 = ROM_BASE + 0x104;
+const CUSTOM_INSTALL: u32 = ROM_BASE + 0x108;
+// Human68k installs the boot interface before its built-in floppy driver and
+// other ROM interfaces afterwards. Give HDD boot a separate ROM anchor so the
+// normal SCSI ROM interface can install custom shares after the physical disks.
+const CUSTOM_BOOT_HEADER: u32 = ROM_BASE + 0x200;
 
 /// Where `HUMAN.SYS` runs, its base address and entry.
 const HUMAN_BASE: u32 = 0x6800;
@@ -67,6 +76,8 @@ pub struct RemoteFs {
     files: HashMap<u32, OpenFile>,
     /// The primary's search buffer behind each `_FILES` buffer of the VM.
     searches: HashMap<u32, Vec<u8>>,
+    /// Shared mode boots from these drives; custom mode adds them without booting.
+    boot: bool,
     /// Whether `\CONFIG.SYS` is still the VM's own, and the shell whose start ends that.
     own_config: bool,
     shell: Vec<u8>,
@@ -82,6 +93,7 @@ impl RemoteFs {
             request: 0,
             files: HashMap::new(),
             searches: HashMap::new(),
+            boot: true,
             own_config: true,
             shell: b"COMMAND.X".to_vec(),
         }
@@ -119,7 +131,12 @@ impl X68kBus {
         image.extend_from_slice(&INSTALL_ROUTINE.to_be_bytes()); // install handle
         image.extend_from_slice(&0u32.to_be_bytes()); // install parameter
         image.extend_from_slice(b"Human68k");
-        for _ in [BOOT_ROUTINE, INSTALL_ROUTINE, STRATEGY_ROUTINE, INTERRUPT_ROUTINE] {
+        for _ in [
+            BOOT_ROUTINE,
+            INSTALL_ROUTINE,
+            STRATEGY_ROUTINE,
+            INTERRUPT_ROUTINE,
+        ] {
             image.extend_from_slice(&[hi, lo, 0x4E, 0x75]); // hypercall; RTS
         }
         self.rom[rom..rom + image.len()].copy_from_slice(&image);
@@ -138,6 +155,59 @@ impl X68kBus {
         self.remote_fs = Some(Box::new(fs));
     }
 
+    /// Adds file-level remote drives to a custom VM without replacing its boot ROM,
+    /// changing SRAM, or disconnecting its physical floppy units. Human68k installs
+    /// this device through the SCSI ROM's driver enumeration.
+    pub fn install_remote_drives(&mut self, bridge: VmBridge, drives: Vec<u32>) {
+        let mut fs = RemoteFs::new(bridge, drives);
+        fs.boot = false;
+        fs.own_config = false;
+        self.remote_fs = Some(Box::new(fs));
+        self.enable_scsi_rom();
+        let base = (ROM_BASE - 0x00F0_0000) as usize;
+        self.rom[base + 0x40..base + 0x44].copy_from_slice(&CUSTOM_INSTALL.to_be_bytes());
+        let header = (CUSTOM_BOOT_HEADER - 0x00F0_0000) as usize;
+        let boot = CUSTOM_BOOT_HEADER + 0x20;
+        self.rom[header..header + 4].copy_from_slice(&boot.to_be_bytes());
+        self.rom[header + 0x10..header + 0x14].copy_from_slice(&(ROM_BASE + 0x60).to_be_bytes());
+        self.rom[header + 0x14..header + 0x18].copy_from_slice(&(ROM_BASE + 0x64).to_be_bytes());
+        self.rom[header + 0x18..header + 0x20].copy_from_slice(b"Human68k");
+        let [hi, lo] = HYPERCALL_OPCODE.to_be_bytes();
+        for (addr, id) in [
+            (CUSTOM_STRATEGY, HypercallId::RemoteStrategy),
+            (CUSTOM_INTERRUPT, HypercallId::RemoteInterrupt),
+            (CUSTOM_INSTALL, HypercallId::CustomInstall),
+            (boot, HypercallId::ScsiRomBoot),
+        ] {
+            let off = (addr - 0x00F0_0000) as usize;
+            self.rom[off..off + 4].copy_from_slice(&[hi, lo, 0x4E, 0x75]);
+            self.register_hypercall(addr, id);
+        }
+    }
+
+    /// Answers ROM boot metadata with the HDD-only anchor, preserving SRAM.
+    /// Other boot devices keep the IPL's own _BOOTINF handling.
+    pub(crate) fn custom_boot_info(&self, state: &mut CpuState) -> TrapResult {
+        if self.has_custom_remote_drives()
+            && matches!(self.peek_u32(0x0638), Some(0x00FE_0000..=0x00FF_FFFF))
+            && self.peek_u8(0x09E0) == Some(1)
+            && self.sram[0x0C..0x10] == ROM_BASE.to_be_bytes()
+        {
+            state.d[0] = (self.peek_u8(0x09DF).unwrap_or(0) as u32) << 24 | CUSTOM_BOOT_HEADER;
+            // Match the IPL handler's final OR.L condition codes (X unchanged).
+            state.sr = (state.sr & !0x0F) | if state.d[0] & 0x8000_0000 != 0 { 8 } else { 0 };
+            TrapResult::Handled { extra_cycles: 0 }
+        } else {
+            TrapResult::PassToVector
+        }
+    }
+
+    pub(crate) fn has_custom_remote_drives(&self) -> bool {
+        self.remote_fs
+            .as_ref()
+            .is_some_and(|fs| !fs.boot && !fs.drives.is_empty())
+    }
+
     /// `RemoteBoot`: loads `HUMAN.SYS` from the boot drive and runs it.
     pub(crate) fn hypercall_remote_boot(&mut self, state: &mut CpuState) -> TrapResult {
         if let Some(human) = self.read_primary_file(b"\\HUMAN.SYS") {
@@ -147,8 +217,10 @@ impl X68kBus {
                 let text_data = (word(0x0C) + word(0x10)) as usize;
                 let bss = word(0x14) as usize;
                 let base = HUMAN_BASE as usize;
-                if human.len() >= 0x40 + text_data && base + text_data + bss <= self.main_ram.len() {
-                    self.main_ram[base..base + text_data].copy_from_slice(&human[0x40..0x40 + text_data]);
+                if human.len() >= 0x40 + text_data && base + text_data + bss <= self.main_ram.len()
+                {
+                    self.main_ram[base..base + text_data]
+                        .copy_from_slice(&human[0x40..0x40 + text_data]);
                     self.main_ram[base + text_data..base + text_data + bss].fill(0);
                     state.pc = HUMAN_BASE;
                 }
@@ -163,7 +235,13 @@ impl X68kBus {
         let fs = self.remote_fs.as_ref()?;
         let mut full = vec![b'@' + *fs.drives.first()? as u8, b':'];
         full.extend_from_slice(path);
-        let handle = fs.bridge.ask(BridgeOp::Open { path: full, mode: 0 })?.result;
+        let handle = fs
+            .bridge
+            .ask(BridgeOp::Open {
+                path: full,
+                mode: 0,
+            })?
+            .result;
         if (handle as i32) < 0 {
             return None;
         }
@@ -196,8 +274,23 @@ impl X68kBus {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // next driver
         bytes.extend_from_slice(&0x2000u16.to_be_bytes()); // remote device
-        bytes.extend_from_slice(&STRATEGY_ROUTINE.to_be_bytes());
-        bytes.extend_from_slice(&INTERRUPT_ROUTINE.to_be_bytes());
+        let custom = self.has_custom_remote_drives();
+        bytes.extend_from_slice(
+            &(if custom {
+                CUSTOM_STRATEGY
+            } else {
+                STRATEGY_ROUTINE
+            })
+            .to_be_bytes(),
+        );
+        bytes.extend_from_slice(
+            &(if custom {
+                CUSTOM_INTERRUPT
+            } else {
+                INTERRUPT_ROUTINE
+            })
+            .to_be_bytes(),
+        );
         bytes.extend_from_slice(b"\x01VMX68K ");
         for (i, &byte) in bytes.iter().enumerate() {
             self.poke_u8(header + i as u32, byte);
@@ -228,7 +321,11 @@ impl X68kBus {
             self.remote_init(request);
             (0, 0)
         } else {
-            match self.remote_fs.as_ref().and_then(|fs| fs.drives.get(unit).copied()) {
+            match self
+                .remote_fs
+                .as_ref()
+                .and_then(|fs| fs.drives.get(unit).copied())
+            {
                 Some(drive) => self.remote_command(request, command, drive),
                 None => (DEV_ABORT_UNKNOWN_COMMAND, u32::MAX),
             }
@@ -244,13 +341,15 @@ impl X68kBus {
         let Some(fs) = self.remote_fs.as_ref() else {
             return;
         };
-        let (units, header) = (fs.drives.len() as u8, fs.header);
+        let (units, header, boot) = (fs.drives.len() as u8, fs.header, fs.boot);
         // Human68k reuses this header to initialise DISK2HD next without setting its command,
         // which as $40 would run past DISK2HD's jump table; its own initialise is $00.
         self.poke_u8(request + 2, 0);
         self.poke_u8(request + 13, units);
         self.poke_u32_be(request + 14, header + 34);
-        self.poke_u8(request + 22, 1);
+        if boot {
+            self.poke_u8(request + 22, 1);
+        }
     }
 
     /// Carries out a command for the primary's drive `drive`; returns the device error and the
@@ -672,9 +771,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_shares_preserve_devices_and_boot_state() {
+        let (bridge, requests) = crate::vmx68k::vm_bridge();
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        let sram = bus.sram().to_vec();
+        bus.install_remote_drives(bridge, vec![2, 1]);
+        assert_eq!(bus.sram(), sram);
+        assert!(bus.fdc.drives[0].connected && bus.fdc.drives[1].connected);
+        assert!(!bus.remote_boot_rom);
+        assert_eq!(
+            bus.hypercall_at(ROM_BASE + 0x50),
+            Some(HypercallId::ScsiRomBoot)
+        );
+        assert_eq!(bus.peek_u32(ROM_BASE), Some(ROM_BASE + 0x50));
+        assert_eq!(
+            bus.hypercall_at(CUSTOM_INTERRUPT),
+            Some(HypercallId::RemoteInterrupt)
+        );
+        let fs = bus.remote_fs.as_ref().unwrap();
+        assert!(!fs.boot && !fs.own_config);
+        assert_eq!(fs.drives, [2, 1]);
+        assert!(
+            requests.try_recv().is_err(),
+            "mounting must not wait on the primary"
+        );
+
+        let mut state = CpuState::default();
+        state.a[4] = 0x20000;
+        state.a[1] = 0x10000;
+        bus.hypercall_custom_install(&mut state);
+        assert_eq!(state.d[2], 2);
+        assert_eq!(state.a[4], 0x20000, "preserve the caller's A4");
+        assert_eq!(bus.peek_u16(0x10004), Some(0x2000));
+        assert_eq!(bus.peek_u32(0x10006), Some(CUSTOM_STRATEGY));
+        assert_eq!(bus.peek_u32(0x1000A), Some(CUSTOM_INTERRUPT));
+        let request = 0x30000;
+        bus.poke_u8(request + 22, 5);
+        bus.remote_init(request);
+        assert_eq!(bus.peek_u8(request + 13), Some(2));
+        assert_eq!(
+            bus.peek_u8(request + 22),
+            Some(5),
+            "custom shares must not select boot unit 1"
+        );
+        bus.hypercall_custom_install(&mut state);
+        assert_eq!(state.d[2], u32::MAX, "one remote driver only");
+    }
+
+    #[test]
+    fn hdd_boot_metadata_keeps_shares_after_the_physical_drives() {
+        let (bridge, _) = crate::vmx68k::vm_bridge();
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        bus.install_remote_drives(bridge, vec![1]);
+        let mut state = CpuState::default();
+        bus.poke_u32_be(0x0638, 0x00FF_AA66);
+        bus.poke_u8(0x09E0, 1);
+        bus.poke_u8(0x09DF, 2); // Keep the IPL's warm-boot flag.
+        bus.set_boot_from_scsi(true);
+        let sram = bus.sram().to_vec();
+        state.sr = 0x201F;
+        assert_eq!(
+            bus.custom_boot_info(&mut state),
+            TrapResult::Handled { extra_cycles: 0 }
+        );
+        assert_eq!(state.d[0], 0x0200_0000 | CUSTOM_BOOT_HEADER);
+        assert_eq!(state.sr, 0x2010);
+        assert_eq!(bus.sram(), sram);
+        assert_eq!(
+            bus.peek_u32(CUSTOM_BOOT_HEADER),
+            Some(CUSTOM_BOOT_HEADER + 0x20)
+        );
+        assert_eq!(
+            bus.hypercall_at(CUSTOM_BOOT_HEADER + 0x20),
+            Some(HypercallId::ScsiRomBoot)
+        );
+        // A guest driver replacing _BOOTINF retains control; floppy boots also
+        // use the IPL unchanged.
+        bus.poke_u32_be(0x0638, 0x20000);
+        assert_eq!(bus.custom_boot_info(&mut state), TrapResult::PassToVector);
+        bus.poke_u32_be(0x0638, 0x00FF_AA66);
+        bus.poke_u8(0x09E0, 0x90);
+        assert_eq!(bus.custom_boot_info(&mut state), TrapResult::PassToVector);
+    }
+
+    #[test]
     fn the_shell_is_read_from_config_sys() {
-        assert_eq!(shell_of(b"FILES = 64\r\nSHELL     = \\SHELL\\SXWIN.X -@\r\n").as_deref(), Some(&b"SXWIN.X"[..]));
-        assert_eq!(shell_of(b"shell=a:\\bin\\fish.x\r\n").as_deref(), Some(&b"FISH.X"[..]));
+        assert_eq!(
+            shell_of(b"FILES = 64\r\nSHELL     = \\SHELL\\SXWIN.X -@\r\n").as_deref(),
+            Some(&b"SXWIN.X"[..])
+        );
+        assert_eq!(
+            shell_of(b"shell=a:\\bin\\fish.x\r\n").as_deref(),
+            Some(&b"FISH.X"[..])
+        );
         assert_eq!(shell_of(DEFAULT_CONFIG), None);
     }
 }

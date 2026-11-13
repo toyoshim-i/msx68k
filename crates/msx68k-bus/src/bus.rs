@@ -453,6 +453,7 @@ impl X68kBus {
         self.supervisor_area_limit = RESET_SUPERVISOR_AREA;
         self.sram_write_enabled = false;
         self.forget_ram_hypercalls();
+        self.scsi.reset_driver();
 
         self.crtc = Crtc::new();
         self.vicon = Vicon::new();

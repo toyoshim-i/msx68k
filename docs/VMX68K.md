@@ -227,7 +227,10 @@ windows work the same way as the primary VM.
   cache; FDD units and SCSI IDs are assigned independently in row order. SCSI transfers larger
   than VMX68K.X's 32 KB buffer use several bridge requests. Mounting preserves the setup's
   SRAM boot choice. The legacy `A:\VMX68K\DRIVE0.XDF` service remains for compatibility tests.
-  Custom shared/passthrough rows and remote DIM images are still pending (see the settings UI notes).
+  Custom 共有 rows add file-level remote drives after its FD and SCSI drives, preserving
+  row order within the shared entries. They expose the primary's original files, including
+  CONFIG.SYS, without shared mode's boot substitution. Passthrough rows and remote DIM images
+  are still pending (see the settings UI notes).
 
 ## 4. First Goal
 
