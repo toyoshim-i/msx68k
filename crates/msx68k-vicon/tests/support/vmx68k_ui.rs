@@ -1167,6 +1167,18 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         |vm| (341..354).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11)),
         "enabled boot selector drawn",
     );
+    // Modeless controls repaint independently: the boot selector can appear before
+    // the CPU/path and choice controls. Require them together, along with the
+    // path label, before saving the redraw baseline.
+    wait_ui(
+        &mut vm,
+        |vm| (166..185).any(|y| (284..382).any(|x| text_index(vm, (x, y)) == 11))
+            && (123..145).any(|y| (284..548).any(|x| text_index(vm, (x, y)) == 8))
+            && (123..140).any(|y| (212..276).any(|x| text_index(vm, (x, y)) == 11))
+            && (305..318).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11))
+            && (341..354).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11)),
+        "settings controls and path drawn",
+    );
     let expected = parent(&vm);
     screenshot(&vm, "settings_parent_before");
     click(&mut vm, (480, 275), 1, 1_500_000);
