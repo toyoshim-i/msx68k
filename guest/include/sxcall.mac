@@ -152,6 +152,7 @@ WMCloseWindow		.equ	$A1FC	; Compatibility alias
 WMDisposeWindow		.equ	$A1FC	; Compatibility alias
 WMFind			.equ	$A1FD	; Find clicked window
 WMFindWindow		.equ	$A1FD	; Compatibility alias
+WMActive		.equ	$A20F	; Return the active window in A0
 WMSelect		.equ	$A1FE	; Bring window to front & activate
 WMBringToFront		.equ	$A1FE	; Compatibility alias
 WMSelectWindow		.equ	$A1FE	; Compatibility alias
@@ -209,14 +210,19 @@ DMDispose		.equ	$A2C6	; Close and dispose of a dialog made on the heap
 DMClose			.equ	$A2C5	; Close a dialog whose record is not on the heap
 DMControl		.equ	$A2C7	; Run the current dialog until an item returns (filter) -> D0
 DMDraw			.equ	$A2C8	; Draw all of a dialog's items
+DITSelect		.equ	$A2D3
+DIUpdate		.equ	$A2D6
 DIGet			.equ	$A2CF	; An item's type, handle, and rectangle (dlg, no.w, 3 buffers)
 DITSet			.equ	$A2D2	; Set an item's text (type.w, handle, Pascal string)
 DITGet			.equ	$A2D1	; Get an item's text (type.w, handle, buffer)
 DIHide			.equ	$A2D8	; Hide an item (dlg, no.w)
 DIShow			.equ	$A2D9	; Show an item again (dlg, no.w)
 CMShine			.equ	$A298	; Highlight a control's part (handle, part.w): 255 inactive
+TMGetText		.equ	$A315	; Read the current edit buffer
+TMEvent			.equ	$A31C	; Dispatch a text edit event
 TMIdle			.equ	$A30E	; Blink a text edit's cursor (handle)
 DMError			.equ	$A2F6	; An alert (flags.w, ASCIIZ) -> D0 the button
+CMCheck			.equ	$A29A	; Track a control until mouse release
 CMValueSet		.equ	$A290	; Set a control's value (handle, value.w)
 CMValueGet		.equ	$A291	; A control's value (handle) -> D0
 

@@ -49,6 +49,10 @@ DRV_COUNT	.equ	4
 DRV_ENTRIES	.equ	6
 ENTRY_SIZE	.equ	96
 DRIVES_SIZE	.equ	DRV_ENTRIES+DRIVE_ROWS*ENTRY_SIZE
+WINDOW_KIND	.equ	64		; Window.kind: W_DIALOG is bit 1
+WINDOW_UPDATE	.equ	80
+WINDOW_TASK	.equ	110
+DIALOG_ITEMS	.equ	114
 DIALOG_TEDIT	.equ	118		; A dialog record's TEdit handle, after its window
 DIALOG_RECORD	.equ	136		; A dialog record, 128 bytes, kept in the work area, and
 					; after it the record's offset in the work area, from which
@@ -93,6 +97,8 @@ vm_ram:		.ds.w	1		; the setup's RAM in MB, 1 to 12
 run_cpu:	.ds.w	1		; the CPU the VM runs with, whose speeds the menu shows
 dlg_cpu:	.ds.w	1		; the dialog's choices
 dlg_ram:	.ds.w	1
+dialog_end:	.ds.w	1		; ENDTSK/CLOSEALL must unwind both settings windows
+dlg_edit:	.ds.w	1		; active settings text item (not Dialog.edit's internal offset)
 dlg_type:	.ds.w	1		; DIGet's item type, handle, and rectangle
 dlg_hdl:	.ds.l	1
 dlg_rect:	.ds.w	4
@@ -1113,6 +1119,7 @@ speed_list_done:
 * -----------------------------------------------------------------------------
 config_dialog:
 	movem.l	d0-d3/a0-a2, -(sp)
+	clr.w	dialog_end(a5)
 	move.w	vm_cpu(a5), dlg_cpu(a5)
 	move.w	vm_ram(a5), dlg_ram(a5)
 	move.w	#cfg_dialog, cfg_dialog+DIALOG_RECORD(a5)
@@ -1123,6 +1130,8 @@ config_dialog:
 	lea	10(sp), sp
 	move.l	a0, d0
 	beq	config_dialog_done
+	move.l	app_task_id(a5),WINDOW_TASK(a0)	; route events to this task
+	bclr	#1,WINDOW_KIND+1(a0)		; ordinary task window: do not lock application switching
 	move.l	a0, dlg_ptr(a5)
 	lea	config_labels(pc), a1
 	bsr	dlg_labels
@@ -1140,14 +1149,13 @@ config_dialog:
 	bsr	dlg_show_size
 	move.l	dlg_ptr(a5), -(sp)
 	SXCALL	WMShow			; $A207
+	SXCALL	WMSelect
 	SXCALL	GMSetGraph		; $A131
 	SXCALL	DMDraw			; $A2C8
 	addq.l	#4, sp
 
 config_dialog_loop:
-	pea	dialog_filter(pc)
-	SXCALL	DMControl		; $A2C7
-	addq.l	#4, sp
+	bsr	dialog_control
 	cmpi.w	#ITEM_OK, d0
 	beq	config_dialog_ok
 	cmpi.w	#ITEM_CANCEL, d0
@@ -1196,6 +1204,8 @@ config_dialog_details:
 	tst.w	dlg_drives+DRV_MODE(a5)
 	beq	config_dialog_loop
 	bsr	drive_dialog
+	tst.w	dialog_end(a5)
+	bne	config_dialog_close
 	bra	config_dialog_loop
 config_dialog_68000:
 	clr.w	dlg_cpu(a5)
@@ -1258,6 +1268,8 @@ config_dialog_done:
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
 	movem.l	(sp)+, d0-d3/a0-a2
+	tst.w	dialog_end(a5)
+	bne	quit_app
 	rts
 
 * The running VM's image handles belong to this task, independently of the saved
@@ -1487,6 +1499,7 @@ dlg_show_mode_shine:
 * -----------------------------------------------------------------------------
 drive_dialog:
 	movem.l	d0-d4/a0-a2, -(sp)
+	clr.w	dlg_edit(a5)
 	lea	dlg_drives(a5), a0
 	lea	det_drives(a5), a1
 	bsr	copy_drives
@@ -1499,6 +1512,8 @@ drive_dialog:
 	lea	10(sp), sp
 	move.l	a0, d0
 	beq	drive_dialog_back
+	move.l	app_task_id(a5),WINDOW_TASK(a0)	; route events to this task
+	bclr	#1,WINDOW_KIND+1(a0)		; ordinary task window: do not lock application switching
 	move.l	a0, dlg_ptr(a5)
 	lea	drive_labels(pc), a1
 	bsr	dlg_labels
@@ -1534,14 +1549,13 @@ drive_dialog_row:
 	bsr	det_show_count
 	move.l	dlg_ptr(a5), -(sp)
 	SXCALL	WMShow			; $A207
+	SXCALL	WMSelect
 	SXCALL	GMSetGraph		; $A131
 	SXCALL	DMDraw			; $A2C8
 	addq.l	#4, sp
 
 drive_dialog_loop:
-	pea	dialog_filter(pc)
-	SXCALL	DMControl		; $A2C7
-	addq.l	#4, sp
+	bsr	dialog_control
 	cmpi.w	#ITEM_OK, d0
 	beq	drive_dialog_ok
 	cmpi.w	#ITEM_CANCEL, d0
@@ -1580,6 +1594,7 @@ drive_dialog_count:
 	bra	drive_dialog_loop
 
 drive_dialog_ok:
+	bsr	dialog_store_edit
 	* Each row's text, up to 92 bytes
 	moveq.l	#0, d3
 drive_dialog_take:
@@ -1628,6 +1643,7 @@ drive_dialog_back:
 	move.l	cfg_ptr(a5), dlg_ptr(a5)
 	clr.l	cfg_ptr(a5)
 	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	WMSelect
 	SXCALL	GMSetGraph		; $A131
 	addq.l	#4, sp
 	movem.l	(sp)+, d0-d4/a0-a2
@@ -1787,6 +1803,251 @@ dlg_size_tens:
 	rts
 
 * -----------------------------------------------------------------------------
+* Modeless settings: obtain this task's events through Task Man, leaving the
+* Filer and other applications usable. Only control tracking holds the mouse.
+* Returns a clicked enabled item, as DMControl does, preserving callers' state.
+dialog_control:
+	movem.l	d1-d7/a0-a4,-(sp)
+dialog_control_next:
+	pea	event_rec(a5)
+	move.w	#$72AA,-(sp)
+	SXCALL	TSEventAvail
+	addq.l	#6,sp
+	cmpi.w	#$DFFE,d0
+	beq	dialog_control_abort
+	move.w	event_what(a5),d0
+	cmpi.w	#14,d0
+	beq	dialog_control_user
+	cmpi.w	#7,d0
+	beq	dialog_control_update
+	cmpi.w	#12,d0
+	beq	dialog_control_system
+	cmpi.w	#13,d0
+	beq	dialog_control_system
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+	* Calls may overwrite D0: read the event again.
+	move.w	event_what(a5),d0
+	beq	dialog_control_text
+	cmpi.w	#5,d0
+	beq	dialog_control_text
+	cmpi.w	#1,d0
+	beq	dialog_control_click
+	cmpi.w	#3,d0
+	beq	dialog_control_text
+	bra	dialog_control_next
+dialog_control_user:
+	bsr	serve_disk
+	bsr	update_status
+	bra	dialog_control_next
+dialog_control_update:
+	pea	event_rec(a5)
+	move.l	dlg_ptr(a5),-(sp)
+	bsr	dialog_filter
+	addq.l	#8,sp
+	bra	dialog_control_next
+dialog_control_system:
+	move.w	event_what2(a5),d0
+	cmpi.w	#1,d0
+	beq	dialog_control_abort
+	cmpi.w	#2,d0
+	beq	dialog_control_abort
+	cmpi.w	#81,d0
+	bne	dialog_control_next
+	bsr	dialog_drop
+	bra	dialog_control_next
+dialog_control_click:
+	move.l	event_win(a5),d0
+	cmp.l	dlg_ptr(a5),d0
+	bne	dialog_control_next
+	SXCALL	WMActive
+	move.l	a0,d0
+	cmp.l	dlg_ptr(a5),d0
+	beq.s	dialog_control_selected
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	WMSelect
+	addq.l	#4,sp
+dialog_control_selected:
+	move.l	event_where(a5),-(sp)
+	SXCALL	GMGlobalToLocal
+	addq.l	#4,sp
+	move.l	d0,d5
+	movea.l	dlg_ptr(a5),a0
+	movea.l	DIALOG_ITEMS(a0),a0
+	movea.l	(a0),a0
+	move.w	(a0),d6		; DITL stores count minus one
+	moveq.l	#1,d7
+dialog_control_hit:
+	move.w	d7,d0
+	bsr	dlg_item
+	move.l	d5,-(sp)
+	pea	dlg_rect(a5)
+	SXCALL	GMPtInRect
+	addq.l	#8,sp
+	tst.b	d0
+	beq	dialog_control_hit_next
+	move.w	dlg_type(a5),d0
+	andi.w	#$7F,d0
+	cmpi.w	#$10,d0
+	beq	dialog_control_edit
+	btst	#7,dlg_type+1(a5)
+	bne	dialog_control_next
+	cmpi.w	#4,d0
+	bcs	dialog_control_next
+	cmpi.w	#7,d0
+	bhi	dialog_control_next
+	move.l	#-1,-(sp)
+	move.l	d5,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMCheck
+	lea	12(sp),sp
+	tst.w	d0
+	ble	dialog_control_next
+	move.w	d7,d0
+	bra	dialog_control_return
+dialog_control_hit_next:
+	addq.w	#1,d7
+	dbra	d6,dialog_control_hit
+	bra	dialog_control_next
+dialog_control_edit:
+	movea.l	dlg_ptr(a5),a0
+	cmp.w	dlg_edit(a5),d7		; don't reset selection on repeated clicks
+	beq	dialog_control_text
+	bsr	dialog_store_edit
+	move.w	d7,dlg_edit(a5)
+	clr.l	-(sp)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	DITSelect
+	lea	14(sp),sp
+dialog_control_text:
+	SXCALL	WMActive
+	move.l	a0,d0
+	cmp.l	dlg_ptr(a5),d0
+	bne	dialog_control_next
+	movea.l	dlg_ptr(a5),a0
+	move.l	DIALOG_TEDIT(a0),d0
+	beq	dialog_control_next
+	pea	event_rec(a5)
+	move.l	d0,-(sp)
+	SXCALL	TMEvent
+	addq.l	#8,sp
+	bra	dialog_control_next
+dialog_control_abort:
+	move.w	#1,dialog_end(a5)
+dialog_control_cancel:
+	moveq.l	#ITEM_CANCEL,d0
+dialog_control_return:
+	movem.l	(sp)+,d1-d7/a0-a4
+	rts
+
+* Commit Text Man's current buffer before switching fields or reading the rows.
+* DMControl normally performs this synchronization itself.
+dialog_store_edit:
+	movem.l	d0-d2/a0-a1,-(sp)
+	movea.l	dlg_ptr(a5),a0
+	move.w	dlg_edit(a5),d2
+	ble.s	dialog_store_done
+	move.l	#PATH_MAX,-(sp)
+	pea	dlg_text+1(a5)
+	move.l	DIALOG_TEDIT(a0),-(sp)
+	SXCALL	TMGetText
+	lea	12(sp),sp
+	tst.l	d0
+	bmi.s	dialog_store_done
+	move.b	d0,dlg_text(a5)
+	move.w	d2,d0
+	bsr	dlg_item
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITSet
+	lea	10(sp),sp
+dialog_store_done:
+	movem.l	(sp)+,d0-d2/a0-a1
+	rts
+
+* A single Filer path dropped on an active details row replaces that field and
+* selects File. The settings remain staged until both dialogs are accepted.
+dialog_drop:
+	tst.l	cfg_ptr(a5)
+	beq	dialog_drop_done
+	move.l	event_win(a5),d0
+	cmp.l	dlg_ptr(a5),d0
+	bne	dialog_drop_done
+	bsr	dialog_store_edit
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	GMSetGraph
+	addq.l	#4,sp
+	move.l	event_where(a5),-(sp)
+	SXCALL	GMGlobalToLocal
+	addq.l	#4,sp
+	move.l	d0,d5
+	moveq.l	#0,d3
+dialog_drop_row:
+	bsr	row_item
+	move.w	d4,d0
+	addq.w	#4,d0
+	bsr	dlg_item
+	move.l	d5,-(sp)
+	pea	dlg_rect(a5)
+	SXCALL	GMPtInRect
+	addq.l	#8,sp
+	tst.b	d0
+	bne	dialog_drop_take
+	addq.w	#1,d3
+	cmp.w	det_drives+DRV_COUNT(a5),d3
+	bcs	dialog_drop_row
+	bra	dialog_drop_done
+dialog_drop_take:
+	SXCALL	TSGetDrag
+	tst.l	d0
+	bne	dialog_drop_done
+	move.l	#PATH_MAX,-(sp)
+	pea	image_path(a5)
+	move.l	4(a0),-(sp)
+	SXCALL	TSCellToStr
+	lea	12(sp),sp
+	tst.l	d0
+	ble	dialog_drop_done
+	cmpi.l	#PATH_MAX,d0
+	bcc	dialog_drop_done
+	lea	dlg_text(a5),a0
+	move.b	d0,(a0)+
+	lea	image_path(a5),a1
+	subq.w	#1,d0
+dialog_drop_copy:
+	move.b	(a1)+,(a0)+
+	dbra	d0,dialog_drop_copy
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	move.w	dlg_type(a5),-(sp)
+	SXCALL	DITSet
+	lea	10(sp),sp
+	bsr	row_entry
+	clr.w	(a2)
+	bsr	det_show_kind
+	bsr	row_item
+	addq.w	#4,d4
+	move.w	d4,dlg_edit(a5)
+	move.l	#$7FFFFFFF,-(sp)
+	clr.l	-(sp)
+	move.w	d4,-(sp)
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	DITSelect
+	lea	14(sp),sp
+	move.l	dlg_ptr(a5),-(sp)
+	SXCALL	DMDraw
+	addq.l	#4,sp
+	move.w	#1,-(sp)
+	SXCALL	TSEndDrag
+	addq.l	#2,sp
+dialog_drop_done:
+	rts
+
+* -----------------------------------------------------------------------------
 * Helper: dialog_filter (dlgPtr, eventRec on the stack), which DMControl calls
 * with each event: the VM's requests are served and the window drawn meanwhile.
 * Returns 0, the event as it is. A5 is not this task's work area here: it is
@@ -1830,9 +2091,14 @@ dialog_filter_update:
 	addq.l	#4, sp
 	bra.s	dialog_filter_back
 dialog_filter_dialog:
-	* The dialog's own, which DMControl draws
+	* Never consume an update without painting the exposed items.
 	move.l	d0, -(sp)
 	SXCALL	WMUpdate		; $A20D
+	movea.l	(sp),a0
+	move.l	WINDOW_UPDATE(a0),-(sp)		; Window.update
+	move.l	a0,-(sp)
+	SXCALL	DIUpdate
+	addq.l	#8,sp
 	SXCALL	WMUpdtOver		; $A20E
 	addq.l	#4, sp
 dialog_filter_back:

@@ -229,6 +229,13 @@ windows work the same way as the primary VM.
   Untagged A2 values select shared mode, because older VMX68K.X versions left
   this register unspecified. Update both VMX68K.X and VMX68K.LB on existing
   disks with `cargo run --release -p msx68k-bus --example install_vmx68k -- <image.HDS>`.
+  Configuration and drive details use Task Man events, so the Filer and other
+  applications remain usable while they are open. Dropping a single file on a
+  visible assignment field selects ファイル and stages its path. Details' 設定
+  keeps these edits for the parent configuration; the parent's 設定 saves them.
+  Canceling either window discards its staged changes. Exposed dialog items are
+  repainted through `DIUpdate` before `WMUpdtOver`, including the parent exposed
+  when details closes.
   Reads and writes go through VMX68K.X's DOS calls; images stay open until restart or exit.
   Missing files leave empty units, and three or four floppy units connect all four drives.
   HDD files use the same handles through SCSI IOCS and the block driver, without a whole-image

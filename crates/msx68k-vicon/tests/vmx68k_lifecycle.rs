@@ -29,6 +29,7 @@ fn vmx68k_lifecycle() {
             "new-setup",
             ui::new_setup_keeps_the_running_vm_and_opens_its_own_configuration,
         ),
+        ("settings-drop", ui::settings_allow_filer_drops_and_restore_the_parent),
         (
             "raw-drop",
             ui::custom_fd_icons_accept_filer_drops_and_eject_without_reset,

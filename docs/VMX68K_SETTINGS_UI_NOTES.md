@@ -145,6 +145,16 @@ official SX-Window programming manuals.
   共有 or カスタム with 詳細... (4b), opening ドライブの詳細: 1 to 8 drives, each ファイル, 共有, or
   パススルー with a path or drive letter. 設定 saves the setup and asks whether to restart the VM
   now (`VmRestart` 11).
+  Configuration and details now run on `TSEventAvail`, with the current task's ID
+  on their window records and `W_DIALOG` cleared. Other applications remain
+  usable, including Filer activation, resizing and dragging files onto a visible
+  details assignment field. `CMCheck` tracks controls; `DITSelect`/`TMEvent` edit
+  fields, and the current Text Man buffer is committed before switching fields
+  or accepting details. Details stages changes for the parent; only accepting
+  the parent writes the setup. Closing details selects the parent again.
+  Update handling uses `DIUpdate` with `Window.update` before `WMUpdtOver`.
+  Previously the filter acknowledged updates without repainting, so exposed
+  parent items remained missing; nesting itself did not restore those pixels.
 - **The VM** starts with the setup's CPU (68030 from `IPLROM30.DAT`), RAM, speed, and SRAM, in
   shared mode: its drives are the primary's, under the same letters, and its own floppy drives
   get no letters. Custom mode now passes a drive table to `VmOpen`/`VmRestart` in `A2.L`

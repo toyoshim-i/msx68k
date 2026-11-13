@@ -541,6 +541,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     // カスタム drives: 詳細... gives three, an image file, a shared drive, and a passthrough one.
     click(&mut vm, (340, 288), 1, 500_000);
     click(&mut vm, (439, 289), 1, 1_500_000);
+    wait_ui(&mut vm, |vm| text_index(vm, (500, 194)) == 11, "details fields drawn");
     screenshot(&vm, "dialog_drives");
     click(&mut vm, (275, 156), 1, 500_000);
     click(&mut vm, (275, 156), 1, 500_000);
@@ -1009,4 +1010,85 @@ fn wait_ui(vm: &mut X68kVm, ready: impl Fn(&X68kVm) -> bool, label: &str) {
         vm.run_steps(50_000);
     }
     assert!(ready(vm), "UI condition timed out: {label}");
+}
+
+pub fn settings_allow_filer_drops_and_restore_the_parent() {
+    let Some(mut vm) = boot() else { return };
+    vm.bus.request_screen_resolution(1024, 768);
+    vm.run_steps(2_000_000);
+    click(&mut vm, DRIVE_ICON, 2, 750_000);
+    click(&mut vm, (264, 255), 2, 2_000_000);
+    assert!(matches!(
+        case_events(&mut vm).as_slice(),
+        [VmEvent::Opened { .. }]
+    ));
+    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.run_steps(200_000);
+    vm.bus.scc.set_mouse_buttons(false, true);
+    vm.run_steps(250_000);
+    vm.bus.set_host_mouse_position(Some((90, 70)));
+    vm.run_steps(250_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(1_500_000);
+    click(&mut vm, (340, 288), 1, 500_000);
+    let parent = |vm: &X68kVm| -> Vec<u8> {
+        (195..325)
+            .flat_map(|y| (275..505).map(move |x| text_index(vm, (x, y))))
+            .collect()
+    };
+    let expected = parent(&vm);
+    click(&mut vm, (439, 289), 1, 1_500_000);
+    let details = vm.bus.active_window().unwrap();
+    wait_ui(
+        &mut vm,
+        |vm| text_index(vm, (500, 194)) == 11,
+        "details fields drawn",
+    );
+    // Activate and resize another application's window while details stays open.
+    click(&mut vm, DRIVE_ICON, 2, 750_000);
+    assert_ne!(
+        vm.bus.active_window(),
+        Some(details),
+        "the Filer must be usable"
+    );
+    vm.bus.set_host_mouse_position(Some((425, 297)));
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(200_000);
+    for y in (307..=427).step_by(10) {
+        vm.bus.set_host_mouse_position(Some((425, y)));
+        vm.run_steps(100_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(300_000);
+    let source = (104, 335);
+    click(&mut vm, source, 1, 250_000);
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(300_000);
+    for i in 1..=24 {
+        vm.bus.set_host_mouse_position(Some((
+            source.0 + (500 - source.0) * i / 24,
+            source.1 + (202 - source.1) * i / 24,
+        )));
+        vm.run_steps(150_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(1_500_000);
+    screenshot(&vm, "settings_drop");
+    click(&mut vm, (529, 374), 1, 1_000_000);
+    wait_ui(
+        &mut vm,
+        |vm| parent(vm) == expected,
+        "settings redrawn after details closes",
+    );
+    assert_eq!(
+        saved_drives(&vm, "DEFAULT").map(|(custom, _)| custom),
+        Some(false)
+    );
+    click(&mut vm, (424, 317), 1, 1_000_000);
+    assert_eq!(
+        saved_drives(&vm, "DEFAULT"),
+        Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))
+    );
+    // Keep the running VM; the next lifecycle scenario must still see normal cleanup.
+    click(&mut vm, (680, 198), 1, 1_000_000);
 }
