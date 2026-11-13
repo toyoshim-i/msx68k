@@ -1,4 +1,4 @@
-//! Frame-stable register/palette history, latched at scanline boundaries.
+//! Frame-stable register/palette history, sampled at separate fetch and display stages.
 use crate::{Crtc, Vicon};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -9,19 +9,6 @@ pub struct RasterRegisters {
     pub priority: u16,
     pub display: u16,
     pub contrast: u8,
-}
-
-impl RasterRegisters {
-    fn capture(crtc: &Crtc, vicon: &Vicon, contrast: u8) -> Self {
-        Self {
-            text_scroll: (crtc.text_scroll_x(), crtc.text_scroll_y()),
-            graphic_scroll: std::array::from_fn(|p| crtc.graphic_scroll(p)),
-            mode: vicon.r0_mode(),
-            priority: vicon.r1_priority(),
-            display: vicon.r2_display(),
-            contrast: contrast & 15,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +38,8 @@ pub(crate) struct RasterCapture {
     current: Option<RasterFrame>,
     completed: Option<RasterFrame>,
     palette_revision: u64,
+    text_scroll: (u16, u16),
+    graphic_scroll: [(u16, u16); 4],
 }
 
 impl RasterCapture {
@@ -58,7 +47,7 @@ impl RasterCapture {
         self.completed.as_ref()
     }
 
-    pub fn boundary(&mut self, crtc: &Crtc, vicon: &Vicon, contrast: u8, rose: bool, fell: bool) {
+    pub fn boundary(&mut self, crtc: &Crtc, rose: bool, fell: bool) {
         if fell {
             self.completed = self.current.take();
         }
@@ -71,6 +60,12 @@ impl RasterCapture {
                 vertical_timing: [crtc.regs[4], crtc.regs[6], crtc.regs[7]],
             });
         }
+        // Fetch/address state progresses even when the final output is disabled.
+        self.text_scroll = (crtc.text_scroll_x(), crtc.text_scroll_y());
+        self.graphic_scroll = std::array::from_fn(|p| crtc.graphic_scroll(p));
+    }
+
+    pub fn display(&mut self, crtc: &Crtc, vicon: &Vicon, contrast: u8) {
         if !crtc.sync_state().v_disp {
             return;
         }
@@ -113,7 +108,14 @@ impl RasterCapture {
             );
             return;
         }
-        let registers = RasterRegisters::capture(crtc, vicon, contrast);
+        let registers = RasterRegisters {
+            text_scroll: self.text_scroll,
+            graphic_scroll: self.graphic_scroll,
+            mode: vicon.r0_mode(),
+            priority: vicon.r1_priority(),
+            display: vicon.r2_display(),
+            contrast: contrast & 15,
+        };
         if frame.lines.last().is_some_and(|line| {
             line.state.registers == registers && self.palette_revision == vicon.palette_revision()
         }) {

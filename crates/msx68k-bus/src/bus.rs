@@ -615,7 +615,9 @@ impl X68kBus {
     pub fn advance_peripherals(&mut self, mut cycles_10mhz: u32) {
         while cycles_10mhz != 0 {
             let until_sync = self.crtc.cycles_to_next_sync();
-            let step = cycles_10mhz.min(until_sync);
+            let step = cycles_10mhz
+                .min(until_sync)
+                .min(self.crtc.cycles_to_next_display());
             let previous_raster = self.crtc.current_raster();
             let sync = self.crtc.advance(
                 step,
@@ -626,11 +628,12 @@ impl X68kBus {
             if self.crtc.current_raster() != previous_raster {
                 self.raster.boundary(
                     &self.crtc,
-                    &self.vicon,
-                    self.sysport.contrast,
                     sync.v_disp_rose,
                     sync.v_disp_fell,
                 );
+            }
+            if self.crtc.at_display_start() {
+                self.raster.display(&self.crtc, &self.vicon, self.sysport.contrast);
             }
             if sync.v_disp_fell {
                 self.fdc.refresh_remote_media(&mut self.ioi);

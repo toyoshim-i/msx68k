@@ -41,7 +41,7 @@ fn line_doubled_output_maps_two_rasters_to_one_output_row() {
     let mut vm = fixture();
     vm.bus.crtc.regs[7] = 512;
     vm.bus.crtc.regs[20] = 0x0410; // 512 physical rasters, 256 output rows.
-    vm.bus.advance_peripherals(64 * LINE);
+    vm.bus.advance_peripherals(64 * LINE + 66);
     vm.bus.write_u16(0xe82202, 0xf800, true).unwrap();
     vm.bus.advance_peripherals((513 - 64) * LINE);
     let frame = vm.bus.raster_frame().unwrap();
@@ -82,7 +82,7 @@ fn geometry_changes_discard_partial_history_until_a_full_frame() {
 fn display_off_skips_state_until_reenabled() {
     let mut vm = fixture();
     vm.bus.write_u16(0xe82600, 0, true).unwrap();
-    vm.bus.advance_peripherals(LINE);
+    vm.bus.advance_peripherals(LINE + 66);
     for y in 1..64 {
         vm.bus.write_u16(0xe82202, y, true).unwrap();
         vm.bus.write_u16(0xe80014, y, true).unwrap();
@@ -114,4 +114,23 @@ fn changing_vertical_origin_also_invalidates_the_row_map() {
     let frame = vm.bus.raster_frame().unwrap();
     assert_eq!(frame.lines[0].y, 0);
     assert_eq!(frame.height, 128);
+}
+
+#[test]
+fn address_fetch_and_color_conversion_have_independent_boundaries() {
+    let mut vm = fixture();
+    vm.bus.advance_peripherals(LINE); // Row zero address fetch.
+    vm.bus.write_u16(0xe80014, 7, true).unwrap();
+    vm.bus.advance_peripherals(65); // One cycle before horizontal display.
+    vm.bus.write_u16(0xe82202, 0xf800, true).unwrap();
+    vm.bus.advance_peripherals(1); // Row zero color conversion.
+    vm.bus.write_u16(0xe82202, 0x003e, true).unwrap();
+    vm.bus.advance_peripherals(128 * LINE);
+    let frame = vm.bus.raster_frame().unwrap();
+    assert_eq!(frame.lines[0].y, 0);
+    assert_eq!(frame.lines[0].state.registers.text_scroll.0, 0);
+    assert_eq!(frame.lines[0].state.palettes[1], 0xf800);
+    assert_eq!(frame.lines[1].y, 1);
+    assert_eq!(frame.lines[1].state.registers.text_scroll.0, 7);
+    assert_eq!(frame.lines[1].state.palettes[1], 0x003e);
 }

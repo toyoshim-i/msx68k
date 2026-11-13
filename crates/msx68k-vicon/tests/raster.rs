@@ -12,8 +12,8 @@ fn write(vm: &mut X68kVm, addr: u32, value: u16) {
     vm.bus.write_u16(addr, value, true).unwrap();
 }
 fn setup(vm: &mut X68kVm) {
-    vm.bus.crtc.regs[2] = 0;
-    vm.bus.crtc.regs[3] = 32;
+    vm.bus.crtc.regs[2] = 28;
+    vm.bus.crtc.regs[3] = 60;
     vm.bus.crtc.regs[6] = 0;
     vm.bus.crtc.regs[7] = 128;
     vm.bus.crtc.regs[20] = 0x0316;
@@ -58,7 +58,7 @@ fn verify(vm: &mut X68kVm, points: &[(u32, u32, [u8; 3])]) {
 #[test]
 fn palette_split_keeps_the_completed_frame_during_vblank() {
     let mut vm = fixture();
-    vm.bus.advance_peripherals(64 * LINE); // Beginning of visible row 63.
+    vm.bus.advance_peripherals(64 * LINE + 66); // After visible row 63 was sampled.
     write(&mut vm, 0xe82002, 0xf800);
     // Two writes in one scanline are coalesced; only the final palette is latched.
     write(&mut vm, 0xe82002, 0x003e);
@@ -82,7 +82,7 @@ fn palette_split_keeps_the_completed_frame_during_vblank() {
 #[test]
 fn scroll_display_and_contrast_are_latched_per_row() {
     let mut vm = fixture();
-    vm.bus.advance_peripherals(32 * LINE);
+    vm.bus.advance_peripherals(32 * LINE + 66);
     write(&mut vm, 0xe80018, 1); // Page 0 X scroll, visible starting row 32.
     vm.bus.advance_peripherals(32 * LINE);
     write(&mut vm, 0xe82600, 0);
@@ -145,11 +145,11 @@ fn a_68000_raster_interrupt_changes_the_lower_half_palette() {
             .iter()
             .map(|line| line.y)
             .collect::<Vec<_>>(),
-        [0, 65]
+        [0, 64]
     );
     verify(
         &mut vm,
-        &[(0, 0, RED), (0, 64, RED), (0, 65, GREEN), (0, 127, GREEN)],
+        &[(0, 0, RED), (0, 63, RED), (0, 64, GREEN), (0, 127, GREEN)],
     );
 }
 
@@ -161,7 +161,7 @@ fn text_palette_scroll_and_graphics_priority_change_mid_frame() {
     }
     write(&mut vm, 0xe82202, 0xf800);
     write(&mut vm, 0xe82600, 0x21);
-    vm.bus.advance_peripherals(32 * LINE);
+    vm.bus.advance_peripherals(32 * LINE + 66);
     write(&mut vm, 0xe82202, 0x003e);
     vm.bus.advance_peripherals(32 * LINE);
     write(&mut vm, 0xe82500, 0x10e4); // Graphics ahead of text.

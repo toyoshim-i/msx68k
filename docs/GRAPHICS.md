@@ -10,8 +10,8 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
 1. Implemented basic GVRAM access and display: 512-dot 16/256/65536-color modes, 1024-dot
    16-color mode, page assignment, independent scrolling and text priority.
 2. Implemented scanline approximation and next refinement: mid-frame scroll, palette and display-control changes. The
-   current implementation samples at line boundaries. Before adding BG, validate
-   graphics fetch points and attribute-specific latency. Mid-frame VRAM writes
+   current implementation separates line-start address fetch from horizontal
+   display sampling. Before adding BG, validate mode-specific fetch timing. Mid-frame VRAM writes
    need a separate history.
 3. BG, PCG and sprites: extend GPU composition and model display limits, fetch
    stages and line buffers.
@@ -60,11 +60,17 @@ zero remain future work.
 
 ## Completed-frame scanline state
 
-At each line boundary, the current implementation samples text and graphics
-scroll, VICON mode/priority/display control, contrast and both palettes. A write
-during a line affects the following line; repeated writes within a line use the
-last value. This is an approximation, not a verified hardware latch rule. The
-CRTC still uses approximate 317/625-cycle line periods.
+Text and graphics scroll are fetched at each line boundary. VICON mode,
+priority, display control, contrast and both palettes are sampled at horizontal
+display start. Writes after address fetch cannot move that row, while palette
+and control writes during the back porch can still affect it. CPU register
+readback remains immediate. Repeated writes before a sample use the last value.
+
+Horizontal display start uses `(R2 + 1) / (R0 + 1)` of the approximate
+317/625-cycle line period. Peripheral advancement stops at this edge as well as
+sync and line edges. These are separate sampling stages, not a claim of exact
+hardware fetch latency. CPU writes retain instruction-level timing; bus-cycle
+write timestamps and per-pixel changes are not represented.
 
 Capture runs from active-display start to active-display end. Entering vertical
 blank publishes the completed history, so subsequent register and palette writes
@@ -73,8 +79,8 @@ share a state. Reset discards history, and incompatible geometry changes discard
 the partial capture. Doubled scanlines map physical rasters to output rows.
 
 When all display planes are off, capture records only the transition to blank
-and skips other register and palette snapshots. Re-enabling display samples the
-latest state. A fully blank frame needs no palette upload.
+and skips output register and palette snapshots. Address fetch continues while
+blanked. Re-enabling display uses the fetched scroll and latest display controls. A fully blank frame needs no palette upload.
 
 The GPU receives a row-to-state index and register/palette records at changes.
 Static frames retain the fixed-size palette upload path, while VM screens keep
@@ -88,6 +94,19 @@ in one update must not lose its interrupt.
 VRAM itself is still read at render time. Register history alone cannot reproduce
 mid-frame VRAM writes or the exact relationship between fast clear and pixels
 that were already displayed.
+
+## Next implementation steps
+
+1. Validate address-fetch and display-sampling positions for each screen mode,
+   including doubled lines and writes on either side of each edge. Keep the
+   current timing approximation explicit until measured timing is available.
+2. Add BG/PCG address generation and palette-code line buffers, followed by
+   sprite selection and composition. Define each stage's fetch point and output
+   row independently; output disable must not freeze internal buffers.
+3. Add VRAM/PCG write history where rendering from final memory would lose
+   already fetched data. Keep CPU bus waits independent of pipeline latency.
+4. Extend final composition with special priority and half transparency, then
+   complete interlace and mode-specific boundary behavior.
 
 ## Fetch timing refinement
 

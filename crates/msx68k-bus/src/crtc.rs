@@ -464,6 +464,27 @@ impl Crtc {
         }
     }
 
+    /// Horizontal display begins after the sync and back-porch character periods.
+    /// The line period is still approximated in the 10 MHz peripheral clock.
+    fn display_start_cycle(&self) -> u32 {
+        let total = (self.regs[0] & 0xfff) as u32 + 1;
+        let start = (self.regs[2] & 0xfff) as u32 + 1;
+        (self.scanline_cycles() * start / total).clamp(1, self.scanline_cycles() - 1)
+    }
+
+    pub(crate) fn cycles_to_next_display(&self) -> u32 {
+        let start = self.display_start_cycle();
+        if self.cycle_in_raster < start {
+            start - self.cycle_in_raster
+        } else {
+            self.cycles_to_next_line()
+        }
+    }
+
+    pub(crate) fn at_display_start(&self) -> bool {
+        self.cycle_in_raster == self.display_start_cycle()
+    }
+
     fn scanline_cycles(&self) -> u32 {
         if self.regs[20] & 0x10 != 0 {
             317
