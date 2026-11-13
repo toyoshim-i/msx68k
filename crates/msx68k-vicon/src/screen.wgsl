@@ -10,5 +10,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (x >= params.width || y >= params.height) {
         return;
     }
-    textureStore(output, vec2<u32>(x, y), unpack4x8unorm(composite(x, y)));
+    let offset = raster_offset(y);
+    let state = raster_params(offset);
+    textureStore(output, vec2<u32>(x, y), unpack4x8unorm(composite(x, y, state, raster_palette_base(offset))));
 }

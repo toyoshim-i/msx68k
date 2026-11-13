@@ -165,7 +165,9 @@ carries them out, and returns the results. It takes no turns while there is noth
 All composition runs in GPU shaders, once per frame. Effects that change registers within a frame,
 such as raster scrolling and raster palettes, reach the shader as a table of each scanline's
 state (CRTC scroll, palette, priority), recorded as the scanlines are processed. VMs shown in
-windows work the same way as the primary VM.
+windows work the same way as the primary VM. The implemented line-boundary approximation,
+blank-display fast path and remaining timing work are described in [GRAPHICS](GRAPHICS.md).
+Sprite/BG fetch delays will use their own timing rules rather than inheriting this approximation.
 
 - **Each VM thread composites its own screen.** VMs share the GPU device and queue, which `wgpu`
   allows across threads. Each VM has its own VRAM, palette, and scanline state buffers, its own
@@ -296,7 +298,8 @@ floppy boot itself already works (`crates/msx68k-bus/tests/fd_boot.rs`).
 - `VmScreen` (`crates/msx68k-vicon/src/vm_screen.rs`) composites a VM's screen on its thread
   through a `VmThread` vertical blank hook, called after each frame of guest time in which the
   VM entered a vertical blank. It uploads the written pages, the palette, and the display
-  registers, and dispatches into one of two 1024×1024 textures; `VmScreenOutput` gives the main
+  registers plus the completed frame's compressed register/palette history, and dispatches into
+  one of two 1024×1024 textures; `VmScreenOutput` gives the main
   thread the latest completed one. At Human68k's `A>` prompt a frame uploads about 2 KB, and
   10 KB when the cursor blinks (`crates/msx68k-vicon/tests/vm_screen.rs`).
 - VMX68K.X opens `A:\VMX68K\DRIVE0.XDF` for reading and writing when it starts and passes its size

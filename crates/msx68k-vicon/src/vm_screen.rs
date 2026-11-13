@@ -152,7 +152,7 @@ impl VmScreen {
         );
         let tvram_buf = buffer("vm_screen_tvram", TVRAM_BYTES as u64, wgpu::BufferUsages::STORAGE);
         let gvram_buf = buffer("vm_screen_gvram", GVRAM_BYTES as u64, wgpu::BufferUsages::STORAGE);
-        let palette_buf = buffer("vm_screen_palettes", 512 * 4, wgpu::BufferUsages::STORAGE);
+        let palette_buf = buffer("vm_screen_palettes", crate::raster::VIDEO_BYTES, wgpu::BufferUsages::STORAGE);
 
         let textures = [0, 1].map(|_| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -289,18 +289,14 @@ impl VmScreen {
         let mut uniforms = ViconUniforms::from_bus(bus);
         uniforms.width = uniforms.width.min(VM_SCREEN_MAX);
         uniforms.height = uniforms.height.min(VM_SCREEN_MAX);
-        let mut palettes = [0u32; 512];
-        for (slot, &c) in palettes.iter_mut().zip(bus.vicon.text_palette()) {
-            *slot = c as u32;
-        }
-        for (slot, &c) in palettes[256..].iter_mut().zip(bus.vicon.graphic_palette()) {
-            *slot = c as u32;
-        }
+        let palettes = crate::raster::video_input(bus, &mut uniforms);
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-        self.queue
-            .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
-        let mut uploaded = std::mem::size_of_val(&uniforms) + std::mem::size_of_val(&palettes);
+        if !palettes.is_empty() {
+            self.queue
+                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
+        }
+        let mut uploaded = std::mem::size_of_val(&uniforms) + palettes.len() * 4;
 
         for (memory, buf, ranges) in [
             (bus.tvram(), &self.tvram_buf, written.tvram_ranges()),

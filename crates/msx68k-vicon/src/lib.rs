@@ -13,6 +13,7 @@
 use bytemuck::{Pod, Zeroable};
 use msx68k_bus::{X68kBus, GVRAM_BYTES, TVRAM_BYTES, TVRAM_PLANE_BYTES};
 
+mod raster;
 mod vm_screen;
 pub use vm_screen::{
     read_back_texture, CompletedFrame, ScreenRect, VmLayer, VmScreen, VmScreenOutput, VM_SCREEN_MAX,
@@ -43,6 +44,7 @@ pub struct ViconUniforms {
     pub contrast: u32,
     pub tvram_row_bytes: u32,
     pub tvram_plane_bytes: u32,
+    /// Raster row-map height (zero for a uniform frame), then padding.
     pub reserved: [u32; 2],
 }
 
@@ -189,7 +191,7 @@ impl ViconGpuCompositor {
 
         let palette_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vicon_palette_buf"),
-            size: (512 * std::mem::size_of::<u32>()) as u64,
+            size: raster::VIDEO_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -448,7 +450,8 @@ impl ViconGpuCompositor {
     }
 
     fn upload_bus_buffers(&mut self, bus: &X68kBus) -> ViconUniforms {
-        let uniforms = ViconUniforms::from_bus(bus);
+        let mut uniforms = ViconUniforms::from_bus(bus);
+        let palettes = raster::video_input(bus, &mut uniforms);
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
@@ -462,15 +465,10 @@ impl ViconGpuCompositor {
             self.queue.write_buffer(&self.gvram_buf, 0, gvram);
         }
 
-        let mut palettes = [0u32; 512];
-        for (i, &c) in bus.vicon.text_palette().iter().enumerate() {
-            palettes[i] = c as u32;
+        if !palettes.is_empty() {
+            self.queue
+                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
         }
-        for (i, &c) in bus.vicon.graphic_palette().iter().enumerate() {
-            palettes[256 + i] = c as u32;
-        }
-        self.queue
-            .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
 
         uniforms
     }
@@ -558,7 +556,8 @@ impl ViconGpuCompositor {
     /// Uploads the current `X68kBus` video state (TVRAM, GVRAM, Palettes, CRTC/VICON registers)
     /// to the GPU, executes the WGSL compositor shader, and reads back the rendered `RGBA8` frame.
     pub fn render_bus_frame(&mut self, bus: &X68kBus) -> RenderedFrame {
-        let uniforms = ViconUniforms::from_bus(bus);
+        let mut uniforms = ViconUniforms::from_bus(bus);
+        let palettes = raster::video_input(bus, &mut uniforms);
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
@@ -578,15 +577,10 @@ impl ViconGpuCompositor {
             self.queue.write_buffer(&self.gvram_buf, 0, &zero);
         }
 
-        let mut palettes = [0u32; 512];
-        for (i, &c) in bus.vicon.text_palette().iter().enumerate() {
-            palettes[i] = c as u32;
+        if !palettes.is_empty() {
+            self.queue
+                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
         }
-        for (i, &c) in bus.vicon.graphic_palette().iter().enumerate() {
-            palettes[256 + i] = c as u32;
-        }
-        self.queue
-            .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
 
         let byte_len = (uniforms.width * uniforms.height * 4) as u64;
         let mut encoder = self
@@ -751,39 +745,49 @@ fn sample_graphics_cpu(
 
 /// CPU reference compositor for the shared VICON shader.
 pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
-    let params = ViconUniforms::from_bus(bus);
+    let mut params = ViconUniforms::from_bus(bus);
+    let frame = raster::completed_frame(bus, &params);
+    let mut next_line = 0;
     let width = params.width;
     let height = params.height;
     let mut rgba8 = vec![0u8; (width * height * 4) as usize];
-
-    let text_enabled = (params.r2_display & 0x0020) != 0;
-    let contrast = params.contrast;
-    let tx_rank = (params.r1_priority >> 10) & 3;
-    let sp_rank = (params.r1_priority >> 12) & 3;
-    let gr_rank = (params.r1_priority >> 8) & 3;
-    let text_above_gr = gr_rank == 2 || (gr_rank == 1 && tx_rank <= sp_rank);
 
     let tvram = bus.active_tvram().map(|tv| with_cursor_overlay(bus, tv));
     let tvram = tvram.as_deref();
     let row_bytes = params.tvram_row_bytes as usize;
     let plane_bytes = params.tvram_plane_bytes as usize;
     let gvram = bus.gvram();
-    let tx_pal = bus.vicon.text_palette();
-    let gr_pal = bus.vicon.graphic_palette();
-
-    let grbi_to_rgba = |grbi: u16| -> [u8; 4] {
-        let i_bit = (grbi & 1) as u32;
-        let g6 = ((((grbi >> 11) & 0x1F) as u32) << 1) | i_bit;
-        let r6 = ((((grbi >> 6) & 0x1F) as u32) << 1) | i_bit;
-        let b6 = ((((grbi >> 1) & 0x1F) as u32) << 1) | i_bit;
-
-        let r8 = (((r6 << 2) | (r6 >> 4)) * contrast / 15) as u8;
-        let g8 = (((g6 << 2) | (g6 >> 4)) * contrast / 15) as u8;
-        let b8 = (((b6 << 2) | (b6 >> 4)) * contrast / 15) as u8;
-        [r8, g8, b8, 0xFF]
-    };
+    let mut tx_pal = bus.vicon.text_palette();
+    let mut gr_pal = bus.vicon.graphic_palette();
 
     for y in 0..height {
+        if let Some(frame) = frame {
+            while let Some(line) = frame.lines.get(next_line).filter(|line| line.y <= y) {
+                params.apply_raster(&line.state);
+                tx_pal = line.state.palettes[..256].try_into().unwrap();
+                gr_pal = line.state.palettes[256..].try_into().unwrap();
+                next_line += 1;
+            }
+        }
+        let text_enabled = (params.r2_display & 0x0020) != 0;
+        let contrast = params.contrast;
+        let tx_rank = (params.r1_priority >> 10) & 3;
+        let sp_rank = (params.r1_priority >> 12) & 3;
+        let gr_rank = (params.r1_priority >> 8) & 3;
+        let text_above_gr = gr_rank == 2 || (gr_rank == 1 && tx_rank <= sp_rank);
+
+        let grbi_to_rgba = |grbi: u16| -> [u8; 4] {
+            let i_bit = (grbi & 1) as u32;
+            let g6 = ((((grbi >> 11) & 0x1F) as u32) << 1) | i_bit;
+            let r6 = ((((grbi >> 6) & 0x1F) as u32) << 1) | i_bit;
+            let b6 = ((((grbi >> 1) & 0x1F) as u32) << 1) | i_bit;
+
+            let r8 = (((r6 << 2) | (r6 >> 4)) * contrast / 15) as u8;
+            let g8 = (((g6 << 2) | (g6 >> 4)) * contrast / 15) as u8;
+            let b8 = (((b6 << 2) | (b6 >> 4)) * contrast / 15) as u8;
+            [r8, g8, b8, 0xFF]
+        };
+
         for x in 0..width {
             let mut tx_idx = 0usize;
             if text_enabled {

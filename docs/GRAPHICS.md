@@ -5,15 +5,17 @@ one shared WGSL implementation for the primary VM and VMX screens. The CPU
 compositor is a validation reference. See [VMX68K](VMX68K.md) for screen ownership
 and threading, and [TESTING](TESTING.md) for the test workflow.
 
-## Current scope and implementation plan
+## Current capabilities and remaining work
 
-Basic GVRAM access and display support 512-dot 16/256/65536-color modes,
-1024-dot 16-color mode, page assignment, independent scrolling and text priority.
-Composition currently uses the frame-final VRAM and register state.
-
-The next stages are scanline register/palette state, BG/PCG/sprite rendering,
-and special priority, half transparency and precise timing. Mid-frame VRAM writes
-need their own history; register history alone is insufficient.
+1. Implemented basic GVRAM access and display: 512-dot 16/256/65536-color modes, 1024-dot
+   16-color mode, page assignment, independent scrolling and text priority.
+2. Implemented scanline approximation and next refinement: mid-frame scroll, palette and display-control changes. The
+   current implementation samples at line boundaries. Before adding BG, validate
+   graphics fetch points and attribute-specific latency. Mid-frame VRAM writes
+   need a separate history.
+3. BG, PCG and sprites: extend GPU composition and model display limits, fetch
+   stages and line buffers.
+4. Special priority, half transparency, interlace and precise boundary timing.
 
 ## Physical GVRAM and CPU views
 
@@ -56,16 +58,65 @@ compositor implements basic text/graphics ordering and color-zero transparency.
 Exact zero-priority interactions involving the disabled sprite layer's palette
 zero remain future work.
 
+## Completed-frame scanline state
+
+At each line boundary, the current implementation samples text and graphics
+scroll, VICON mode/priority/display control, contrast and both palettes. A write
+during a line affects the following line; repeated writes within a line use the
+last value. This is an approximation, not a verified hardware latch rule. The
+CRTC still uses approximate 317/625-cycle line periods.
+
+Capture runs from active-display start to active-display end. Entering vertical
+blank publishes the completed history, so subsequent register and palette writes
+do not recolor the completed frame. Unchanged lines and redundant palette writes
+share a state. Reset discards history, and incompatible geometry changes discard
+the partial capture. Doubled scanlines map physical rasters to output rows.
+
+When all display planes are off, capture records only the transition to blank
+and skips other register and palette snapshots. Re-enabling display samples the
+latest state. A fully blank frame needs no palette upload.
+
+The GPU receives a row-to-state index and register/palette records at changes.
+Static frames retain the fixed-size palette upload path, while VM screens keep
+physical dirty-page VRAM uploads. Native extended TVRAM does not use hardware
+scanout timing and retains its existing composition path.
+
+Peripheral advancement visits horizontal-sync edges, line boundaries and vertical
+display transitions even in a large time batch. Passing over the raster-IRQ line
+in one update must not lose its interrupt.
+
+VRAM itself is still read at render time. Register history alone cannot reproduce
+mid-frame VRAM writes or the exact relationship between fast clear and pixels
+that were already displayed.
+
+## Fetch timing refinement
+
+The line-boundary rule is a text/graphics approximation. BG and sprite attributes
+need their own fetch stages and buffering rules. Do not apply one unverified
+next-line rule to every attribute.
+
+Keep the CPU write position separate from display timing. A future timestamped
+change history should feed attribute-specific latches and delays before producing
+output state. Current row snapshots describe display state, not complete write
+timing. Keep CPU history independent of GPU representation: small row values can
+use fixed-size records, and large palettes or PCG data can be shared by reference.
+Shader access must remain bounded rather than searching a change log per pixel;
+measure the cost of indirect references.
+
 ## Validation and remaining scope
 
 ROM-free tests cover byte/word/long accesses, cross-mode views, quadrant mapping,
 physical dirty pages and 68000 MMIO instructions. Pixel fixtures assert expected
-colors before comparing the CPU reference and both GPU output paths.
+colors before comparing the CPU reference and both GPU output paths. A raster
+IRQ handler exercises split-screen palette changes, including boundary rows,
+vertical blank and the next frame. These are regression tests of the current
+approximation, not evidence of exact hardware latency.
 
-Raster effects, precise interlace, BG/sprite rendering and special effects remain
-outside the current scope.
+Validate writes immediately before and after each hardware-backed fetch point,
+checking which output row changes. VRAM write history, precise interlace,
+BG/sprite rendering and special effects remain outside the current scope.
 
 ```sh
-cargo test -p msx68k-bus --test gvram --test vram_pages -- --test-threads=1
-cargo test -p msx68k-vicon --test graphics_modes -- --test-threads=1
+cargo test -p msx68k-bus --test gvram --test vram_pages --test raster -- --test-threads=1
+cargo test --release -p msx68k-vicon --test graphics_modes --test raster -- --test-threads=1
 ```

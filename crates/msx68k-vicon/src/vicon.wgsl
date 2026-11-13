@@ -62,14 +62,40 @@ fn grbi_to_packed_rgba8(grbi: u32, contrast: u32) -> u32 {
     return (r8 & 0xFFu) | ((g8 & 0xFFu) << 8u) | ((b8 & 0xFFu) << 16u) | 0xFF000000u;
 }
 
-fn sample_tvram_index(x: u32, y: u32) -> u32 {
-    let row_bytes = params.tvram_row_bytes;
-    let plane_bytes = params.tvram_plane_bytes;
+// A row maps to a packed uniform record followed by its 512 palette words.
+fn raster_offset(y: u32) -> u32 {
+    if (params.reserved.x == 0u) { return 0u; }
+    return palettes[512u + min(y, params.reserved.x - 1u)];
+}
+
+fn raster_params(offset: u32) -> ViconUniforms {
+    var state = params;
+    if (offset == 0u) { return state; }
+    state.text_scroll_x = palettes[offset + 2u];
+    state.text_scroll_y = palettes[offset + 3u];
+    for (var p = 0u; p < 4u; p++) {
+        state.gr_scroll_x[p] = palettes[offset + 4u + p];
+        state.gr_scroll_y[p] = palettes[offset + 8u + p];
+    }
+    state.r0_mode = palettes[offset + 12u];
+    state.r1_priority = palettes[offset + 13u];
+    state.r2_display = palettes[offset + 14u];
+    state.contrast = palettes[offset + 15u];
+    return state;
+}
+
+fn raster_palette_base(offset: u32) -> u32 {
+    return select(offset + 20u, 0u, offset == 0u);
+}
+
+fn sample_tvram_index(x: u32, y: u32, state: ViconUniforms) -> u32 {
+    let row_bytes = state.tvram_row_bytes;
+    let plane_bytes = state.tvram_plane_bytes;
     var tx = x;
     var ty = y;
     if (row_bytes == 128u && plane_bytes == 0x20000u) {
-        tx = (x + params.text_scroll_x) & 1023u;
-        ty = (y + params.text_scroll_y) & 1023u;
+        tx = (x + state.text_scroll_x) & 1023u;
+        ty = (y + state.text_scroll_y) & 1023u;
     }
     let in_plane_byte = (ty * row_bytes) + (tx >> 3u);
     let bit_pos = 7u - (tx & 7u);
@@ -82,36 +108,36 @@ fn sample_tvram_index(x: u32, y: u32) -> u32 {
     return b0 | (b1 << 1u) | (b2 << 2u) | (b3 << 3u);
 }
 
-fn graphics_nibble(slot: u32, x: u32, y: u32, scroll: bool) -> u32 {
-    let page = (params.r1_priority >> (slot * 2u)) & 3u;
+fn graphics_nibble(slot: u32, x: u32, y: u32, scroll: bool, state: ViconUniforms) -> u32 {
+    let page = (state.r1_priority >> (slot * 2u)) & 3u;
     var gx = x;
     var gy = y;
     if (scroll) {
-        gx += params.gr_scroll_x[page];
-        gy += params.gr_scroll_y[page];
+        gx += state.gr_scroll_x[page];
+        gy += state.gr_scroll_y[page];
     }
     let word = read_gvram_u16_be((((gy & 511u) * 512u) + (gx & 511u)) * 2u);
     return (word >> (page * 4u)) & 15u;
 }
 
-fn graphics_color(x: u32, y: u32) -> u32 {
-    let mode = params.r0_mode & 7u;
+fn graphics_color(x: u32, y: u32, state: ViconUniforms, palette_base: u32) -> u32 {
+    let mode = state.r0_mode & 7u;
     var index = 0u;
-    if (mode < 4u && (params.r2_display & 15u) == 0u) { return 0u; }
+    if (mode < 4u && (state.r2_display & 15u) == 0u) { return 0u; }
     if (mode >= 4u) {
-        if ((params.r2_display & 16u) == 0u) { return 0u; }
-        let gx = (x + params.gr_scroll_x[0]) & 1023u;
-        let gy = (y + params.gr_scroll_y[0]) & 1023u;
-        index = graphics_nibble((gy >> 9u) * 2u + (gx >> 9u), gx, gy, false);
+        if ((state.r2_display & 16u) == 0u) { return 0u; }
+        let gx = (x + state.gr_scroll_x[0]) & 1023u;
+        let gy = (y + state.gr_scroll_y[0]) & 1023u;
+        index = graphics_nibble((gy >> 9u) * 2u + (gx >> 9u), gx, gy, false, state);
     } else {
         var lanes = 4u;
         if (mode == 0u) { lanes = 1u; }
         if (mode == 1u) { lanes = 2u; }
         for (var first = 0u; first < 4u; first += lanes) {
-            if ((params.r2_display & (((1u << lanes) - 1u) << first)) == 0u) { continue; }
+            if ((state.r2_display & (((1u << lanes) - 1u) << first)) == 0u) { continue; }
             var candidate = 0u;
             for (var lane = 0u; lane < lanes; lane++) {
-                candidate |= graphics_nibble(first + lane, x, y, true) << (lane * 4u);
+                candidate |= graphics_nibble(first + lane, x, y, true, state) << (lane * 4u);
             }
             if (candidate != 0u) { index = candidate; break; }
         }
@@ -119,40 +145,40 @@ fn graphics_color(x: u32, y: u32) -> u32 {
     if (mode == 2u || mode == 3u) {
         let low = index & 255u;
         let high = index >> 8u;
-        let lo_word = palettes[256u + (low & 254u)];
-        let hi_word = palettes[257u + (high & 254u)];
+        let lo_word = palettes[palette_base + 256u + (low & 254u)];
+        let hi_word = palettes[palette_base + 257u + (high & 254u)];
         let lo = select(lo_word & 255u, lo_word >> 8u, (low & 1u) == 0u);
         let hi = select((hi_word << 8u) & 0xff00u, hi_word & 0xff00u, (high & 1u) == 0u);
         return hi | lo;
     }
-    return palettes[256u + index];
+    return palettes[palette_base + 256u + index];
 }
 
 // Whether the text plane is clear (palette index 0, SX-Window's G_THRU) at (x, y), where
 // what is under the text shows: VM screens are drawn there, under the text plane.
-fn text_is_clear(x: u32, y: u32) -> bool {
-    if ((params.r2_display & 0x0020u) == 0u) {
+fn text_is_clear(x: u32, y: u32, state: ViconUniforms) -> bool {
+    if ((state.r2_display & 0x0020u) == 0u) {
         return true;
     }
-    return sample_tvram_index(x, y) == 0u;
+    return sample_tvram_index(x, y, state) == 0u;
 }
 
 // Packed RGBA8 of the pixel at (x, y).
-fn composite(x: u32, y: u32) -> u32 {
-    let gr_rank = (params.r1_priority >> 8u) & 3u;
-    let tx_rank = (params.r1_priority >> 10u) & 3u;
-    let sp_rank = (params.r1_priority >> 12u) & 3u;
+fn composite(x: u32, y: u32, state: ViconUniforms, palette_base: u32) -> u32 {
+    let gr_rank = (state.r1_priority >> 8u) & 3u;
+    let tx_rank = (state.r1_priority >> 10u) & 3u;
+    let sp_rank = (state.r1_priority >> 12u) & 3u;
     let text_above_gr = gr_rank == 2u || (gr_rank == 1u && tx_rank <= sp_rank);
     var text_color = 0u;
-    if ((params.r2_display & 32u) != 0u && gr_rank != 3u) {
-        text_color = palettes[sample_tvram_index(x, y)];
+    if ((state.r2_display & 32u) != 0u && gr_rank != 3u) {
+        text_color = palettes[palette_base + sample_tvram_index(x, y, state)];
     }
-    let gr_color = graphics_color(x, y);
+    let gr_color = graphics_color(x, y, state, palette_base);
     var color = text_color;
     if (text_above_gr) {
         if (text_color == 0u) { color = gr_color; }
     } else if (gr_color != 0u) {
         color = gr_color;
     }
-    return grbi_to_packed_rgba8(color, params.contrast);
+    return grbi_to_packed_rgba8(color, state.contrast);
 }

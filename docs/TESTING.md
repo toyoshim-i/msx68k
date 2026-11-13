@@ -14,6 +14,21 @@ cargo test --release -p msx68k-vicon --test vmx68k_lifecycle --locked -- --nocap
 The unit command is serial because some tests measure host timing. Avoid running
 another build or test suite concurrently when checking those timing tests.
 
+## Graphics without a guest OS
+
+Use the ROM-free graphics and raster fixtures for scanout changes. They check
+expected pixel colors before comparing CPU, primary GPU and VM texture output;
+the raster fixture also executes a real 68000/MFP interrupt handler. This keeps
+the usual development loop independent of a Human68k or SX-Window boot.
+
+```sh
+cargo test -p msx68k-bus --test gvram --test vram_pages --test raster --locked -- --test-threads=1
+cargo test --release -p msx68k-vicon --test graphics_modes --test raster --locked -- --test-threads=1
+```
+
+A GPU adapter is optional: the color assertions still run on the CPU reference
+when no adapter is available. See [GRAPHICS](GRAPHICS.md) for timing scope.
+
 ## Selecting VM scenarios
 
 The runner's registry is the source of scenario names and order. List it without

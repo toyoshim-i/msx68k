@@ -37,7 +37,7 @@ The MC68000 CPU engine uses Rust trait monomorphization (`CpuPolicy`) and a regi
 ### 1.4 `wgpu` VICON Shader Pipeline
 For isolated VMs and legacy fallback layers, pixel-by-pixel software compositing is replaced by a single-pass WGSL shader pipeline (`crates/msx68k-vicon`):
 - Packed GVRAM (512 KiB), TVRAM, palettes, and CRTC/VICON registers feed the GPU compositor; VM screens upload only dirty VRAM pages.
-- The shared WGSL pipeline supports 4-plane TVRAM, 512-dot 16/256/65536-color graphics and 1024-dot 16-color graphics, page selection and scrolling. Raster effects and Sprite/PCG/BG rendering are planned; see [docs/GRAPHICS.md](docs/GRAPHICS.md) for scope and implementation order. See [docs/FD_BOOT_AND_VICON.md](docs/FD_BOOT_AND_VICON.md) for the FDC/DMAC/MFP floppy boot subsystem, CRTC/TVRAM hardware acceleration, and `wgpu` VICON pipeline details.
+- The shared WGSL pipeline supports 4-plane TVRAM, 512-dot 16/256/65536-color graphics and 1024-dot 16-color graphics, page selection and scrolling. Scanline register/palette effects share the same shader; VRAM write history and Sprite/PCG/BG rendering are planned; see [docs/GRAPHICS.md](docs/GRAPHICS.md) for scope and implementation order. See [docs/FD_BOOT_AND_VICON.md](docs/FD_BOOT_AND_VICON.md) for the FDC/DMAC/MFP floppy boot subsystem, CRTC/TVRAM hardware acceleration, and `wgpu` VICON pipeline details.
 
 ### 1.5 Lazy I/O Instantiation & 3-Tier Straight Storage Bridge
 - **Zero-Device Fast VM Spawn**: VMs boot in microseconds via a custom IPL with all peripheral slots initialized to `None`. Chips (CRTC, OPM, ADPCM, MFP, SCC, DMAC, Sprite) and their cycle timers are instantiated only when their memory-mapped I/O ports (`$E80000`–`$EFFFFF`) are first accessed.
