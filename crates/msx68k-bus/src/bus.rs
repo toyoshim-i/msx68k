@@ -608,6 +608,9 @@ impl X68kBus {
         let sync = self
             .crtc
             .advance(cycles_10mhz, &mut self.tvram, &mut self.gvram, &mut self.vram_written);
+        if sync.v_disp_fell {
+            self.fdc.refresh_remote_media(&mut self.ioi);
+        }
         self.mfp.update_crtc_sync(sync);
         self.opm.advance(cycles_10mhz);
         self.mfp.set_opm_irq(self.opm.irq_active());

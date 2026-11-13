@@ -800,6 +800,8 @@ impl Msx68kApp {
                     let machine = GuestMachine { cpu, ram_mb, speed };
                     if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
                         self.guest_vms.push(guest);
+                    } else {
+                        self.vm.bus.detach_vm_bridge(id);
                     }
                 }
                 VmEvent::Restart { id, cpu, ram_mb, speed, custom } => {
@@ -814,6 +816,8 @@ impl Msx68kApp {
                     let machine = GuestMachine { cpu, ram_mb, speed };
                     if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
                         self.guest_vms.push(guest);
+                    } else {
+                        self.vm.bus.detach_vm_bridge(id);
                     }
                 }
                 VmEvent::Speed { id, mode } => {
@@ -898,6 +902,8 @@ impl Msx68kApp {
         vm.bus.load_cgrom(&self.guest_cgrom);
         vm.bus.load_ipl_rom(ipl);
         if let Some(path) = &self.args.vm_fd0_path {
+            // The debug override does not use the setup's reserved physical drives.
+            self.vm.bus.detach_vm_bridge(id);
             // Write-protected, and only ever a copy: the image on the host stays as it is.
             match std::fs::read(path) {
                 Ok(data) => {
@@ -908,7 +914,8 @@ impl Msx68kApp {
                 Err(e) => eprintln!("Failed to read '{}' for VMs: {e}", path.display()),
             }
         } else if let Some(custom) = custom {
-            let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
+            let (mut bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
+            self.vm.bus.bind_vm_passthrough(id, &mut bridge);
             for drive in vm.bus.install_custom_drives(bridge, &custom) {
                 eprintln!("VM {id}: custom drive not supported yet: {drive:?}");
             }
@@ -925,6 +932,7 @@ impl Msx68kApp {
         }
         if let Err(e) = vm.reset() {
             eprintln!("VM {id} failed to reset: {e:?}");
+            self.vm.bus.detach_vm_bridge(id);
             return None;
         }
         let accesses = vm.bus.drive_access_counter();

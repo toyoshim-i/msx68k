@@ -161,7 +161,9 @@ official SX-Window programming manuals.
   partition (as the resident backend did for target 0). Custom 共有 rows now map each selected
   primary drive, in row order, to file-level remote units after the VM's own FD and SCSI
   drives. They reuse shared mode's DOS bridge, expose the primary's real CONFIG.SYS, and
-  preserve SRAM and the physical drives. Passthrough rows and remote DIM remain unsupported.
+  preserve SRAM and the physical drives. パススルー rows now lend primary FD units exclusively,
+  with live media state and sector reads/writes through the same bridge. Remote DIM file images
+  remain unsupported (a DIM already mounted and expanded by the primary FDC can be passed).
 - **Custom driver installation**: Human68k installs a ROM boot device before its built-in FD
   driver, and non-boot ROM interfaces afterwards. For HDD boot with custom shares, `_BOOTINF`
   reports the HDD-only ROM anchor at `$FC0200` instead of `$FC0000`, preserving the IPL's boot
@@ -173,6 +175,24 @@ official SX-Window programming manuals.
   Verified against Human68k 3.02's `$7E70` (boot/built-in driver setup), `$7F0C` (ROM driver
   enumeration), and `$6AC2` (non-boot SCSI registration). The IPL's `_BOOTINF` reads its flags
   from `$09DF`/`$09E0` and its ROM boot address from SRAM `$ED000C`.
+- **Passthrough ownership**: VMX68K.X flushes primary DOS writes before opening/restarting a
+  custom VM; if the flush fails, its passthrough rows are unavailable. `VmOpen` / `VmRestart`
+  resolve each primary drive letter through Human68k's DPB chain at `$1C3C`: the DPB's drive,
+  unit, device-header pointer, and next pointer, and the `DISK2HD` name identify physical FD
+  units. HDD/remote drives, already lent units, and nested remote FDs cannot be lent. Failed
+  passthrough rows leave an empty floppy slot and are reported by the host.
+  `bind_vm_passthrough` attaches the reserved units to the VM's bridge before mounting. The
+  primary FDC reports write-protect and rejects writes while lent, separately from the disk's
+  real tab. The VM uses live atomic media length/tab/generation metadata, not an image copy.
+  Native `FloppyRead` / `FloppyWrite` requests are completed inside `VmPoll`, on the primary
+  thread, with owner/range/sector-alignment checks; no new external request kind or DOS file
+  operation is sent to VMX68K.X. The VM's FDC retains its own command/DMA behavior.
+  Media generation changes raise an FDD interrupt at V-Blank. A removal stays latched until
+  firmware reads it; the following V-Blank announces insertion, so even an eject/insert between
+  frames cannot collapse into an unchanged presence bit. This invalidates Human68k's cache
+  even when replacing a disk with another of the same format. Bridge detach, close, restart,
+  and VM startup failure release ownership, invalidate the old VM's media state, and preserve
+  the current disk's real tab (including a disk inserted while lent).
 - Tests: `crates/msx68k-bus/tests/vmx68k.rs` (window, menu, lamp, sizes, setups, dialogs, two
   VMs) and `crates/msx68k-vicon/tests/vmx68k_shared.rs` (a VM booting in shared mode).
   `crates/msx68k-vicon/tests/vmx68k_disk.rs` also boots a custom raw image from the primary's
@@ -185,7 +205,11 @@ official SX-Window programming manuals.
   `vmx68k_shared.rs` tests FD boot, HDD boot, and FD boot with an extra HDD, each with reversed
   primary drive assignments. It checks the resulting letters, file creation/rename/listing,
   and the original CONFIG.SYS through the first shared unit, alongside the existing shared
-  boot test. Unit tests cover ROM coexistence, boot metadata, and driver enumeration on reset.
+  boot test. It also boots and writes a passthrough FD, checks same-format replacement drops
+  the VM's old directory cache, writes again, and verifies the primary's Human68k sees the new
+  file after release. Unit tests cover ROM coexistence, boot metadata, driver enumeration on
+  reset, exclusive FD ownership, FDC write rejection, physical tabs, geometry changes, native
+  polling, and release on detach/restart/close.
 ---
 
 ## 2. Proposed Implementation (not decided)
@@ -201,7 +225,7 @@ official SX-Window programming manuals.
    - 4b drive assignment, shared and custom mode, in the order ファイル, 共有, パススルー (mock:
      [images/vmx68k_drive_dialog_mock.png](images/vmx68k_drive_dialog_mock.png)). The dialogs
      are done; 4b-1 has raw floppy and HDD/SCSI files working and 4b-2 (共有 drives) is done.
-     Next is 4b-3 (パススルー).
+     4b-3 (パススルー) is done too. Next is 4c, the boot submenu and floppy icons.
    - 4c the boot device submenu and the floppy icons, which need custom mode.
    - 4d the menu to make a new setup, which chooses the boot device it writes in the setup's
      SRAM.
@@ -211,8 +235,6 @@ official SX-Window programming manuals.
   the existing handle bridge, including boot and writes. Add remote DIM support separately
   if needed: the remote FDC backend accepts raw image sizes only. The SCSI block driver still
   uses each image's first Human68k partition; arbitrary partition layouts need separate work.
-- **パススルー** (4b-3): a primary floppy drive handed to the VM sector by sector, write-
-  protected on the primary meanwhile.
 - **Floppy icons and the boot submenu** (4c), more `'PLOT'` icons in `VMX68K.LB`.
 - **New setup** (4d): a path input and the boot device to write in the new setup's SRAM.
 

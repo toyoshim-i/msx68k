@@ -229,8 +229,11 @@ windows work the same way as the primary VM.
   SRAM boot choice. The legacy `A:\VMX68K\DRIVE0.XDF` service remains for compatibility tests.
   Custom 共有 rows add file-level remote drives after its FD and SCSI drives, preserving
   row order within the shared entries. They expose the primary's original files, including
-  CONFIG.SYS, without shared mode's boot substitution. Passthrough rows and remote DIM images
-  are still pending (see the settings UI notes).
+  CONFIG.SYS, without shared mode's boot substitution. パススルー rows lend a primary floppy
+  unit to the VM at the sector level, in floppy-row order. The primary's FDC is write-protected
+  while lent; the VM still respects the disk's physical write-protect tab. Ejection and media
+  replacement reach the VM, including a replacement of the same geometry. Closing or restarting
+  the VM releases the unit. Remote DIM file images remain pending (see the settings UI notes).
 
 ## 4. First Goal
 

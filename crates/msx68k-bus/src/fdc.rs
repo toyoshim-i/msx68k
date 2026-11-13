@@ -322,8 +322,12 @@ pub struct FloppyDrive {
     pub write_protected: bool,
     /// Raw disk image data (`None` if no floppy is inserted).
     pub image: Option<Vec<u8>>,
-    /// An image kept by the primary VM instead (`docs/VMX68K.md` Section 3.1).
+    /// An image or physical floppy unit kept by the primary (`docs/VMX68K.md` Section 3.1).
     pub remote: Option<RemoteDisk>,
+    pub(crate) passthrough_media: Option<Arc<crate::vmx68k::PassthroughMedia>>,
+    remote_version: Option<u64>,
+    // Keep removal visible until firmware observes it, then signal insertion.
+    remote_change: u8,
     /// Geometry of the mounted disk image.
     pub geometry: FloppyGeometry,
     /// Pending Seek/Recalibrate or Ready-transition interrupt result `(st0, pcn)`.
@@ -340,6 +344,9 @@ impl FloppyDrive {
             write_protected: false,
             image: None,
             remote: None,
+            passthrough_media: None,
+            remote_version: None,
+            remote_change: 0,
             geometry: FloppyGeometry::XDF_2HD,
             pending_irq: None,
         }
@@ -347,13 +354,39 @@ impl FloppyDrive {
 
     /// Returns `true` if a disk image is currently inserted.
     #[inline]
-    pub const fn is_inserted(&self) -> bool {
-        self.image.is_some() || self.remote.is_some()
+    pub fn is_inserted(&self) -> bool {
+        self.image.is_some() || self.remote.as_ref().is_some_and(|disk| !disk.is_empty())
+    }
+
+    pub fn is_write_protected(&self) -> bool {
+        self.write_protected
+            || self.passthrough_media.is_some()
+            || self
+                .remote
+                .as_ref()
+                .is_some_and(RemoteDisk::write_protected)
+    }
+
+    fn geometry(&self) -> FloppyGeometry {
+        self.remote
+            .as_ref()
+            .filter(|disk| disk.is_passthrough())
+            .and_then(|disk| FloppyGeometry::from_image_len(disk.len()))
+            .unwrap_or(self.geometry)
+    }
+
+    pub(crate) fn publish_media(&self) {
+        if let Some(media) = &self.passthrough_media {
+            media.update(
+                self.image.as_ref().map_or(0, Vec::len),
+                self.write_protected,
+            );
+        }
     }
 
     /// Returns `true` if the drive is ready (connected, disk inserted, and motor spinning).
     #[inline]
-    pub const fn is_ready(&self) -> bool {
+    pub fn is_ready(&self) -> bool {
         self.connected && self.is_inserted() && self.motor_on
     }
 }
@@ -449,14 +482,24 @@ impl Fdc {
         drv.geometry = geometry;
         drv.write_protected = write_protected;
         drv.image = Some(data);
+        drv.remote = None;
+        drv.remote_version = None;
+        drv.publish_media();
         true
     }
 
     /// Inserts a disk image the primary VM keeps into drive `unit`, which reads and writes it
     /// through requests. Its size must be one of a raw floppy image.
-    pub fn insert_remote_disk(&mut self, unit: usize, disk: RemoteDisk, write_protected: bool) -> bool {
-        let Some(geometry) = FloppyGeometry::from_image_len(disk.len()) else {
-            return false;
+    pub fn insert_remote_disk(
+        &mut self,
+        unit: usize,
+        disk: RemoteDisk,
+        write_protected: bool,
+    ) -> bool {
+        let geometry = match FloppyGeometry::from_image_len(disk.len()) {
+            Some(geometry) => geometry,
+            None if disk.is_passthrough() => FloppyGeometry::XDF_2HD,
+            None => return false,
         };
         let Some(drv) = self.drives.get_mut(unit) else {
             return false;
@@ -465,7 +508,10 @@ impl Fdc {
         drv.geometry = geometry;
         drv.write_protected = write_protected;
         drv.image = None;
+        drv.remote_version = disk.media_version();
+        drv.remote_change = 0;
         drv.remote = Some(disk);
+        drv.publish_media();
         true
     }
 
@@ -475,6 +521,29 @@ impl Fdc {
             self.drives[unit].image = None;
             self.drives[unit].remote = None;
             self.drives[unit].motor_on = false;
+            self.drives[unit].publish_media();
+        }
+    }
+
+    pub(crate) fn refresh_remote_media(&mut self, ioi: &mut IoInterruptController) {
+        let mut changed = false;
+        for drive in &mut self.drives {
+            let version = drive.remote.as_ref().and_then(RemoteDisk::media_version);
+            if version != drive.remote_version {
+                drive.remote_version = version;
+                drive.id_cursor = 0;
+                drive.remote_change = 1;
+                changed = true;
+            } else if drive.remote_change == 2 {
+                drive.remote_change = 0;
+                changed = true;
+            } else if drive.remote_change == 1 {
+                changed = true;
+            }
+        }
+        if changed {
+            ioi.set_fdd_signal(true);
+            self.update_fdc_irq(ioi);
         }
     }
 
@@ -542,7 +611,7 @@ impl Fdc {
                 if drv.is_ready() || (drv.connected && self.enforced_ready && drv.is_inserted()) {
                     st3 |= ST3_RY;
                 }
-                if drv.write_protected {
+                if drv.is_write_protected() {
                     st3 |= ST3_WP;
                 }
                 self.enter_result_phase(&[st3], false, ioi);
@@ -605,7 +674,7 @@ impl Fdc {
                     let st0 = ST0_AT | ST0_NR | (hd << 2) | (us as u8);
                     self.enter_result_phase(&[st0, 0, 0, pcn, hd, 1, 3], true, ioi);
                 } else {
-                    let geom = drv.geometry;
+                    let geom = drv.geometry();
                     let r = geom.first_sector_id + (drv.id_cursor % geom.sectors_per_track);
                     drv.id_cursor = drv.id_cursor.wrapping_add(1);
                     let c = drv.pcn;
@@ -626,7 +695,7 @@ impl Fdc {
 
                 let drv = &mut self.drives[us];
                 drv.pcn = c;
-                let geom = drv.geometry;
+                let geom = drv.geometry();
                 let sec_len = geom.sector_bytes();
                 // A remote image is asked for every sector the command can transfer at once,
                 // and the VM waits for it here, where the sectors go to the DMAC.
@@ -634,7 +703,7 @@ impl Fdc {
                     (Some(image), _) => (std::borrow::Cow::Borrowed(&image[..]), 0),
                     (None, Some(remote)) => {
                         let fetched = geom.sector_offset(c, h, r, n).and_then(|first| {
-                            let len = command_span(geom, mt, h, r, eot).min(remote.len() - first);
+                            let len = command_span(geom, mt, h, r, eot).min(remote.len().saturating_sub(first));
                             remote.read(first, len).map(|data| (data, first))
                         });
                         let Some((data, first)) = fetched else {
@@ -706,12 +775,12 @@ impl Fdc {
 
                 let drv = &mut self.drives[us];
                 drv.pcn = c;
-                if drv.write_protected {
+                if drv.is_write_protected() {
                     let st0 = ST0_AT | ((h & 1) << 2) | (us as u8);
                     self.enter_result_phase(&[st0, ST1_NW, 0, c, h, r, n], true, ioi);
                     return;
                 }
-                let geom = drv.geometry;
+                let geom = drv.geometry();
                 let sec_len = geom.sector_bytes();
                 // A remote image is written in one request once the DMAC has given every
                 // sector, and the result phase waits for it.
@@ -721,7 +790,7 @@ impl Fdc {
                 let (image, base): (&mut [u8], usize) = match (drv.image.as_mut(), &remote, first) {
                     (Some(image), _, _) => (&mut image[..], 0),
                     (None, Some(remote), Some(first)) => {
-                        let len = command_span(geom, mt, h, r, eot).min(remote.len() - first);
+                        let len = command_span(geom, mt, h, r, eot).min(remote.len().saturating_sub(first));
                         written.resize(len, 0);
                         (&mut written[..], first)
                     }
@@ -857,9 +926,15 @@ impl Fdc {
             0x05 => {
                 // Drive Option Status: bit 7 = 1 if selected unit has a disk inserted
                 let mut status = 0u8;
-                for (u, drv) in self.drives.iter().enumerate() {
-                    if (self.drive_ctrl_select & (1 << u)) != 0 && drv.is_inserted() {
-                        status |= 0x80;
+                for (u, drv) in self.drives.iter_mut().enumerate() {
+                    if (self.drive_ctrl_select & (1 << u)) != 0 {
+                        if drv.remote_change != 0 {
+                            // Even an eject+insert between VM frames must be
+                            // observed as a removal before the replacement.
+                            drv.remote_change = 2;
+                        } else if drv.is_inserted() {
+                            status |= 0x80;
+                        }
                     }
                 }
                 Ok(status)

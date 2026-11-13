@@ -95,25 +95,30 @@ fn click(vm: &mut X68kVm, at: (i16, i16), times: usize, settle: usize) {
 
 #[test]
 fn a_vm_boots_from_the_primary_vms_drive_a() {
-    shared_drives(None, false);
+    shared_drives(None, false, false);
 }
 
 #[test]
 fn custom_shared_drives_follow_the_floppy_drives() {
-    shared_drives(Some(false), false);
+    shared_drives(Some(false), false, false);
 }
 
 #[test]
 fn custom_shared_drives_follow_the_hdd_and_floppy_drives() {
-    shared_drives(Some(true), false);
+    shared_drives(Some(true), false, false);
 }
 
 #[test]
 fn custom_shared_drives_follow_the_floppy_and_nonboot_hdd() {
-    shared_drives(Some(false), true);
+    shared_drives(Some(false), true, false);
 }
 
-fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
+#[test]
+fn passthrough_floppy_boots_and_writes_the_primarys_disk() {
+    shared_drives(Some(false), false, true);
+}
+
+fn shared_drives(custom: Option<bool>, extra_hdd: bool, passthrough: bool) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |name: &str| std::fs::read(root.join(name)).ok();
     let (Some(ipl), Some(cgrom), Some(human)) = (
@@ -163,7 +168,11 @@ fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
         ))
         .unwrap();
         // Deliberately reverse the primary's A: and B: in the shared rows.
-        let mut rows: Vec<(u16, &[u8])> = vec![(0, b"A:\\VMX68K\\BOOT.IMG")];
+        let mut rows: Vec<(u16, &[u8])> = if passthrough {
+            vec![(2, b"B:")]
+        } else {
+            vec![(0, b"A:\\VMX68K\\BOOT.IMG")]
+        };
         if extra_hdd {
             extra.push(ExtractedFile {
                 raw_name: *b"DISK    ",
@@ -223,7 +232,7 @@ fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
     primary.run_steps(30_000_000);
     // B:, the primary's first floppy drive, holds a disk for the VM to read, put in after the
     // primary booted from its HDD rather than from it.
-    assert!(primary.bus.insert_floppy(0, human.clone(), true));
+    assert!(primary.bus.insert_floppy(0, human.clone(), !passthrough));
 
     // \X68 lists VMX68K.X after VMX68K.LB, as the first icon of the third row.
     click(&mut primary, (22, 340), 2, 3_000_000);
@@ -249,8 +258,16 @@ fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
     assert_ne!(primary.bus.active_window(), Some(window));
 
     // The VM's A: is the primary's A:, which it boots from.
-    let (bridge, requests) = vm_bridge();
+    let (mut bridge, requests) = vm_bridge();
+    primary.bus.bind_vm_passthrough(id, &mut bridge);
     primary.bus.attach_vm_bridge(id, requests);
+    if passthrough {
+        assert!(primary.bus.fdc.drives[0].is_write_protected());
+        assert!(
+            !primary.bus.fdc.drives[0].write_protected,
+            "the physical tab stays unchanged"
+        );
+    }
     let mut vm = X68kVm::new(
         VmConfig::app_vm()
             .with_speed_mode(CpuSpeedMode::Mhz10)
@@ -405,7 +422,80 @@ fn shared_drives(custom: Option<bool>, extra_hdd: bool) {
         );
     }
 
+    if passthrough {
+        for round in 0..2 {
+            type_text(&thread, &mut primary, "echo passed>a:\\passon.txt\n");
+            let until = Instant::now() + Duration::from_secs(20);
+            let mut found = false;
+            while Instant::now() < until {
+                primary.run_steps(200_000);
+                found = msx68k_bus::scsi::extract_files_from_xdf(
+                    primary.bus.fdc.drives[0].image.as_ref().unwrap(),
+                )
+                .iter()
+                .any(|file| {
+                    file.raw_name.eq_ignore_ascii_case(b"PASSON  ")
+                        && file.raw_ext.eq_ignore_ascii_case(b"TXT")
+                        && file.data == b"passed\r\n"
+                });
+                if found {
+                    break;
+                }
+            }
+            assert!(
+                found,
+                "passthrough writes must reach the primary's floppy: {:#?}",
+                thread_screen.lock().unwrap()
+            );
+            if round == 0 {
+                // Replace it with another disk of the same geometry. The guest
+                // must drop its old FAT/directory cache, not just update capacity.
+                primary.bus.eject_floppy(0);
+                assert!(primary.bus.insert_floppy(0, human.clone(), false));
+                type_text(
+                    &thread,
+                    &mut primary,
+                    &format!("dir a: >{shared_hdd}:\\swap.txt\n"),
+                );
+                assert!(
+                    wait_for_disk(&mut primary, |volume| volume
+                        .read_file(&[], &short_name("swap", "txt"))
+                        .is_some_and(|text| text.windows(7).any(|w| w == b"COMMAND")
+                            && !text.windows(6).any(|w| w.eq_ignore_ascii_case(b"PASSON")))),
+                    "the VM must notice a replacement disk of the same format: {:#?}",
+                    thread_screen.lock().unwrap()
+                );
+            }
+        }
+    }
+
     // Close the VM's disk before the thread, as the app does, so nothing waits for it.
     primary.bus.detach_vm_bridge(id);
     drop(thread);
+    if passthrough {
+        assert!(
+            !primary.bus.fdc.drives[0].is_write_protected(),
+            "closing restores the primary's access"
+        );
+        // Its Human68k already listed B: above. After release it must see the new
+        // file, rather than a stale FAT/directory cached before the VM's write.
+        let (bridge, requests) = vm_bridge();
+        primary.bus.attach_vm_bridge(id, requests);
+        let reader = std::thread::spawn(move || {
+            bridge.ask(msx68k_bus::vmx68k::BridgeOp::Files {
+                attr: 0x27,
+                path: b"B:\\PASSON.TXT".to_vec(),
+            })
+        });
+        let until = Instant::now() + Duration::from_secs(20);
+        while !reader.is_finished() && Instant::now() < until {
+            primary.run_steps(200_000);
+        }
+        primary.bus.detach_vm_bridge(id);
+        assert_eq!(
+            reader.join().unwrap().map(|reply| reply.result),
+            Some(0),
+            "the primary must see changes made through passthrough after release"
+        );
+    }
 }

@@ -132,6 +132,7 @@ size_text:	.ds.b	6		; the memory's size, " 4MB", a Pascal string
 vm_drives:	.ds.b	DRIVES_SIZE	; the setup's drives
 dlg_drives:	.ds.b	DRIVES_SIZE	; the configuration dialog's
 det_drives:	.ds.b	DRIVES_SIZE	; ドライブの詳細's
+pass_flush_result:	.ds.l	1	; primary flush before FD ownership changes
 drive_table:	.ds.w	1		; count, then kind.w, handle.w, size.l
 		.ds.b	DRIVE_ROWS*8
 image_path:	.ds.b	PATH_MAX+2
@@ -1162,6 +1163,9 @@ custom_drive_table_done:
 
 open_custom_drives:
 	movem.l	d0-d7/a0-a4, -(sp)
+	* Flush primary file-system writes before VmOpen/VmRestart lends any FD.
+	DOS	_FFLUSH
+	move.l	d0, pass_flush_result(a5)
 	clr.w	drive_table(a5)
 	tst.w	vm_drives+DRV_MODE(a5)
 	beq	open_custom_done
@@ -1216,6 +1220,11 @@ open_custom_size:
 	move.l	d0, 4(a4)
 	bra.s	open_custom_advance
 open_custom_letter:
+	cmpi.w	#2, (a3)
+	bne.s	open_custom_letter_ok
+	tst.l	pass_flush_result(a5)
+	bmi.s	open_custom_advance
+open_custom_letter_ok:
 	moveq.l	#0, d0
 	move.b	3(a3), d0
 	andi.w	#$DF, d0

@@ -33,6 +33,7 @@ const BITMAP_RECT: u32 = 2;
 #[derive(Debug, Clone)]
 pub struct VmBridge {
     requests: Sender<BridgeRequest>,
+    floppies: Vec<(u32, u32, Arc<PassthroughMedia>)>,
 }
 
 /// One request to VMX68K.SX, answered with its [`BridgeReply`], or `None` when it could not be
@@ -75,12 +76,27 @@ pub enum BridgeOp {
     Chmod { path: Vec<u8>, attr: u32 },
     /// 14: `_CREATE` (replacing a file there) or `_NEWFILE` of `path` with `attr`; the result is
     /// its handle.
-    Create { path: Vec<u8>, attr: u32, replace: bool },
+    Create {
+        path: Vec<u8>,
+        attr: u32,
+        replace: bool,
+    },
     /// 15: writes the bytes at `offset` of the primary's file `handle`; with none, cuts the file
     /// there. The result is the count.
-    HandleWrite { handle: u32, offset: u32, data: Vec<u8> },
+    HandleWrite {
+        handle: u32,
+        offset: u32,
+        data: Vec<u8>,
+    },
     /// 16: `_FILEDATE` setting `date << 16 | time` of the primary's file `handle`.
     Filedate { handle: u32, datetime: u32 },
+    /// Native requests, completed by the primary bus during VmPoll.
+    FloppyRead { unit: u32, offset: u32, len: u32 },
+    FloppyWrite {
+        unit: u32,
+        offset: u32,
+        data: Vec<u8>,
+    },
 }
 
 impl BridgeOp {
@@ -102,6 +118,7 @@ impl BridgeOp {
             Self::Create { .. } => 14,
             Self::HandleWrite { .. } => 15,
             Self::Filedate { .. } => 16,
+            Self::FloppyRead { .. } | Self::FloppyWrite { .. } => 0,
         }
     }
 }
@@ -124,7 +141,13 @@ const RENAME_TO: u32 = 256;
 /// Returns a [`VmBridge`] and the requests it will make, for [`X68kBus::attach_vm_bridge`].
 pub fn vm_bridge() -> (VmBridge, Receiver<BridgeRequest>) {
     let (requests, queue) = mpsc::channel();
-    (VmBridge { requests }, queue)
+    (
+        VmBridge {
+            requests,
+            floppies: Vec::new(),
+        },
+        queue,
+    )
 }
 
 impl VmBridge {
@@ -137,7 +160,30 @@ impl VmBridge {
     }
 }
 
-/// A disk image that the primary VM keeps, which a VM's floppy or SCSI drive accesses through
+/// Live media state, shared without transferring the image between VM threads.
+#[derive(Debug)]
+pub(crate) struct PassthroughMedia(AtomicU64);
+
+impl PassthroughMedia {
+    pub(crate) fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+    pub(crate) fn update(&self, len: usize, protected: bool) {
+        let generation = ((self.0.load(Ordering::Relaxed) >> 33) + 1) & 0x7FFF_FFFF;
+        self.0.store(
+            len as u64 | ((protected as u64) << 32) | (generation << 33),
+            Ordering::Release,
+        );
+    }
+    fn len(&self) -> usize {
+        self.0.load(Ordering::Acquire) as u32 as usize
+    }
+    fn protected(&self) -> bool {
+        self.0.load(Ordering::Acquire) & (1 << 32) != 0
+    }
+}
+
+/// An image or floppy unit the primary keeps, accessed by a VM's FDC or SCSI through
 /// its [`VmBridge`].
 #[derive(Debug, Clone)]
 pub struct RemoteDisk {
@@ -145,30 +191,57 @@ pub struct RemoteDisk {
     bridge: VmBridge,
     /// The primary's file handle of the image, or `None` for drive 0's, which VMX68K.SX keeps.
     handle: Option<u32>,
+    floppy: Option<(u32, Arc<PassthroughMedia>)>,
 }
 
 impl RemoteDisk {
     pub fn new(bridge: VmBridge, len: usize) -> Self {
-        Self { len, bridge, handle: None }
+        Self {
+            len,
+            bridge,
+            handle: None,
+            floppy: None,
+        }
     }
 
     /// An image VMX68K.SX opened as the primary's file `handle`, of `len` bytes.
     pub fn with_handle(bridge: VmBridge, handle: u32, len: usize) -> Self {
-        Self { len, bridge, handle: Some(handle) }
+        Self {
+            len,
+            bridge,
+            handle: Some(handle),
+            floppy: None,
+        }
     }
 
     /// Size of the image.
     pub fn len(&self) -> usize {
-        self.len
+        self.floppy
+            .as_ref()
+            .map_or(self.len, |(_, media)| media.len())
+    }
+
+    pub(crate) fn is_passthrough(&self) -> bool {
+        self.floppy.is_some()
+    }
+    pub(crate) fn media_version(&self) -> Option<u64> {
+        self.floppy
+            .as_ref()
+            .map(|(_, media)| media.0.load(Ordering::Acquire))
+    }
+    pub(crate) fn write_protected(&self) -> bool {
+        self.floppy
+            .as_ref()
+            .is_some_and(|(_, media)| media.protected())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     /// Reads an image range, splitting transfers to fit VMX68K.X's 32 KB buffer.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        if offset.checked_add(len)? > self.len {
+        if offset.checked_add(len)? > self.len() {
             return None;
         }
         let mut data = Vec::with_capacity(len);
@@ -181,9 +254,24 @@ impl RemoteDisk {
 
     fn read_chunk(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
         let (offset, count) = (u32::try_from(offset).ok()?, u32::try_from(len).ok()?);
-        let (op, done) = match self.handle {
-            Some(handle) => (BridgeOp::HandleRead { handle, offset, len: count }, count),
-            None => (BridgeOp::Read { offset, len: count }, 0),
+        let (op, done) = match (self.floppy.as_ref(), self.handle) {
+            (Some((unit, _)), _) => (
+                BridgeOp::FloppyRead {
+                    unit: *unit,
+                    offset,
+                    len: count,
+                },
+                count,
+            ),
+            (_, Some(handle)) => (
+                BridgeOp::HandleRead {
+                    handle,
+                    offset,
+                    len: count,
+                },
+                count,
+            ),
+            _ => (BridgeOp::Read { offset, len: count }, 0),
         };
         self.bridge
             .ask(op)
@@ -193,24 +281,49 @@ impl RemoteDisk {
 
     /// Writes through in chunks; a failed transfer may have written earlier chunks.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
-        if !offset.checked_add(data.len()).is_some_and(|end| end <= self.len) {
+        if !offset
+            .checked_add(data.len())
+            .is_some_and(|end| end <= self.len())
+        {
             return false;
         }
-        data.chunks(32768).enumerate().all(|(i, bytes)| {
-            self.write_chunk(offset + i * 32768, bytes.to_vec())
-        })
+        data.chunks(32768)
+            .enumerate()
+            .all(|(i, bytes)| self.write_chunk(offset + i * 32768, bytes.to_vec()))
     }
 
     fn write_chunk(&self, offset: usize, data: Vec<u8>) -> bool {
-        let Ok(offset) = u32::try_from(offset) else { return false };
-        let (op, done) = match self.handle {
-            Some(handle) => {
-                let len = data.len() as u32;
-                (BridgeOp::HandleWrite { handle, offset, data }, len)
-            }
-            None => (BridgeOp::Write { offset, data }, 0),
+        let Ok(offset) = u32::try_from(offset) else {
+            return false;
         };
-        self.bridge.ask(op).is_some_and(|reply| reply.result == done)
+        let (op, done) = match (self.floppy.as_ref(), self.handle) {
+            (Some((unit, _)), _) => {
+                let len = data.len() as u32;
+                (
+                    BridgeOp::FloppyWrite {
+                        unit: *unit,
+                        offset,
+                        data,
+                    },
+                    len,
+                )
+            }
+            (_, Some(handle)) => {
+                let len = data.len() as u32;
+                (
+                    BridgeOp::HandleWrite {
+                        handle,
+                        offset,
+                        data,
+                    },
+                    len,
+                )
+            }
+            _ => (BridgeOp::Write { offset, data }, 0),
+        };
+        self.bridge
+            .ask(op)
+            .is_some_and(|reply| reply.result == done)
     }
 }
 
@@ -281,6 +394,7 @@ impl X68kBus {
         let mut target = 0;
         let mut unsupported = Vec::new();
         let mut shared = Vec::new();
+        let mut passed = Vec::new();
         for &drive in drives {
             match drive {
                 CustomDrive::File { handle, len }
@@ -297,10 +411,34 @@ impl X68kBus {
                 CustomDrive::File { handle, len }
                     if crate::fdc::FloppyGeometry::from_image_len(len as usize).is_none()
                         && self.insert_remote_scsi_hdd(
-                            target, RemoteDisk::with_handle(bridge.clone(), handle, len as usize),
+                            target,
+                            RemoteDisk::with_handle(bridge.clone(), handle, len as usize),
                         ) =>
                 {
                     target += 1;
+                }
+                CustomDrive::Passthrough { drive: letter } if unit < 4 => {
+                    if !passed.contains(&letter) {
+                        if let Some((_, source, media)) = bridge
+                            .floppies
+                            .iter()
+                            .find(|(drive, _, _)| *drive == letter)
+                        {
+                            let disk = RemoteDisk {
+                                len: 0,
+                                bridge: bridge.clone(),
+                                handle: None,
+                                floppy: Some((*source, Arc::clone(media))),
+                            };
+                            self.fdc.insert_remote_disk(unit, disk, false);
+                            passed.push(letter);
+                        } else {
+                            unsupported.push(drive);
+                        }
+                    } else {
+                        unsupported.push(drive);
+                    }
+                    unit += 1;
                 }
                 CustomDrive::Missing if unit < 4 => unit += 1,
                 CustomDrive::Shared { drive } if (1..=26).contains(&drive) => shared.push(drive),
@@ -423,6 +561,15 @@ pub(crate) struct VmWindows {
     events: Vec<VmEvent>,
     /// Bridge requests of each VM, and the one VMX68K.SX is carrying out with its buffer.
     disks: Vec<(u32, VmDisk)>,
+    passthrough: Vec<FloppyLease>,
+}
+
+#[derive(Debug)]
+struct FloppyLease {
+    owner: u32,
+    drive: u32,
+    unit: u32,
+    media: Arc<PassthroughMedia>,
 }
 
 #[derive(Debug)]
@@ -454,6 +601,137 @@ impl X68kBus {
         (window != 0).then_some(window & 0x00FF_FFFF)
     }
 
+    /// Resolves the primary's drive letter through Human68k's DPB chain. Only
+    /// DISK2HD units are physical floppy drives; SCSI and remote devices cannot pass.
+    fn primary_floppy_unit(&self, drive: u32) -> Option<u32> {
+        if !(1..=26).contains(&drive) {
+            return None;
+        }
+        let mut dpb = self.peek_u32(0x1C3C)?;
+        for _ in 0..26 {
+            if dpb >= self.main_ram().len() as u32 {
+                return None;
+            }
+            if self.peek_u8(dpb)? as u32 + 1 == drive {
+                let header = self.peek_u32(dpb + 2)?;
+                let name: Vec<_> = (15..22).filter_map(|i| self.peek_u8(header + i)).collect();
+                let unit = self.peek_u8(dpb + 1)? as u32;
+                return (name == b"DISK2HD" && unit < 4).then_some(unit);
+            }
+            dpb = self.peek_u32(dpb + 6)?;
+        }
+        None
+    }
+
+    fn reserve_passthrough(&mut self, id: u32, drives: &[CustomDrive]) {
+        let mut slots = 0;
+        for drive in drives {
+            match drive {
+                CustomDrive::Missing => slots += 1,
+                CustomDrive::File { len, .. }
+                    if crate::fdc::FloppyGeometry::from_image_len(*len as usize).is_some() => slots += 1,
+                _ => {}
+            }
+            let CustomDrive::Passthrough { drive } = *drive else {
+                continue;
+            };
+            slots += 1;
+            if slots > 4 {
+                continue;
+            }
+            let Some(unit) = self.primary_floppy_unit(drive) else {
+                continue;
+            };
+            if self
+                .vm_windows
+                .passthrough
+                .iter()
+                .any(|lease| lease.unit == unit)
+            {
+                continue;
+            }
+            let source = &mut self.fdc.drives[unit as usize];
+            if !source.connected || source.remote.is_some() {
+                continue;
+            }
+            let media = Arc::new(PassthroughMedia::new());
+            source.passthrough_media = Some(Arc::clone(&media));
+            source.publish_media();
+            self.vm_windows.passthrough.push(FloppyLease {
+                owner: id,
+                drive,
+                unit,
+                media,
+            });
+        }
+    }
+
+    /// Binds reserved physical drives to the VM's existing disk bridge.
+    pub fn bind_vm_passthrough(&self, id: u32, bridge: &mut VmBridge) {
+        bridge.floppies = self
+            .vm_windows
+            .passthrough
+            .iter()
+            .filter(|lease| lease.owner == id)
+            .map(|lease| (lease.drive, lease.unit, Arc::clone(&lease.media)))
+            .collect();
+    }
+
+    fn release_passthrough(&mut self, id: u32) {
+        for lease in self
+            .vm_windows
+            .passthrough
+            .iter()
+            .filter(|lease| lease.owner == id)
+        {
+            // An old VM must see no media even if another VM claims the same unit.
+            lease.media.update(0, true);
+            self.fdc.drives[lease.unit as usize].passthrough_media = None;
+        }
+        self.vm_windows
+            .passthrough
+            .retain(|lease| lease.owner != id);
+    }
+
+    fn passthrough_request(&mut self, id: u32, op: &BridgeOp) -> Option<BridgeReply> {
+        let (unit, offset, len) = match op {
+            BridgeOp::FloppyRead { unit, offset, len } => (*unit, *offset as usize, *len as usize),
+            BridgeOp::FloppyWrite { unit, offset, data } => (*unit, *offset as usize, data.len()),
+            _ => return None,
+        };
+        if !self
+            .vm_windows
+            .passthrough
+            .iter()
+            .any(|lease| lease.owner == id && lease.unit == unit)
+        {
+            return None;
+        }
+        let source = self.fdc.drives.get_mut(unit as usize)?;
+        let sector = source.geometry.sector_bytes();
+        if offset % sector != 0 || len % sector != 0 {
+            return None;
+        }
+        let protected = source.write_protected;
+        let bytes = source
+            .image
+            .as_mut()?
+            .get_mut(offset..offset.checked_add(len)?)?;
+        let data = match op {
+            BridgeOp::FloppyRead { .. } => bytes.to_vec(),
+            BridgeOp::FloppyWrite { data, .. } if !protected => {
+                bytes.copy_from_slice(data);
+                Vec::new()
+            }
+            _ => return None,
+        };
+        self.note_drive_access();
+        Some(BridgeReply {
+            result: len as u32,
+            data,
+        })
+    }
+
     /// Lets VMX68K.SX carry out the bridge requests of VM `id`.
     pub fn attach_vm_bridge(&mut self, id: u32, requests: Receiver<BridgeRequest>) {
         let disk = VmDisk {
@@ -469,6 +747,7 @@ impl X68kBus {
     /// Drops the bridge requests of VM `id`, which fails the ones its thread waits for.
     pub fn detach_vm_bridge(&mut self, id: u32) {
         self.vm_windows.disks.retain(|(open, _)| *open != id);
+        self.release_passthrough(id);
     }
 
     /// The counter of this machine's drive accesses, floppy, SCSI, and remote, which the app
@@ -587,6 +866,7 @@ impl X68kBus {
                 .collect()
         });
         let custom = self.custom_drives(state.a[2]);
+        self.reserve_passthrough(id, custom.as_deref().unwrap_or(&[]));
         let windows = &mut self.vm_windows;
         windows.events.push(VmEvent::Opened {
             id,
@@ -632,6 +912,31 @@ impl X68kBus {
                 return TrapResult::Handled { extra_cycles: 0 };
             }
         };
+        if matches!(
+            op,
+            BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. }
+        ) {
+            let reply = self.passthrough_request(id, &op);
+            let disk = &mut self
+                .vm_windows
+                .disks
+                .iter_mut()
+                .find(|(open, _)| *open == id)
+                .unwrap()
+                .1;
+            if let Some(request) = disk.pending.pop_front() {
+                let _ = request.reply.send(reply);
+            }
+            state.d[0] = 0;
+            return TrapResult::Handled { extra_cycles: 0 };
+        }
+        let disk = &mut self
+            .vm_windows
+            .disks
+            .iter_mut()
+            .find(|(open, _)| *open == id)
+            .unwrap()
+            .1;
         // Numbers in D1..D3, bytes for the buffer, and how many bytes the reply brings back.
         let (numbers, bytes, reply_len): ([u32; 3], Vec<BufferBytes>, u32) = match &op {
             BridgeOp::Read { offset, len } => ([*offset, *len, 0], vec![], *len),
@@ -658,6 +963,7 @@ impl X68kBus {
             }
             BridgeOp::Nfiles { buffer } => ([0, 0, 0], vec![(0, buffer.clone())], 53),
             BridgeOp::Dskfre { drive } => ([*drive, 0, 0], vec![], 8),
+            BridgeOp::FloppyRead { .. } | BridgeOp::FloppyWrite { .. } => unreachable!(),
         };
         let needed = bytes
             .iter()
@@ -725,6 +1031,7 @@ impl X68kBus {
         } else {
             u32::MAX
         };
+        self.release_passthrough(id);
         TrapResult::Handled { extra_cycles: 0 }
     }
 
@@ -758,6 +1065,7 @@ impl X68kBus {
                 // Retire the old requests before the task can serve another event
                 // with its newly opened image handles.
                 self.detach_vm_bridge(id);
+                self.reserve_passthrough(id, custom.as_deref().unwrap_or(&[]));
                 self.vm_windows.events.push(VmEvent::Restart { id, cpu, ram_mb, speed, custom });
                 0
             }
@@ -860,6 +1168,180 @@ fn nul_terminated(path: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    fn primary_with_floppies() -> X68kBus {
+        let mut bus = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        // A: is a hard disk; B:/C: are DISK2HD's physical units 0/1.
+        let long = |bus: &mut X68kBus, at: u32, value: u32| {
+            for (i, byte) in value.to_be_bytes().into_iter().enumerate() {
+                bus.poke_u8(at + i as u32, byte);
+            }
+        };
+        long(&mut bus, 0x1C3C, 0x4000);
+        for unit in 0..2 {
+            let dpb = 0x4000 + unit * 64;
+            bus.poke_u8(dpb, unit as u8 + 1);
+            bus.poke_u8(dpb + 1, unit as u8);
+            long(&mut bus, dpb + 2, 0x5000);
+            long(&mut bus, dpb + 6, if unit == 0 { 0x4040 } else { u32::MAX });
+        }
+        for (i, &byte) in b"DISK2HD".iter().enumerate() {
+            bus.poke_u8(0x500F + i as u32, byte);
+        }
+        assert!(bus.insert_floppy(0, vec![0; 1_261_568], false));
+        assert!(bus.insert_floppy(1, vec![0; 1_261_568], true));
+        bus
+    }
+
+    #[test]
+    fn passthrough_is_exclusive_and_tracks_media_changes() {
+        use msx68k_cpu::Bus;
+        let mut primary = primary_with_floppies();
+        let pass = CustomDrive::Passthrough { drive: 2 };
+        primary.reserve_passthrough(4, &[CustomDrive::Missing, CustomDrive::Missing,
+            CustomDrive::Missing, CustomDrive::Missing, pass]);
+        assert!(primary.vm_windows.passthrough.is_empty(), "do not lend an unusable fifth FD");
+        primary.reserve_passthrough(1, &[pass]);
+        primary.reserve_passthrough(2, &[pass]);
+        primary.reserve_passthrough(3, &[CustomDrive::Passthrough { drive: 1 }]);
+        assert_eq!(primary.vm_windows.passthrough.len(), 1);
+        let (mut bridge, _) = vm_bridge();
+        primary.bind_vm_passthrough(1, &mut bridge);
+        let mut child = X68kBus::new(1024 * 1024, CpuSpeedMode::Burst.timing_config());
+        assert!(child.install_custom_drives(bridge, &[pass]).is_empty());
+        assert!(primary.fdc.drives[0].is_write_protected());
+        assert!(!child.fdc.drives[0].is_write_protected());
+        // The primary's actual FDC rejects writes, not only its UI/status.
+        for byte in [0x45, 0, 0, 0, 1, 3, 1, 0x1B, 0xFF] {
+            primary.write_u8(0xE94003, byte, true).unwrap();
+        }
+        let result: Vec<_> = (0..7)
+            .map(|_| primary.read_u8(0xE94003, true).unwrap())
+            .collect();
+        assert_eq!(result[1], crate::fdc::ST1_NW);
+        let op = BridgeOp::FloppyWrite {
+            unit: 0,
+            offset: 1024,
+            data: vec![0xA5; 1024],
+        };
+        assert_eq!(primary.passthrough_request(1, &op).unwrap().result, 1024);
+        assert!(primary.fdc.drives[0].image.as_ref().unwrap()[1024..2048]
+            .iter()
+            .all(|&byte| byte == 0xA5));
+        assert!(primary.passthrough_request(2, &op).is_none());
+        assert!(primary
+            .passthrough_request(
+                1,
+                &BridgeOp::FloppyRead {
+                    unit: 0,
+                    offset: 1,
+                    len: 1024
+                }
+            )
+            .is_none());
+
+        primary.eject_floppy(0);
+        assert!(!child.fdc.drives[0].is_inserted());
+        assert!(primary.insert_floppy(0, vec![0; 1_474_560], true));
+        assert!(child.fdc.drives[0].is_inserted());
+        assert!(child.fdc.drives[0].is_write_protected());
+        assert!(
+            primary.passthrough_request(1, &op).is_none(),
+            "respect the disk's real tab"
+        );
+        // A same-frame eject/insert is latched as a removal until the IPL
+        // reads it, then a following V-Blank announces the inserted medium.
+        child.fdc.refresh_remote_media(&mut child.ioi);
+        child.write_u8(0xE94005, 1, true).unwrap();
+        assert_eq!(child.read_u8(0xE94005, true).unwrap() & 0x80, 0);
+        assert_eq!(child.read_u8(0xE94005, true).unwrap() & 0x80, 0);
+        child.fdc.refresh_remote_media(&mut child.ioi);
+        assert_eq!(child.read_u8(0xE94005, true).unwrap() & 0x80, 0x80);
+        for byte in [0x4A, 0] {
+            child.write_u8(0xE94003, byte, true).unwrap();
+        }
+        let id: Vec<_> = (0..7)
+            .map(|_| child.read_u8(0xE94003, true).unwrap())
+            .collect();
+        assert_eq!(
+            id[6], 2,
+            "READ ID must follow the replacement disk's 512-byte sectors"
+        );
+        primary.detach_vm_bridge(1);
+        assert!(
+            !child.fdc.drives[0].is_inserted(),
+            "the old owner loses media on detach"
+        );
+        assert!(
+            primary.fdc.drives[0].write_protected,
+            "retain the replacement disk's real tab"
+        );
+        primary.reserve_passthrough(2, &[pass]);
+        assert_eq!(primary.vm_windows.passthrough[0].owner, 2);
+        primary.detach_vm_bridge(2);
+        assert!(primary.fdc.drives[0].is_write_protected());
+    }
+
+    #[test]
+    fn passthrough_requests_finish_in_poll_and_close_releases_the_drive() {
+        let mut primary = primary_with_floppies();
+        let mut state = CpuState::default();
+        // A2's table contains one passthrough of the primary's B:.
+        state.a[2] = 0x6000;
+        for (at, byte) in [(0x6001, 1), (0x6003, 2), (0x6005, 2)] {
+            primary.poke_u8(at, byte);
+        }
+        primary.hypercall_vm_open(&mut state);
+        let id = state.d[0];
+        assert!(primary.fdc.drives[0].is_write_protected());
+        let (mut bridge, requests) = vm_bridge();
+        primary.bind_vm_passthrough(id, &mut bridge);
+        primary.attach_vm_bridge(id, requests);
+        let reader = std::thread::spawn(move || {
+            bridge.ask(BridgeOp::FloppyRead {
+                unit: 0,
+                offset: 0,
+                len: 1024,
+            })
+        });
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !reader.is_finished() && std::time::Instant::now() < until {
+            state.d[1] = id;
+            state.d[2] = 0x8000;
+            state.d[3] = 32768;
+            primary.hypercall_vm_poll(&mut state);
+            assert_eq!(state.d[0], 0, "no new request kind is sent to VMX68K.X");
+            std::thread::yield_now();
+        }
+        primary.detach_vm_bridge(id);
+        assert_eq!(
+            reader.join().unwrap(),
+            Some(BridgeReply {
+                result: 1024,
+                data: vec![0; 1024]
+            })
+        );
+        // Closing also releases reservations even if no bridge was attached.
+        primary.reserve_passthrough(id, &[CustomDrive::Passthrough { drive: 2 }]);
+        // Restart changes ownership from B: to C: and restores B:'s protection.
+        primary.poke_u8(0x6005, 3);
+        state.d[1] = id;
+        state.d[2] = 4;
+        state.d[3] = 0;
+        primary.hypercall_vm_restart(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert!(!primary.fdc.drives[0].is_write_protected());
+        assert_eq!(primary.vm_windows.passthrough[0].unit, 1);
+        state.d[1] = id;
+        primary.hypercall_vm_close(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert!(!primary.fdc.drives[0].is_write_protected());
+        assert!(
+            primary.fdc.drives[1].is_write_protected(),
+            "keep C:'s physical tab"
+        );
+        assert!(primary.vm_windows.passthrough.is_empty());
+    }
 
     #[test]
     fn handle_disk_requires_complete_reads_and_writes() {
