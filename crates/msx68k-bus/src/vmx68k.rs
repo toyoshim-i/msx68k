@@ -551,6 +551,27 @@ impl X68kBus {
             })
     }
 
+    /// Open VM records and storage resources, for lifecycle diagnostics.
+    pub fn vm_resources(&self) -> (Vec<(u32, u32)>, usize, usize, usize) {
+        (
+            self.vm_windows
+                .open
+                .iter()
+                .map(|vm| (vm.id, vm.window))
+                .collect(),
+            self.vm_windows.disks.len(),
+            self.vm_windows.passthrough.len(),
+            self.vm_windows
+                .disks
+                .iter()
+                .map(|(_, disk)| disk.pending.len())
+                .sum(),
+        )
+    }
+
+    pub fn next_vm_id(&self) -> u32 {
+        self.vm_windows.next_id + 1
+    }
     pub fn set_vm_floppies(&mut self, id: u32, packed: u32, boot: u32) {
         if let Some(open) = self.vm_windows.open.iter_mut().find(|open| open.id == id) {
             open.status.floppies = packed;
