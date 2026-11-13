@@ -881,10 +881,7 @@ impl Bus for X68kBus {
             MemoryRegion::SpriteBg => {
                 let offset = (a as usize) & (SPRITE_WINDOW_BYTES - 1);
                 if (0x0400..0x0800).contains(&offset) || (0x0812..0x8000).contains(&offset) {
-                    return Err(BusFault::BusError {
-                        addr: a,
-                        is_write: false,
-                    });
+                    return Ok(0xff);
                 }
                 if offset >= 0x8000 && crate::bg::control(self.sprite_bg()) & 0x400 != 0 {
                     return Ok(if self.sprite_options.full_pattern_memory {
@@ -1148,10 +1145,7 @@ impl Bus for X68kBus {
             MemoryRegion::SpriteBg => {
                 let offset = (a as usize) & (SPRITE_WINDOW_BYTES - 1);
                 if (0x0400..0x0800).contains(&offset) || (0x0812..0x8000).contains(&offset) {
-                    return Err(BusFault::BusError {
-                        addr: a,
-                        is_write: true,
-                    });
+                    return Ok(());
                 }
                 if offset >= 0x8000 && crate::bg::control(self.sprite_bg()) & 0x400 != 0 {
                     if self.sprite_options.full_pattern_memory {

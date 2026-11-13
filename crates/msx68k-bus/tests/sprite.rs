@@ -173,3 +173,31 @@ fn background_map_bank_is_independent_of_map_number_and_pattern_storage() {
     write(&mut vm, 0x808, 2); // Primary bank's TEXT1 remains zero.
     assert_eq!(sample(&vm), 1);
 }
+
+#[test]
+fn reserved_sprite_offsets_accept_bulk_initialization_without_aliasing_registers() {
+    let mut vm = fixture();
+    // Initializers may clear a full 256-entry address range on a 128-sprite machine.
+    for offset in (0..0x800).step_by(4) {
+        vm.bus.write_u32(0xeb0000 + offset, 0, true).unwrap();
+    }
+    write(&mut vm, 0, 0x0123);
+    write(&mut vm, 0x808, 0x0200);
+    for offset in [0x400, 0x7fc, 0x812, 0x1000, 0x7ffc] {
+        vm.bus.write_u8(0xeb0000 + offset, 0x12, true).unwrap();
+        vm.bus.write_u16(0xeb0000 + offset, 0x3456, true).unwrap();
+        vm.bus
+            .write_u32(0xeb0000 + offset, 0x789abcde, true)
+            .unwrap();
+        assert_eq!(vm.bus.read_u8(0xeb0000 + offset, true).unwrap(), 0xff);
+        assert_eq!(vm.bus.read_u16(0xeb0000 + offset, true).unwrap(), 0xffff);
+        assert_eq!(
+            vm.bus.read_u32(0xeb0000 + offset, true).unwrap(),
+            0xffffffff
+        );
+    }
+    assert_eq!(vm.bus.read_u16(0xeb0000, true).unwrap(), 0x0123);
+    assert_eq!(vm.bus.read_u16(0xeb0808, true).unwrap(), 0x0200);
+    vm.bus.sprite_options = msx68k_bus::sprite::SpriteOptions::from_bits(3);
+    assert_eq!(vm.bus.read_u16(0xeb0400, true).unwrap(), 0xffff);
+}

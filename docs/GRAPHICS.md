@@ -132,7 +132,12 @@ native extended TVRAM retains its existing path.
 The 128 sprite entries at `$EB0000` contain 10-bit X/Y coordinates, a 16-dot
 pattern number, palette block, flips, and priority. Coordinates include a
 16-pixel margin relative to the shared sprite/BG origin. Priority zero disables
-an entry. Selection visits register numbers in ascending order and admits at
+an entry. The unused attribute half at `$EB0400..$EB07FF` and reserved
+controller offsets `$EB0812..$EB7FFF` read as all ones and ignore writes;
+bulk initialization of these ranges must not raise a bus error or alias live
+registers. These addresses do not add another 128 sprites.
+
+Selection visits register numbers in ascending order and admits at
 most 32 enabled sprites intersecting the output row and viewport. Transparent
 patterns consume a slot; disabled and entirely offscreen entries do not.
 
