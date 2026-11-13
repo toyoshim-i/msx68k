@@ -1,11 +1,12 @@
 //! Virtual SCSI Subsystem (`$FC0000` ROM + `IOCS $F5` `_SCSIDRV` + `romdb` block driver)
 //! and Mixed Mode Hypercall Engine for X68000.
 
+use msx68k_cpu::{CpuState, TrapResult};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use msx68k_cpu::{CpuState, TrapResult};
 
 use crate::bus::X68kBus;
+use crate::vmx68k::RemoteDisk;
 
 /// Synthesizes the 1024-byte SCSI IPL sector (Record 1, offset 0x400).
 pub fn synthesize_scsi_ipl_sector(partition_start_record: u32) -> [u8; 1024] {
@@ -16,7 +17,7 @@ pub fn synthesize_scsi_ipl_sector(partition_start_record: u32) -> [u8; 1024] {
     sector[0x02..0x08].copy_from_slice(b"X68IPL");
 
     // Stub at 0x08: calls IOCS $F5 _S_READ ($21) to load partition boot sector at partition_start_record
-    // into $002000 and jumps to $002000.
+    // into $003000 and jumps there, leaving this IPL and its trap return PC intact.
     let mut code = Vec::new();
     code.extend_from_slice(&[0x70, 0xF5]); // moveq #-11, %d0
     code.extend_from_slice(&[0x72, 0x21]); // moveq #0x21, %d1
@@ -25,9 +26,9 @@ pub fn synthesize_scsi_ipl_sector(partition_start_record: u32) -> [u8; 1024] {
     code.extend_from_slice(&[0x76, 0x01]); // moveq #1, %d3
     code.extend_from_slice(&[0x78, 0x00]); // moveq #0, %d4
     code.extend_from_slice(&[0x7A, 0x02]); // moveq #2, %d5
-    code.extend_from_slice(&[0x22, 0x7C, 0x00, 0x00, 0x20, 0x00]); // movel #0x2000, %a1
+    code.extend_from_slice(&[0x22, 0x7C, 0x00, 0x00, 0x30, 0x00]); // movel #0x3000, %a1
     code.extend_from_slice(&[0x4E, 0x4F]); // trap #15
-    code.extend_from_slice(&[0x4E, 0xF9, 0x00, 0x00, 0x20, 0x00]); // jmp 0x2000
+    code.extend_from_slice(&[0x4E, 0xF9, 0x00, 0x00, 0x30, 0x00]); // jmp 0x3000
 
     sector[0x08..0x08 + code.len()].copy_from_slice(&code);
     sector
@@ -128,7 +129,22 @@ pub fn parse_scsi_partitions(disk_image: &[u8]) -> Option<Vec<ScsiPartition>> {
 
 /// Helper to detect partition start record, record count, and FAT BPB parameters from a SCSI disk image.
 pub(crate) fn detect_partition_params(disk: &[u8]) -> (usize, u32, usize, u8, u16, u8) {
-    if let Some(parts) = parse_scsi_partitions(disk) {
+    detect_partition_params_from(disk.len(), |offset, len| {
+        Some(disk.get(offset..offset.checked_add(len)?)?.to_vec())
+    })
+    .unwrap()
+}
+
+type PartitionParams = (usize, u32, usize, u8, u16, u8);
+
+// Read only the partition table and candidate boot sectors, also for remote images.
+// Transport errors are distinct from images without a recognized partition table.
+fn detect_partition_params_from(
+    len: usize,
+    read: impl Fn(usize, usize) -> Option<Vec<u8>>,
+) -> Option<PartitionParams> {
+    let header = read(0, len.min(0x890))?;
+    if let Some(parts) = parse_scsi_partitions(&header) {
         if let Some(p) = parts.iter().find(|p| &p.name == b"Human68k") {
             let start_rec = p.start_record as usize;
             let rec_count = p.record_count;
@@ -139,75 +155,78 @@ pub(crate) fn detect_partition_params(disk: &[u8]) -> (usize, u32, usize, u8, u1
 
             let off_1024 = start_rec * 1024;
             let off_512 = start_rec * 512;
-            let boot_off = if disk.len() >= off_1024 + 512
-                && (&disk[off_1024..off_1024 + 8] == b"X68SCSI1" || disk[off_1024] == 0x60)
-            {
-                Some((off_1024, 1024usize))
-            } else if disk.len() >= off_512 + 512
-                && (&disk[off_512..off_512 + 8] == b"X68SCSI1" || disk[off_512] == 0x60)
-            {
-                Some((off_512, 512usize))
-            } else {
-                None
-            };
+            let mut boot = None;
+            for (offset, size) in [(off_1024, 1024), (off_512, 512)] {
+                if offset.checked_add(512).is_some_and(|end| end <= len) {
+                    let bytes = read(offset, 512)?;
+                    if &bytes[..8] == b"X68SCSI1" || bytes[0] == 0x60 {
+                        boot = Some((bytes, size));
+                        break;
+                    }
+                }
+            }
 
-            if let Some((bo, default_sb)) = boot_off {
+            if let Some((disk, default_sb)) = boot {
                 sector_bytes = default_sb;
-                let be_sec = u16::from_be_bytes([disk[bo + 0x12], disk[bo + 0x13]]) as usize;
-                let le_sec = u16::from_le_bytes([disk[bo + 0x0B], disk[bo + 0x0C]]) as usize;
+                let be_sec = u16::from_be_bytes([disk[0x12], disk[0x13]]) as usize;
+                let le_sec = u16::from_le_bytes([disk[0x0B], disk[0x0C]]) as usize;
                 if be_sec == 256 || be_sec == 512 || be_sec == 1024 {
                     sector_bytes = be_sec;
-                    sec_per_clus = disk[bo + 0x14].max(1);
-                    let be_re = u16::from_be_bytes([disk[bo + 0x18], disk[bo + 0x19]]);
+                    sec_per_clus = disk[0x14].max(1);
+                    let be_re = u16::from_be_bytes([disk[0x18], disk[0x19]]);
                     if be_re != 0 {
                         root_entries = be_re;
                     }
-                    if disk[bo + 0x1D] != 0 {
-                        fat_sectors = disk[bo + 0x1D];
+                    if disk[0x1D] != 0 {
+                        fat_sectors = disk[0x1D];
                     }
                 } else if le_sec == 256 || le_sec == 512 || le_sec == 1024 {
                     sector_bytes = le_sec;
-                    sec_per_clus = disk[bo + 0x0D].max(1);
-                    let le_re = u16::from_le_bytes([disk[bo + 0x11], disk[bo + 0x12]]);
+                    sec_per_clus = disk[0x0D].max(1);
+                    let le_re = u16::from_le_bytes([disk[0x11], disk[0x12]]);
                     if le_re != 0 {
                         root_entries = le_re;
                     }
-                    let le_fs = u16::from_le_bytes([disk[bo + 0x16], disk[bo + 0x17]]);
+                    let le_fs = u16::from_le_bytes([disk[0x16], disk[0x17]]);
                     if le_fs != 0 {
                         fat_sectors = le_fs as u8;
                     }
                 }
             }
-            return (
+            return Some((
                 start_rec,
                 rec_count,
                 sector_bytes,
                 sec_per_clus,
                 root_entries,
                 fat_sectors,
-            );
+            ));
         }
     }
-    (
+    Some((
         32,
-        (disk.len() / 1024).saturating_sub(32) as u32,
+        (len / 1024).saturating_sub(32) as u32,
         1024,
         1,
         1024,
         64,
-    )
+    ))
 }
 
 /// Virtual SCSI Controller state attached to `X68kBus`.
 pub struct ScsiController {
     /// Up to 8 SCSI target disk images (512 or 1024 bytes per sector).
     pub drives: [Option<Vec<u8>>; 8],
+    /// Images owned by VMX68K.X, accessed only on the VM thread.
+    remote: [Option<RemoteDisk>; 8],
     /// Whether the Virtual SCSI ROM at `$FC0000` is active.
     pub scsi_rom_enabled: bool,
     /// Latched request packet pointer from Strategy routine (`A5`).
     pub req_ptr: u32,
     /// Address of registered block driver header in guest memory (`A4` during ScsiRomdbBuild).
     pub driver_addr: u32,
+    /// SCSI targets exposed as units of the synthesized Human68k driver.
+    driver_targets: Vec<usize>,
     /// Whether system boots primarily from SCSI HDD instead of floppy.
     pub boot_from_scsi: bool,
     /// Whether HDD target 0 has been written to since last persistence check.
@@ -225,9 +244,11 @@ impl ScsiController {
     pub fn new() -> Self {
         Self {
             drives: [None, None, None, None, None, None, None, None],
+            remote: std::array::from_fn(|_| None),
             scsi_rom_enabled: false,
             req_ptr: 0,
             driver_addr: 0,
+            driver_targets: Vec::new(),
             boot_from_scsi: false,
             dirty: false,
         }
@@ -244,10 +265,74 @@ impl ScsiController {
     pub fn insert_hdd(&mut self, scsi_id: usize, image: Vec<u8>) -> bool {
         if scsi_id < self.drives.len() {
             self.drives[scsi_id] = Some(image);
+            self.remote[scsi_id] = None;
             self.scsi_rom_enabled = true;
             true
         } else {
             false
+        }
+    }
+
+    /// Mounts an image without reading it: the primary must keep running to
+    /// service the bridge once the VM thread starts.
+    fn insert_remote(&mut self, target: usize, disk: RemoteDisk) -> bool {
+        if target >= self.drives.len() || disk.len() < 1024 || disk.len() % 512 != 0 {
+            return false;
+        }
+        self.drives[target] = None;
+        self.remote[target] = Some(disk);
+        true
+    }
+
+    fn len(&self, target: usize) -> Option<usize> {
+        self.remote
+            .get(target)?
+            .as_ref()
+            .map(RemoteDisk::len)
+            .or_else(|| self.drives[target].as_ref().map(Vec::len))
+    }
+
+    fn read(&self, target: usize, offset: usize, len: usize) -> Option<Vec<u8>> {
+        if offset.checked_add(len)? > self.len(target)? {
+            return None;
+        }
+        if let Some(disk) = self.remote[target].as_ref() {
+            disk.read(offset, len)
+        } else {
+            Some(
+                self.drives[target]
+                    .as_ref()?
+                    .get(offset..offset + len)?
+                    .to_vec(),
+            )
+        }
+    }
+
+    fn write(&mut self, target: usize, offset: usize, data: &[u8]) -> bool {
+        let Some(end) = offset.checked_add(data.len()) else {
+            return false;
+        };
+        if !self.len(target).is_some_and(|len| end <= len) {
+            return false;
+        }
+        if let Some(disk) = self.remote[target].as_ref() {
+            disk.write(offset, data.to_vec())
+        } else {
+            self.drives[target].as_mut().unwrap()[offset..end].copy_from_slice(data);
+            if target == 0 {
+                self.dirty = true;
+            }
+            true
+        }
+    }
+
+    fn partition_params(&self, target: usize) -> Option<PartitionParams> {
+        if let Some(disk) = self.hdd_data(target) {
+            Some(detect_partition_params(disk))
+        } else {
+            detect_partition_params_from(self.len(target)?, |offset, len| {
+                self.read(target, offset, len)
+            })
         }
     }
 
@@ -274,6 +359,21 @@ impl X68kBus {
             }
         }
         ok
+    }
+
+    /// Mounts a primary-owned image without changing the setup's SRAM boot choice.
+    pub fn insert_remote_scsi_hdd(&mut self, target: usize, disk: RemoteDisk) -> bool {
+        if !self.scsi.insert_remote(target, disk) {
+            return false;
+        }
+        self.enable_scsi_rom();
+        if target == 0 {
+            // The IPL may load the disk through IOCS instead of the ROM boot entry.
+            // Reflect an explicit ROM boot selection without rewriting SRAM.
+            self.scsi.boot_from_scsi = self.sram[0x18..0x1A] == [0, 1]
+                && self.sram[0x0C..0x10] == 0x00FC_0000u32.to_be_bytes();
+        }
+        true
     }
 
     /// Read-only slice access to SCSI target `scsi_id`.
@@ -369,27 +469,33 @@ impl X68kBus {
             self.main_ram[0x07D4..0x07D8].copy_from_slice(&0x00FC_0068u32.to_be_bytes());
         }
 
-        if let Some(disk) = self.scsi.hdd_data(0) {
-            // Check if IPL bootloader is present at offset 0x400
-            let has_ipl = disk.len() >= 0x800 && (disk[0x400] == 0x60 || disk[0x400] == 0x4E);
-            if has_ipl && self.main_ram.len() >= 0x2400 {
-                self.main_ram[0x2000..0x2400].copy_from_slice(&disk[0x400..0x800]);
-                state.pc = 0x0000_2000;
-                return TrapResult::Handled { extra_cycles: 0 };
+        // The ROM was actually chosen by the IPL; keep SRAM unchanged.
+        self.scsi.boot_from_scsi = true;
+        // This runs on the VM thread, where waiting for VMX68K.X is safe.
+        if let Some(len) = self.scsi.len(0) {
+            if let Some(ipl) = self.scsi.read(0, 0x400, 1024) {
+                if matches!(ipl[0], 0x60 | 0x4E) && self.main_ram.len() >= 0x2400 {
+                    self.main_ram[0x2000..0x2400].copy_from_slice(&ipl);
+                    state.pc = 0x2000;
+                    return TrapResult::Handled { extra_cycles: 0 };
+                }
             }
-
-            // Fallback: search for first Human68k partition boot sector
-            if let Some(parts) = parse_scsi_partitions(disk) {
-                if let Some(part) = parts.iter().find(|p| &p.name == b"Human68k") {
-                    let off = if disk.len() >= (part.start_record as usize) * 1024 + 1024 {
-                        (part.start_record as usize) * 1024
+            // Fallback: the first Human68k partition, as for resident images.
+            if let Some(header) = self.scsi.read(0, 0, len.min(0x890)) {
+                if let Some(part) = parse_scsi_partitions(&header)
+                    .and_then(|parts| parts.into_iter().find(|p| &p.name == b"Human68k"))
+                {
+                    let start = part.start_record as usize;
+                    let off = if start * 1024 + 1024 <= len {
+                        start * 1024
                     } else {
-                        (part.start_record as usize) * 512
+                        start * 512
                     };
-                    if disk.len() >= off + 1024 && self.main_ram.len() >= 0x2400 {
-                        self.main_ram[0x2000..0x2400].copy_from_slice(&disk[off..off + 1024]);
-                        state.pc = 0x0000_2000;
-                        return TrapResult::Handled { extra_cycles: 0 };
+                    if let Some(boot) = self.scsi.read(0, off, 1024) {
+                        if self.main_ram.len() >= 0x2400 {
+                            self.main_ram[0x2000..0x2400].copy_from_slice(&boot);
+                            state.pc = 0x2000;
+                        }
                     }
                 }
             }
@@ -405,42 +511,45 @@ impl X68kBus {
             self.main_ram[0x07D4..0x07D8].copy_from_slice(&0x00FC_0068u32.to_be_bytes());
         }
 
-        if state.d[2] == 0 && self.scsi.hdd_data(0).is_some() {
-            let a4 = (state.a[4] & 0x00FF_FFFF) as usize;
-            self.scsi.driver_addr = a4 as u32;
-            if a4 + 48 <= self.main_ram.len() {
-                // 22-byte Human68k block device driver header
-                self.main_ram[a4..a4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // Next driver
-                self.main_ram[a4 + 4..a4 + 6].copy_from_slice(&0x0000u16.to_be_bytes()); // Attribute
-                self.main_ram[a4 + 6..a4 + 10].copy_from_slice(&0x00FC_006Cu32.to_be_bytes()); // Strategy
-                self.main_ram[a4 + 10..a4 + 14].copy_from_slice(&0x00FC_0070u32.to_be_bytes()); // Interrupt
-                self.main_ram[a4 + 14] = 1; // 1 unit
-                self.main_ram[a4 + 15..a4 + 22].fill(0); // Reserved name bytes
-
-                // Extract partition information and BPB
-                let disk = self.scsi.hdd_data(0).unwrap();
-                let (start_rec, rec_count, sector_bytes, sec_per_clus, root_entries, fat_sectors) =
-                    detect_partition_params(disk);
-
-                // BPB pointer table at A4 + 22 (points to A4 + 26)
-                let bpb_ptr = (a4 as u32) + 26;
-                self.main_ram[a4 + 22..a4 + 26].copy_from_slice(&bpb_ptr.to_be_bytes());
-
-                // 20-byte Human68k BPB structure at A4 + 26
-                let sb_u16 = sector_bytes as u16;
-                self.main_ram[a4 + 26..a4 + 28].copy_from_slice(&sb_u16.to_be_bytes()); // Bytes per sector
-                self.main_ram[a4 + 28] = sec_per_clus; // Sectors per cluster
-                self.main_ram[a4 + 29] = 2; // Number of FATs
-                self.main_ram[a4 + 30..a4 + 32].copy_from_slice(&1u16.to_be_bytes()); // Reserved sectors
-                self.main_ram[a4 + 32..a4 + 34].copy_from_slice(&root_entries.to_be_bytes()); // Root dir entries
-                self.main_ram[a4 + 34..a4 + 36].copy_from_slice(&0u16.to_be_bytes()); // Total sectors 16-bit
-                self.main_ram[a4 + 36] = 0xF7; // Media descriptor
-                self.main_ram[a4 + 37] = fat_sectors; // FAT sectors per copy
-                self.main_ram[a4 + 38..a4 + 42].copy_from_slice(&rec_count.to_be_bytes()); // Total sectors 32-bit
-                let sr_u32 = start_rec as u32;
-                self.main_ram[a4 + 42..a4 + 46].copy_from_slice(&sr_u32.to_be_bytes()); // Partition start sector
-                self.main_ram[a4 + 46..a4 + 48].fill(0);
-
+        let targets: Vec<usize> = (0..8)
+            .filter(|&target| self.scsi.len(target).is_some())
+            .collect();
+        let a4 = (state.a[4] & 0x00FF_FFFF) as usize;
+        let units = targets.len();
+        // Header, one BPB pointer per unit, and a 22-byte BPB record per unit.
+        if state.d[2] == 0 && units != 0 && a4 + 22 + units * 26 <= self.main_ram.len() {
+            let params: Option<Vec<_>> = targets
+                .iter()
+                .map(|&target| self.scsi.partition_params(target))
+                .collect();
+            if let Some(params) = params {
+                self.scsi.driver_addr = a4 as u32;
+                self.scsi.driver_targets = targets;
+                self.main_ram[a4..a4 + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+                self.main_ram[a4 + 4..a4 + 6].fill(0);
+                self.main_ram[a4 + 6..a4 + 10].copy_from_slice(&0x00FC_006Cu32.to_be_bytes());
+                self.main_ram[a4 + 10..a4 + 14].copy_from_slice(&0x00FC_0070u32.to_be_bytes());
+                self.main_ram[a4 + 14] = units as u8;
+                self.main_ram[a4 + 15..a4 + 22].fill(0);
+                for (unit, (start, count, sector_bytes, per_cluster, root_entries, fat_sectors)) in
+                    params.into_iter().enumerate()
+                {
+                    let bpb = a4 + 22 + units * 4 + unit * 22;
+                    let ptr = a4 + 22 + unit * 4;
+                    self.main_ram[ptr..ptr + 4].copy_from_slice(&(bpb as u32).to_be_bytes());
+                    self.main_ram[bpb..bpb + 22].fill(0);
+                    self.main_ram[bpb..bpb + 2]
+                        .copy_from_slice(&(sector_bytes as u16).to_be_bytes());
+                    self.main_ram[bpb + 2] = per_cluster;
+                    self.main_ram[bpb + 3] = 2;
+                    self.main_ram[bpb + 4..bpb + 6].copy_from_slice(&1u16.to_be_bytes());
+                    self.main_ram[bpb + 6..bpb + 8].copy_from_slice(&root_entries.to_be_bytes());
+                    self.main_ram[bpb + 10] = 0xF7;
+                    self.main_ram[bpb + 11] = fat_sectors;
+                    self.main_ram[bpb + 12..bpb + 16].copy_from_slice(&count.to_be_bytes());
+                    self.main_ram[bpb + 16..bpb + 20]
+                        .copy_from_slice(&(start as u32).to_be_bytes());
+                }
                 state.d[2] = 1;
                 return TrapResult::Handled { extra_cycles: 0 };
             }
@@ -482,7 +591,7 @@ impl X68kBus {
             0x20 => {
                 // _S_INQUIRY: write 36-byte device descriptor to buffer A1
                 let target = ((state.d[4] >> 4) & 7) as usize;
-                if self.scsi.hdd_data(target).is_some() {
+                if self.scsi.len(target).is_some() {
                     let buf = (state.a[1] & 0x00FF_FFFF) as usize;
                     if buf + 36 <= self.main_ram.len() {
                         self.main_ram[buf..buf + 36].fill(0);
@@ -505,26 +614,17 @@ impl X68kBus {
             0x21 | 0x26 => {
                 // _S_READ ($21) / _S_READEXT ($26)
                 let target = ((state.d[4] >> 4) & 7) as usize;
-                if let Some(disk) = self.scsi.hdd_data(target) {
-                    let d5 = (state.d[5] & 3) as usize;
-                    let sector_bytes = if d5 <= 2 { 256usize << d5 } else { 512 };
-                    let lba = state.d[2] as usize;
-                    let count = (state.d[3] & 0xFFFF) as usize;
-                    let byte_offset = lba * sector_bytes;
-                    let transfer_bytes = count * sector_bytes;
-                    let dest = (state.a[1] & 0x00FF_FFFF) as usize;
-
-                    if dest + transfer_bytes <= self.main_ram.len()
-                        && byte_offset + transfer_bytes <= disk.len()
-                    {
-                        self.main_ram[dest..dest + transfer_bytes]
-                            .copy_from_slice(&disk[byte_offset..byte_offset + transfer_bytes]);
+                let d5 = (state.d[5] & 3) as usize;
+                let sector_bytes = if d5 <= 2 { 256usize << d5 } else { 512 };
+                let byte_offset = state.d[2] as usize * sector_bytes;
+                let transfer_bytes = (state.d[3] & 0xFFFF) as usize * sector_bytes;
+                let dest = (state.a[1] & 0x00FF_FFFF) as usize;
+                state.d[0] = u32::MAX;
+                if dest + transfer_bytes <= self.main_ram.len() {
+                    if let Some(data) = self.scsi.read(target, byte_offset, transfer_bytes) {
+                        self.main_ram[dest..dest + transfer_bytes].copy_from_slice(&data);
                         state.d[0] = 0;
-                    } else {
-                        state.d[0] = 0xFFFF_FFFF;
                     }
-                } else {
-                    state.d[0] = 0xFFFF_FFFF;
                 }
             }
             0x22 | 0x27 => {
@@ -532,28 +632,19 @@ impl X68kBus {
                 let target = ((state.d[4] >> 4) & 7) as usize;
                 let d5 = (state.d[5] & 3) as usize;
                 let sector_bytes = if d5 <= 2 { 256usize << d5 } else { 512 };
-                let lba = state.d[2] as usize;
-                let count = (state.d[3] & 0xFFFF) as usize;
-                let byte_offset = lba * sector_bytes;
-                let transfer_bytes = count * sector_bytes;
+                let byte_offset = state.d[2] as usize * sector_bytes;
+                let transfer_bytes = (state.d[3] & 0xFFFF) as usize * sector_bytes;
                 let src = (state.a[1] & 0x00FF_FFFF) as usize;
-
-                if let Some(disk) = self.scsi.hdd_data_mut(target) {
-                    if src + transfer_bytes <= self.main_ram.len()
-                        && byte_offset + transfer_bytes <= disk.len()
-                    {
-                        disk[byte_offset..byte_offset + transfer_bytes]
-                            .copy_from_slice(&self.main_ram[src..src + transfer_bytes]);
-                        if target == 0 {
-                            self.scsi.dirty = true;
-                        }
-                        state.d[0] = 0;
-                    } else {
-                        state.d[0] = 0xFFFF_FFFF;
-                    }
+                state.d[0] = if src + transfer_bytes <= self.main_ram.len()
+                    && self.scsi.write(
+                        target,
+                        byte_offset,
+                        &self.main_ram[src..src + transfer_bytes],
+                    ) {
+                    0
                 } else {
-                    state.d[0] = 0xFFFF_FFFF;
-                }
+                    u32::MAX
+                };
             }
             0x23 => {
                 // _S_FORMAT
@@ -562,7 +653,7 @@ impl X68kBus {
             0x24 => {
                 // _S_TESTUNIT
                 let target = ((state.d[4] >> 4) & 7) as usize;
-                state.d[0] = if self.scsi.hdd_data(target).is_some() {
+                state.d[0] = if self.scsi.len(target).is_some() {
                     0
                 } else {
                     0xFFFF_FFFF
@@ -571,11 +662,11 @@ impl X68kBus {
             0x25 => {
                 // _S_READCAP: returns (last_lba, block_size)
                 let target = ((state.d[4] >> 4) & 7) as usize;
-                if let Some(disk) = self.scsi.hdd_data(target) {
+                if let Some(len) = self.scsi.len(target) {
                     let buf = (state.a[1] & 0x00FF_FFFF) as usize;
                     if buf + 8 <= self.main_ram.len() {
                         let block_size = 1024u32;
-                        let last_lba = ((disk.len() / (block_size as usize)).saturating_sub(1)) as u32;
+                        let last_lba = ((len / (block_size as usize)).saturating_sub(1)) as u32;
                         self.main_ram[buf..buf + 4].copy_from_slice(&last_lba.to_be_bytes());
                         self.main_ram[buf + 4..buf + 8].copy_from_slice(&block_size.to_be_bytes());
                         state.d[0] = 0;
@@ -646,11 +737,17 @@ impl X68kBus {
         if matches!(cmd, 4 | 8 | 9) {
             self.note_drive_access();
         }
+        let units = self.scsi.driver_targets.len();
+        let unit = self.main_ram[req_ptr + 1] as usize;
+        if cmd != 0 && unit >= units {
+            self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&0x8102u16.to_be_bytes());
+            return TrapResult::Handled { extra_cycles: 0 };
+        }
         match cmd {
             0 => {
                 // INIT (Command 0)
-                self.main_ram[req_ptr + 13] = 1; // 1 unit
-                let break_addr = self.scsi.driver_addr + 48;
+                self.main_ram[req_ptr + 13] = units as u8;
+                let break_addr = self.scsi.driver_addr + 22 + units as u32 * 26;
                 self.main_ram[req_ptr + 14..req_ptr + 18]
                     .copy_from_slice(&break_addr.to_be_bytes());
                 let bpb_table_ptr = self.scsi.driver_addr + 22;
@@ -669,9 +766,8 @@ impl X68kBus {
             }
             2 => {
                 // BUILD BPB (Command 2)
-                let bpb_ptr = self.scsi.driver_addr + 26;
-                self.main_ram[req_ptr + 18..req_ptr + 22]
-                    .copy_from_slice(&bpb_ptr.to_be_bytes());
+                let bpb_ptr = self.scsi.driver_addr + 22 + units as u32 * 4 + unit as u32 * 22;
+                self.main_ram[req_ptr + 18..req_ptr + 22].copy_from_slice(&bpb_ptr.to_be_bytes());
                 self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&0x0000u16.to_be_bytes());
             }
             5 => {
@@ -679,72 +775,58 @@ impl X68kBus {
                 self.main_ram[req_ptr + 13] = 0x02;
                 self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&0x0000u16.to_be_bytes());
             }
-            4 => {
-                // READ (Command 4)
-                let dest = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 14..req_ptr + 18].try_into().unwrap(),
+            4 | 8 | 9 => {
+                let buffer = u32::from_be_bytes(
+                    self.main_ram[req_ptr + 14..req_ptr + 18]
+                        .try_into()
+                        .unwrap(),
                 ) as usize;
                 let count = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 18..req_ptr + 22].try_into().unwrap(),
+                    self.main_ram[req_ptr + 18..req_ptr + 22]
+                        .try_into()
+                        .unwrap(),
                 ) as usize;
                 let lba = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 22..req_ptr + 26].try_into().unwrap(),
+                    self.main_ram[req_ptr + 22..req_ptr + 26]
+                        .try_into()
+                        .unwrap(),
                 ) as usize;
-
-                if let Some(disk) = self.scsi.hdd_data(0) {
-                    let (start_rec, _, sector_bytes, _, _, _) = detect_partition_params(disk);
-                    let byte_offset = (start_rec + lba) * sector_bytes;
-                    let transfer_bytes = count * sector_bytes;
-
-                    if dest + transfer_bytes <= self.main_ram.len()
-                        && byte_offset + transfer_bytes <= disk.len()
-                    {
-                        self.main_ram[dest..dest + transfer_bytes]
-                            .copy_from_slice(&disk[byte_offset..byte_offset + transfer_bytes]);
-                        self.main_ram[req_ptr + 3..req_ptr + 5]
-                            .copy_from_slice(&0x0000u16.to_be_bytes());
+                let target = self.scsi.driver_targets[unit];
+                let fault = if cmd == 4 { 0x810B } else { 0x810A };
+                let status: u16 = if let Some((start_rec, _, sector_bytes, _, _, _)) =
+                    self.scsi.partition_params(target)
+                {
+                    let range = start_rec
+                        .checked_add(lba)
+                        .and_then(|record| record.checked_mul(sector_bytes))
+                        .zip(count.checked_mul(sector_bytes));
+                    let ok = range.is_some_and(|(offset, len)| {
+                        if !buffer
+                            .checked_add(len)
+                            .is_some_and(|end| end <= self.main_ram.len())
+                        {
+                            return false;
+                        }
+                        if cmd == 4 {
+                            if let Some(data) = self.scsi.read(target, offset, len) {
+                                self.main_ram[buffer..buffer + len].copy_from_slice(&data);
+                                return true;
+                            }
+                            false
+                        } else {
+                            self.scsi
+                                .write(target, offset, &self.main_ram[buffer..buffer + len])
+                        }
+                    });
+                    if ok {
+                        0
                     } else {
-                        self.main_ram[req_ptr + 3..req_ptr + 5]
-                            .copy_from_slice(&0x810Bu16.to_be_bytes()); // Read fault
+                        fault
                     }
                 } else {
-                    self.main_ram[req_ptr + 3..req_ptr + 5]
-                        .copy_from_slice(&0x8102u16.to_be_bytes()); // Drive not ready
-                }
-            }
-            8 | 9 => {
-                // WRITE / WRITE VERIFY (Command 8 / 9)
-                let src = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 14..req_ptr + 18].try_into().unwrap(),
-                ) as usize;
-                let count = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 18..req_ptr + 22].try_into().unwrap(),
-                ) as usize;
-                let lba = u32::from_be_bytes(
-                    self.main_ram[req_ptr + 22..req_ptr + 26].try_into().unwrap(),
-                ) as usize;
-
-                if let Some(disk) = self.scsi.hdd_data_mut(0) {
-                    let (start_rec, _, sector_bytes, _, _, _) = detect_partition_params(disk);
-                    let byte_offset = (start_rec + lba) * sector_bytes;
-                    let transfer_bytes = count * sector_bytes;
-
-                    if src + transfer_bytes <= self.main_ram.len()
-                        && byte_offset + transfer_bytes <= disk.len()
-                    {
-                        disk[byte_offset..byte_offset + transfer_bytes]
-                            .copy_from_slice(&self.main_ram[src..src + transfer_bytes]);
-                        self.scsi.dirty = true;
-                        self.main_ram[req_ptr + 3..req_ptr + 5]
-                            .copy_from_slice(&0x0000u16.to_be_bytes());
-                    } else {
-                        self.main_ram[req_ptr + 3..req_ptr + 5]
-                            .copy_from_slice(&0x810Au16.to_be_bytes()); // Write fault
-                    }
-                } else {
-                    self.main_ram[req_ptr + 3..req_ptr + 5]
-                        .copy_from_slice(&0x8102u16.to_be_bytes());
-                }
+                    0x8102 // Drive not ready, including a disconnected bridge.
+                };
+                self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&status.to_be_bytes());
             }
             _ => {
                 self.main_ram[req_ptr + 3..req_ptr + 5].copy_from_slice(&0x0000u16.to_be_bytes());
@@ -1466,4 +1548,184 @@ pub fn build_bootable_sxwin_scsi_hdd_with_files(
     image[fat2_off..fat2_off + fat_bytes].copy_from_slice(&fat);
 
     image
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::vmx68k::{vm_bridge, BridgeOp, BridgeReply};
+
+    fn image(sector_bytes: usize) -> Vec<u8> {
+        let mut disk = vec![0; 4 * 1024 * 1024];
+        let records = (disk.len() / sector_bytes - 16) as u32;
+        disk[0x800..0x804].copy_from_slice(b"X68K");
+        disk[0x810..0x818].copy_from_slice(b"Human68k");
+        disk[0x818..0x81C].copy_from_slice(&16u32.to_be_bytes());
+        disk[0x81C..0x820].copy_from_slice(&records.to_be_bytes());
+        let boot = 16 * sector_bytes;
+        disk[boot] = 0x60;
+        disk[boot + 0x12..boot + 0x14].copy_from_slice(&(sector_bytes as u16).to_be_bytes());
+        disk[boot + 0x14] = 2;
+        disk[boot + 0x18..boot + 0x1A].copy_from_slice(&512u16.to_be_bytes());
+        disk[boot + 0x1D] = 4;
+        disk
+    }
+
+    fn serve(mut image: Vec<u8>) -> (RemoteDisk, std::thread::JoinHandle<Vec<u8>>) {
+        let (bridge, requests) = vm_bridge();
+        let disk = RemoteDisk::with_handle(bridge, 23, image.len());
+        let server = std::thread::spawn(move || {
+            while let Ok(request) = requests.recv() {
+                let (result, data) = match request.op {
+                    BridgeOp::HandleRead {
+                        handle,
+                        offset,
+                        len,
+                    } => {
+                        assert_eq!(handle, 23);
+                        assert!(len <= 32768, "VMX68K.X buffer limit");
+                        (
+                            len,
+                            image[offset as usize..(offset + len) as usize].to_vec(),
+                        )
+                    }
+                    BridgeOp::HandleWrite {
+                        handle,
+                        offset,
+                        data,
+                    } => {
+                        assert_eq!(handle, 23);
+                        assert!(data.len() <= 32768);
+                        image[offset as usize..offset as usize + data.len()].copy_from_slice(&data);
+                        (data.len() as u32, vec![])
+                    }
+                    op => panic!("unexpected disk request: {op:?}"),
+                };
+                let _ = request.reply.send(Some(BridgeReply { result, data }));
+            }
+            image
+        });
+        (disk, server)
+    }
+
+    #[test]
+    fn remote_partition_metadata_matches_resident_images() {
+        for size in [512, 1024] {
+            let image = image(size);
+            let expected = detect_partition_params(&image);
+            assert_eq!(
+                expected,
+                (16, (image.len() / size - 16) as u32, size, 2, 512, 4)
+            );
+            let (disk, server) = serve(image);
+            let mut scsi = ScsiController::new();
+            assert!(scsi.insert_remote(0, disk));
+            assert_eq!(scsi.partition_params(0), Some(expected));
+            assert!(scsi.hdd_data(0).is_none());
+            drop(scsi);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn remote_iocs_transfers_are_chunked_and_written_through() {
+        let image = image(1024);
+        let image_len = image.len();
+        let (disk, server) = serve(image);
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        let saved_sram = bus.sram().to_vec();
+        assert!(bus.insert_remote_scsi_hdd(3, disk));
+        assert_eq!(bus.sram(), saved_sram);
+        let mut state = CpuState::default();
+        state.d[4] = 3 << 4;
+        state.a[1] = 0x20000;
+        state.d[1] = 0x25;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert_eq!(bus.peek_u32(0x20000), Some(image_len as u32 / 1024 - 1));
+        assert_eq!(bus.peek_u32(0x20004), Some(1024));
+
+        let bytes: Vec<u8> = (0..65536).map(|i| (i * 13) as u8).collect();
+        bus.main_ram[0x20000..0x30000].copy_from_slice(&bytes);
+        state.d[1] = 0x27;
+        state.d[2] = 128;
+        state.d[3] = 64;
+        state.d[5] = 2;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert!(
+            !bus.scsi.take_dirty(),
+            "remote writes are already persistent"
+        );
+        bus.main_ram[0x20000..0x30000].fill(0);
+        state.d[1] = 0x26;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert_eq!(&bus.main_ram[0x20000..0x30000], bytes.as_slice());
+        state.d[2] = image_len as u32 / 1024;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], u32::MAX, "out of range disk read");
+        state.d[2] = 0;
+        state.a[1] = 0xFF0000;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], u32::MAX, "out of range RAM read");
+        state.d[4] = 0;
+        state.d[1] = 0x24;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], u32::MAX, "missing target");
+        drop(bus);
+        let image = server.join().unwrap();
+        assert_eq!(&image[128 * 1024..192 * 1024], bytes.as_slice());
+    }
+
+    #[test]
+    fn driver_units_route_to_their_scsi_targets() {
+        let (remote, server) = serve(image(512));
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        assert!(bus.insert_remote_scsi_hdd(3, remote));
+        assert!(bus.insert_scsi_hdd(0, image(1024)));
+        let mut state = CpuState::default();
+        state.a[4] = 0x10000;
+        bus.hypercall_scsi_romdb_build(&mut state);
+        assert_eq!(state.d[2], 1);
+        assert_eq!(bus.peek_u8(0x1000E), Some(2));
+        assert_eq!(bus.peek_u16(0x10000 + 30), Some(1024));
+        assert_eq!(bus.peek_u16(0x10000 + 52), Some(512));
+        bus.scsi.req_ptr = 0x18000;
+        // Unit 1 is target 3, whose partition starts at record 16, with 512-byte sectors.
+        bus.main_ram[0x18001] = 1;
+        bus.main_ram[0x18002] = 8;
+        bus.main_ram[0x1800E..0x18012].copy_from_slice(&0x20000u32.to_be_bytes());
+        bus.main_ram[0x18012..0x18016].copy_from_slice(&1u32.to_be_bytes());
+        bus.main_ram[0x18016..0x1801A].copy_from_slice(&8u32.to_be_bytes());
+        bus.main_ram[0x20000..0x20200].fill(0xA5);
+        bus.hypercall_scsi_driver_interrupt(&mut state);
+        assert_eq!(bus.peek_u16(0x18003), Some(0));
+        bus.main_ram[0x20000..0x20200].fill(0);
+        bus.main_ram[0x18002] = 4;
+        bus.hypercall_scsi_driver_interrupt(&mut state);
+        assert_eq!(bus.peek_u16(0x18003), Some(0));
+        assert!(bus.main_ram[0x20000..0x20200].iter().all(|&b| b == 0xA5));
+        assert!(bus.scsi.hdd_data(0).unwrap().iter().all(|&b| b != 0xA5));
+        drop(bus);
+        let image = server.join().unwrap();
+        assert!(image[24 * 512..25 * 512].iter().all(|&b| b == 0xA5));
+    }
+
+    #[test]
+    fn disconnected_images_fail_without_waiting() {
+        let (bridge, requests) = vm_bridge();
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        assert!(bus.insert_remote_scsi_hdd(0, RemoteDisk::with_handle(bridge, 23, 4096)));
+        drop(requests);
+        let mut state = CpuState::default();
+        state.d[1] = 0x21;
+        state.d[3] = 1;
+        bus.hypercall_scsi_iocs_dispatch(&mut state);
+        assert_eq!(state.d[0], u32::MAX);
+        state.a[4] = 0x10000;
+        state.d[2] = 0;
+        bus.hypercall_scsi_romdb_build(&mut state);
+        assert_eq!(state.d[2], u32::MAX);
+    }
 }

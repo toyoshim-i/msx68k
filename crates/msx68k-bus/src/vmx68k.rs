@@ -137,7 +137,7 @@ impl VmBridge {
     }
 }
 
-/// A disk image that the primary VM keeps, which a VM's floppy drive reads and writes through
+/// A disk image that the primary VM keeps, which a VM's floppy or SCSI drive accesses through
 /// its [`VmBridge`].
 #[derive(Debug, Clone)]
 pub struct RemoteDisk {
@@ -166,9 +166,21 @@ impl RemoteDisk {
         self.len == 0
     }
 
-    /// Reads `len` bytes at `offset`, waiting for the primary VM.
+    /// Reads an image range, splitting transfers to fit VMX68K.X's 32 KB buffer.
     pub(crate) fn read(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
-        let (offset, count) = (offset as u32, len as u32);
+        if offset.checked_add(len)? > self.len {
+            return None;
+        }
+        let mut data = Vec::with_capacity(len);
+        while data.len() < len {
+            let count = (len - data.len()).min(32768);
+            data.extend(self.read_chunk(offset + data.len(), count)?);
+        }
+        Some(data)
+    }
+
+    fn read_chunk(&self, offset: usize, len: usize) -> Option<Vec<u8>> {
+        let (offset, count) = (u32::try_from(offset).ok()?, u32::try_from(len).ok()?);
         let (op, done) = match self.handle {
             Some(handle) => (BridgeOp::HandleRead { handle, offset, len: count }, count),
             None => (BridgeOp::Read { offset, len: count }, 0),
@@ -179,9 +191,18 @@ impl RemoteDisk {
             .map(|reply| reply.data)
     }
 
-    /// Writes `data` at `offset`, waiting for the primary VM.
+    /// Writes through in chunks; a failed transfer may have written earlier chunks.
     pub(crate) fn write(&self, offset: usize, data: Vec<u8>) -> bool {
-        let offset = offset as u32;
+        if !offset.checked_add(data.len()).is_some_and(|end| end <= self.len) {
+            return false;
+        }
+        data.chunks(32768).enumerate().all(|(i, bytes)| {
+            self.write_chunk(offset + i * 32768, bytes.to_vec())
+        })
+    }
+
+    fn write_chunk(&self, offset: usize, data: Vec<u8>) -> bool {
+        let Ok(offset) = u32::try_from(offset) else { return false };
         let (op, done) = match self.handle {
             Some(handle) => {
                 let len = data.len() as u32;
@@ -246,15 +267,17 @@ pub enum CustomDrive {
 const DRIVE_TABLE_ENTRY: u32 = 8;
 
 impl X68kBus {
-    /// Installs raw floppy images from a custom setup, in row order. Missing images
-    /// reserve an empty floppy unit. Returns entries needing a later storage backend
-    /// (HDD, shared, passthrough, or more than four floppies).
-    pub fn install_custom_floppies(
+    /// Installs raw floppy and HDD images from a custom setup, assigning FDD units
+    /// and SCSI IDs independently in row order. Missing images reserve an empty
+    /// floppy unit. Returns unsupported rows or images beyond the device limits.
+    /// Mounting performs no I/O and preserves the setup's SRAM boot choice.
+    pub fn install_custom_drives(
         &mut self,
         bridge: VmBridge,
         drives: &[CustomDrive],
     ) -> Vec<CustomDrive> {
         let mut unit = 0;
+        let mut target = 0;
         let mut unsupported = Vec::new();
         for &drive in drives {
             match drive {
@@ -268,6 +291,14 @@ impl X68kBus {
                         false,
                     );
                     unit += 1;
+                }
+                CustomDrive::File { handle, len }
+                    if crate::fdc::FloppyGeometry::from_image_len(len as usize).is_none()
+                        && self.insert_remote_scsi_hdd(
+                            target, RemoteDisk::with_handle(bridge.clone(), handle, len as usize),
+                        ) =>
+                {
+                    target += 1;
                 }
                 CustomDrive::Missing if unit < 4 => unit += 1,
                 _ => unsupported.push(drive),

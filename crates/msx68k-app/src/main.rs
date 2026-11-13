@@ -909,7 +909,7 @@ impl Msx68kApp {
             }
         } else if let Some(custom) = custom {
             let (bridge, requests) = msx68k_bus::vmx68k::vm_bridge();
-            for drive in vm.bus.install_custom_floppies(bridge, &custom) {
+            for drive in vm.bus.install_custom_drives(bridge, &custom) {
                 eprintln!("VM {id}: custom drive not supported yet: {drive:?}");
             }
             self.vm.bus.attach_vm_bridge(id, requests);
