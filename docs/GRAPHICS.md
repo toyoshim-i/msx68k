@@ -91,17 +91,20 @@ that were already displayed.
 
 ## Fetch timing refinement
 
-The line-boundary rule is a text/graphics approximation. BG and sprite attributes
-need their own fetch stages and buffering rules. Do not apply one unverified
-next-line rule to every attribute.
+Separate the CPU write position from the point where a value is fetched and the
+point where it affects output. Graphics scroll, VRAM reads, palette conversion
+and display control can belong to different stages. BG and sprite attributes
+also need their own fetch and buffering rules. Do not assign one unverified
+next-line rule or delay count to every attribute.
 
-Keep the CPU write position separate from display timing. A future timestamped
-change history should feed attribute-specific latches and delays before producing
-output state. Current row snapshots describe display state, not complete write
-timing. Keep CPU history independent of GPU representation: small row values can
-use fixed-size records, and large palettes or PCG data can be shared by reference.
-Shader access must remain bounded rather than searching a change log per pixel;
-measure the cost of indirect references.
+The data stored in a line buffer matters: palette codes and converted colors
+respond differently to later palette writes. Buffer count alone does not specify
+latency. Keep CPU history independent of GPU representation. A future timestamped change
+history should feed attribute-specific latches and delays, then produce display
+state. Current row snapshots describe output state, not complete write timing.
+Small row values can use fixed-size records, with large palettes or PCG data
+shared by reference. Shader access must remain bounded rather than searching a
+change log per pixel; measure the cost of indirect references.
 
 ## Validation and remaining scope
 
