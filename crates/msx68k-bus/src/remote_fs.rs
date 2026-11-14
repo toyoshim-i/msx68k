@@ -16,7 +16,18 @@ use msx68k_cpu::{CpuState, TrapResult};
 
 use crate::bus::X68kBus;
 use crate::hypercall::{HypercallId, HYPERCALL_OPCODE};
-use crate::vmx68k::{BridgeOp, VmBridge};
+use crate::vmx68k::{BridgeOp, BridgeReply, VmBridge};
+
+/// Backend interface for servicing remote drive filesystem operations.
+pub trait RemoteBridge: Send + Sync + std::fmt::Debug {
+    fn ask(&self, op: BridgeOp) -> Option<BridgeReply>;
+}
+
+impl RemoteBridge for VmBridge {
+    fn ask(&self, op: BridgeOp) -> Option<BridgeReply> {
+        self.ask(op)
+    }
+}
 
 /// Where the boot ROM lives in the VM, the internal SCSI ROM window.
 const ROM_BASE: u32 = 0x00FC_0000;
@@ -40,6 +51,7 @@ const HUMAN_BASE: u32 = 0x6800;
 
 /// Bytes VMX68K.SX can move at once, its buffer.
 const CHUNK: u32 = 32 * 1024;
+const SEARCH_MAGIC: u32 = 0x4D53_5846; // MSXF, in the guest's eight search-work bytes.
 
 // Human68k DOS errors.
 const DOS_FILE_NOT_FOUND: u32 = -2i32 as u32;
@@ -67,15 +79,16 @@ enum OpenFile {
 /// The VM's remote drives.
 #[derive(Debug)]
 pub struct RemoteFs {
-    bridge: VmBridge,
+    bridge: Box<dyn RemoteBridge>,
     /// The primary's drive number (1 is A:) of each unit.
     drives: Vec<u32>,
     /// Device header built by the install routine, and the request the strategy routine got.
     header: u32,
     request: u32,
     files: HashMap<u32, OpenFile>,
-    /// The primary's search buffer behind each `_FILES` buffer of the VM.
+    /// The primary's search buffer behind each guest search ID (buffers can move).
     searches: HashMap<u32, Vec<u8>>,
+    next_search_id: u32,
     /// Shared mode boots from these drives; custom mode adds them without booting.
     boot: bool,
     /// Whether `\CONFIG.SYS` is still the VM's own, and the shell whose start ends that.
@@ -85,7 +98,12 @@ pub struct RemoteFs {
 
 impl RemoteFs {
     /// Remote drives for the primary's drives `drives` (1 is A:), the first one booted from.
-    pub fn new(bridge: VmBridge, drives: Vec<u32>) -> Self {
+    pub fn new<B: RemoteBridge + 'static>(bridge: B, drives: Vec<u32>) -> Self {
+        Self::with_boxed_bridge(Box::new(bridge), drives)
+    }
+
+    /// Remote drives using a pre-boxed bridge implementation.
+    pub fn with_boxed_bridge(bridge: Box<dyn RemoteBridge>, drives: Vec<u32>) -> Self {
         Self {
             bridge,
             drives,
@@ -93,6 +111,7 @@ impl RemoteFs {
             request: 0,
             files: HashMap::new(),
             searches: HashMap::new(),
+            next_search_id: 1,
             boot: true,
             own_config: true,
             shell: b"COMMAND.X".to_vec(),
@@ -159,7 +178,16 @@ impl X68kBus {
     /// changing SRAM, or disconnecting its physical floppy units. Human68k installs
     /// this device through the SCSI ROM's driver enumeration.
     pub fn install_remote_drives(&mut self, bridge: VmBridge, drives: Vec<u32>) {
-        let mut fs = RemoteFs::new(bridge, drives);
+        self.install_remote_drives_with_bridge(Box::new(bridge), drives);
+    }
+
+    /// Installs remote drives using any implementation of [`RemoteBridge`].
+    pub fn install_remote_drives_with_bridge(
+        &mut self,
+        bridge: Box<dyn RemoteBridge>,
+        drives: Vec<u32>,
+    ) {
+        let mut fs = RemoteFs::with_boxed_bridge(bridge, drives);
         fs.boot = false;
         fs.own_config = false;
         self.remote_fs = Some(Box::new(fs));
@@ -183,6 +211,17 @@ impl X68kBus {
             self.rom[off..off + 4].copy_from_slice(&[hi, lo, 0x4E, 0x75]);
             self.register_hypercall(addr, id);
         }
+    }
+
+    /// Installs host directories as file-level remote drives on the VM.
+    /// Drives are mounted after physical floppy and SCSI HDD units.
+    pub fn install_host_remote_drives(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let drives: Vec<u32> = (1..=paths.len() as u32).collect();
+        let bridge = Box::new(crate::host_fs::HostFsBridge::new(paths));
+        self.install_remote_drives_with_bridge(bridge, drives);
     }
 
     /// Answers ROM boot metadata with the HDD-only anchor, preserving SRAM.
@@ -363,7 +402,10 @@ impl X68kBus {
         let result = match command {
             // CHDIR: the directory must exist; Human68k keeps the current directory.
             0x41 => {
-                let name = self.namests(param14);
+                let mut name = self.namests(param14);
+                // CHDIR supplies the directory in the path field; its filename
+                // fields are not part of the requested directory.
+                name.name.clear();
                 let mut path = name.primary_path(drive);
                 if path.ends_with(b"\\") && path.len() > 3 {
                     path.pop();
@@ -456,7 +498,10 @@ impl X68kBus {
                 self.poke_u8(request + 13, 0x02);
                 0
             }
-            // GETDPB: a remote device has 0 bytes per sector, and the rest is not used.
+            // GETDPB: param14 points at DPB+2, after Human68k's drive/unit bytes.
+            // A zero sector size identifies a file-level remote device. Inventing
+            // HDD geometry makes callers attempt raw FAT/directory access, and
+            // writing past this 16-byte payload corrupts the device pointer.
             0x52 => {
                 for i in 0..16 {
                     self.poke_u8(param14 + i, 0);
@@ -517,16 +562,30 @@ impl X68kBus {
         };
         if result == 0 {
             self.copy_found_entry(buffer, &data);
-        }
-        if let Some(fs) = self.remote_fs.as_mut() {
-            fs.searches.insert(buffer, data);
+            if let Some(fs) = self.remote_fs.as_mut() {
+                let mut id = fs.next_search_id;
+                while fs.searches.contains_key(&id) {
+                    id = id.wrapping_add(1).max(1);
+                }
+                fs.next_search_id = id.wrapping_add(1).max(1);
+                fs.searches.insert(id, data);
+                self.poke_u32_be(buffer + 2, SEARCH_MAGIC);
+                self.poke_u32_be(buffer + 6, id);
+            }
+        } else {
+            self.poke_u32_be(buffer + 2, 0);
+            self.poke_u32_be(buffer + 6, 0);
         }
         result
     }
 
     /// `$48` NFILES: goes on with the primary's search behind the VM's buffer.
     fn remote_nfiles(&mut self, buffer: u32) -> u32 {
-        let Some(previous) = self.remote_fs.as_ref().and_then(|fs| fs.searches.get(&buffer).cloned()) else {
+        if self.peek_u32(buffer + 2) != Some(SEARCH_MAGIC) {
+            return DOS_FILE_NOT_FOUND;
+        }
+        let id = self.peek_u32(buffer + 6).unwrap_or(0);
+        let Some(previous) = self.remote_fs.as_ref().and_then(|fs| fs.searches.get(&id).cloned()) else {
             return DOS_FILE_NOT_FOUND;
         };
         let Some(reply) = self.ask(BridgeOp::Nfiles { buffer: previous }) else {
@@ -536,12 +595,18 @@ impl X68kBus {
             self.copy_found_entry(buffer, &reply.data);
         }
         if let Some(fs) = self.remote_fs.as_mut() {
-            fs.searches.insert(buffer, reply.data);
+            if reply.result == 0 {
+                fs.searches.insert(id, reply.data);
+            } else {
+                fs.searches.remove(&id);
+                self.poke_u32_be(buffer + 2, 0);
+                self.poke_u32_be(buffer + 6, 0);
+            }
         }
         reply.result
     }
 
-    /// Copies what a search found, from attribute to name, into the VM's buffer.
+    /// Copies the result fields, preserving Human68k's search pattern at 10..21.
     fn copy_found_entry(&mut self, buffer: u32, data: &[u8]) {
         for (i, &byte) in data.iter().enumerate().take(53).skip(21) {
             self.poke_u8(buffer + i as u32, byte);
@@ -773,6 +838,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_results_preserve_the_guests_wildcard_pattern() {
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        let buffer = 0x40000;
+        let pattern = b"????????TXT";
+        for (i, byte) in pattern.iter().enumerate() {
+            bus.poke_u8(buffer + 10 + i as u32, *byte);
+        }
+        let mut found = vec![0; 53];
+        found[10..21].copy_from_slice(b"HELLO   TXT");
+        found[21] = 0x20;
+        found[30..40].copy_from_slice(b"HELLO.TXT\0");
+        bus.copy_found_entry(buffer, &found);
+        for (i, byte) in pattern.iter().enumerate() {
+            assert_eq!(bus.peek_u8(buffer + 10 + i as u32), Some(*byte));
+        }
+        assert_eq!(bus.peek_u8(buffer + 21), Some(0x20));
+        assert_eq!(bus.peek_u8(buffer + 30), Some(b'H'));
+    }
+
+    #[test]
+    fn getdpb_writes_only_the_remote_geometry_payload() {
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        let (bridge, _) = crate::vmx68k::vm_bridge();
+        bus.install_remote_drives(bridge, vec![1]);
+        let request = 0x30000;
+        let buffer = 0x40000;
+        for i in 0..20 {
+            bus.poke_u8(buffer + i, 0xA5);
+        }
+        // Human68k passes the address AFTER the drive and unit bytes.
+        bus.poke_u32_be(request + 14, buffer + 2);
+        assert_eq!(bus.remote_command(request, 0x52, 1), (0, 0));
+        assert_eq!(bus.peek_u16(buffer), Some(0xA5A5));
+        for i in 2..18 {
+            assert_eq!(bus.peek_u8(buffer + i), Some(0), "remote geometry byte {i}");
+        }
+        assert_eq!(bus.peek_u16(buffer + 18), Some(0xA5A5), "device pointer must survive");
+    }
+
+    #[test]
     fn custom_shares_preserve_devices_and_boot_state() {
         let (bridge, requests) = crate::vmx68k::vm_bridge();
         let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
@@ -867,5 +972,89 @@ mod tests {
             Some(&b"FISH.X"[..])
         );
         assert_eq!(shell_of(DEFAULT_CONFIG), None);
+    }
+
+    #[test]
+    fn host_remote_drives_mount_and_execute_filesystem_commands() {
+        let dir = std::env::temp_dir().join(format!("msx68k_bus_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("TEST.TXT"), b"MSX68K HOST FS").unwrap();
+
+        let mut bus = X68kBus::new(1024 * 1024, crate::CpuSpeedMode::Burst.timing_config());
+        bus.install_host_remote_drives(vec![dir.clone()]);
+
+        // SCSI ROM and hypercalls should be configured for custom remote driver
+        assert!(bus.is_scsi_rom_enabled());
+        assert!(bus.has_custom_remote_drives());
+
+        // Install driver at 0x10000
+        let mut state = CpuState::default();
+        state.a[4] = 0x20000;
+        state.a[1] = 0x10000;
+        bus.hypercall_custom_install(&mut state);
+        assert_eq!(state.d[2], 2);
+        assert_eq!(bus.peek_u16(0x10004), Some(0x2000)); // Remote device type
+
+        // Request INIT (Command $40)
+        let request = 0x30000;
+        bus.poke_u8(request + 1, 0); // Unit 0
+        bus.poke_u8(request + 2, 0x40); // Command $40
+        bus.poke_u32_be(request + 14, 0);
+        bus.remote_init(request);
+        assert_eq!(bus.peek_u8(request + 13), Some(1)); // 1 unit
+
+        // Open TEST.TXT (Command $4A)
+        // Set up NAMESTS at 0x40000:
+        // offset 2: path (root: "\")
+        // offset 67: name ("TEST    ")
+        // offset 75: ext ("TXT")
+        let namests = 0x40000;
+        bus.poke_u8(namests + 2, b'\\');
+        bus.poke_u8(namests + 3, 0);
+        for (i, &b) in b"TEST    ".iter().enumerate() {
+            bus.poke_u8(namests + 67 + i as u32, b);
+        }
+        for (i, &b) in b"TXT".iter().enumerate() {
+            bus.poke_u8(namests + 75 + i as u32, b);
+        }
+        for i in 78..88 {
+            bus.poke_u8(namests + i, 0);
+        }
+
+        let fcb = 0x50000;
+        bus.poke_u8(fcb + 14, 0); // Mode 0 (read only)
+        bus.poke_u32_be(request + 14, namests);
+        bus.poke_u32_be(request + 22, fcb);
+
+        let (err, res) = bus.remote_command(request, 0x4A, 1);
+        assert_eq!(err, 0);
+        assert_eq!(res, 0);
+
+        // Verify FCB size was populated correctly
+        let size = bus.peek_u32(fcb + 64).unwrap_or(0);
+        assert_eq!(size, 14); // "MSX68K HOST FS" is 14 bytes
+
+        // Read 14 bytes from FCB (Command $4C)
+        let buf = 0x60000;
+        bus.poke_u32_be(request + 14, buf);
+        bus.poke_u32_be(request + 18, 14);
+        bus.poke_u32_be(request + 22, fcb);
+        let (err, read_len) = bus.remote_command(request, 0x4C, 1);
+        assert_eq!(err, 0);
+        assert_eq!(read_len, 14);
+
+        let mut read_bytes = Vec::new();
+        for i in 0..14 {
+            read_bytes.push(bus.peek_u8(buf + i).unwrap_or(0));
+        }
+        assert_eq!(read_bytes, b"MSX68K HOST FS");
+
+        // Close file (Command $4B)
+        let (err, res) = bus.remote_command(request, 0x4B, 1);
+        assert_eq!(err, 0);
+        assert_eq!(res, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

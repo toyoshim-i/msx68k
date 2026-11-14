@@ -191,6 +191,15 @@ Disassembly of `IPLROM.DAT` (`$FF0000`) and `HUMAN.SYS` v3.02 (`$00AC9C`) reveal
 - Extracts all files and multi-level Shift-JIS subdirectories (`SYS`, `BIN`, `SHELL`, `ｼｬｰﾍﾟﾝ/EXCOM`, `福袋`, etc.) while preserving Human68k's 18+3 extended filename bytes (`chunk[12..22]`).
 - Automatically updates `CONFIG.SYS` (`/DA:\X68K.DIC`) and `SHELL/SXWIN.ENV` (`path=A:\;A:\SHELL;A:\SYS;A:\BIN;...`) so SX-Window v3.1 boots directly into the full GUI desktop from a single SCSI drive (`A:`) without floppy disk swaps.
 
+### 4.3 File-Level Remote Drives Bridge (Type `$2000`)
+Human68k supports remote devices (driver attribute `$2000`) that handle file-level commands (Init `$40`, Chdir `$41`, Mkdir `$42`, Rmdir `$43`, Rename `$44`, Delete `$45`, Chmod `$46`, Files `$47`, Nfiles `$48`, Create `$49`, Open `$4A`, Close `$4B`, Read `$4C`, Write `$4D`, Seek `$4E`, Filedate `$4F`, Dskfre `$50`).
+
+msx68k shares a single unified remote driver implementation ([`remote_fs.rs`](../crates/msx68k-bus/src/remote_fs.rs)) across two distinct layers via the [`RemoteBridge`] trait:
+1. **VMX68K Secondary VMs**: Bridged to the Primary SX-Window VM via [`VmBridge`](../crates/msx68k-bus/src/vmx68k.rs), translating remote requests into primary Human68k DOS calls.
+2. **Primary VM Host Mounts (`--remote-drive`)**: Bridged directly to host directories via [`HostFsBridge`](../crates/msx68k-bus/src/host_fs.rs), performing Shift_JIS ⇄ UTF-8 path conversion, case-insensitive component matching on Linux, and standard host `std::fs` operations without disk images.
+
+Host mounts expose the mounted directory's basename as a synthetic volume entry (attribute `$08`); volume-only searches never return ordinary files. Remote `GETDPB` (`$52`) receives a pointer to DOS DPB+2 and writes exactly 16 zero bytes: the zero sector size identifies a file-level remote device, and the following device-header pointer must remain intact. `_FILES` results preserve Human68k's search pattern at offsets 10..20 and update only the result at 21..52. Search cookies occupy the eight work bytes at 2..9 so `_NFILES` also works when a caller copies its search buffer. See the command layouts in [XEiJ's HFS implementation](https://www.stdkmd.net/xeij/source/xeij-HFS.java.htm).
+
 ---
 
 ## 5. SX-Window v3.1 API Catalog & Hook Status Reference

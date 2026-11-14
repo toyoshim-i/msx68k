@@ -253,6 +253,8 @@ struct AppArgs {
     resolution: Option<(u32, u32)>,
     fullscreen: bool,
     gdb_port: Option<u16>,
+    /// Host directories mounted as file-level remote drives via `--remote-drive`.
+    remote_drives: Vec<PathBuf>,
 }
 
 impl Default for AppArgs {
@@ -289,6 +291,7 @@ impl Default for AppArgs {
             resolution: None,
             fullscreen: false,
             gdb_port: None,
+            remote_drives: Vec::new(),
         }
     }
 }
@@ -394,6 +397,11 @@ impl AppArgs {
                         }
                     }
                 }
+                "--remote-drive" => {
+                    if let Some(p) = args.next() {
+                        cfg.remote_drives.push(PathBuf::from(p));
+                    }
+                }
                 "--help" | "-h" => {
                     println!(
                         "msx68k — Sharp X68000 / SX-Window Hybrid Execution Environment\n\n\
@@ -403,6 +411,7 @@ impl AppArgs {
                            --fd0 <path>         Floppy disk image for Drive 0 (.XDF/.2HD/.DIM)\n  \
                            --fd1 <path>         Floppy disk image for Drive 1 (.XDF/.2HD/.DIM)\n  \
                            --hdd0 <path>        SCSI HDD image for Target 0 (.HDS/.IMG)\n  \
+                           --remote-drive <dir> Host directory to mount as remote drive (can be repeated)\n  \
                            --vm-fd0 <path>      Boot VMs of VMX68K.X from this floppy image, not the primary's A:\n  \
                            --sram <path>        Path to battery-backed SRAM file (default: disks/SRAM.DAT)\n  \
                            --speed <mode>       CPU speed: 10 | 16 | 24 | 25 | burst (default: 10, 25 for 68030)\n  \
@@ -670,6 +679,13 @@ impl Msx68kApp {
             // device chosen with SWITCH.X ($ED0018) must survive that.
             if let Some(sram_data) = &saved_sram {
                 vm.bus.sram_mut()[0x18..0x1A].copy_from_slice(&sram_data[0x18..0x1A]);
+            }
+        }
+
+        if !args.remote_drives.is_empty() {
+            vm.bus.install_host_remote_drives(args.remote_drives.clone());
+            for (idx, dir) in args.remote_drives.iter().enumerate() {
+                println!("Mounted remote drive {}: '{}'", idx, dir.display());
             }
         }
 

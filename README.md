@@ -60,6 +60,9 @@ Place the X68000 ROM images in `roms/` (`roms/IPLROM.DAT`, `roms/CGROM.DAT`) and
 # Boot all-in-one SX-Window v3.1 from Virtual SCSI HDD (auto-builds disks/SXWIN31.HDS on first run):
 cargo run --release -- --hdd0 disks/SXWIN31.HDS --speed burst
 
+# Mount a host directory as a Human68k remote drive:
+cargo run --release -- --hdd0 disks/SXWIN31.HDS --remote-drive ./shared
+
 # Boot Human68k v3.02 from floppy disk:
 cargo run --release -- --fd0 disks/HUMAN302.XDF
 
