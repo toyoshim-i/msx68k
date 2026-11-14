@@ -250,12 +250,21 @@ impl HostClock {
     pub(crate) fn ticks_due(&mut self, now: Instant) -> u32 {
         let origin = *self.origin.get_or_insert(now);
         let due = (now.duration_since(origin).as_nanos() / 100) as u64;
+        if due < self.advanced {
+            return 0;
+        } // DMA has already advanced shared time.
         let owed = (due - self.advanced).min(BURST_MAX_BACKLOG_TICKS);
         self.advanced = due - owed;
 
         let ticks = owed.min(BURST_MAX_CATCH_UP_TICKS);
         self.advanced += ticks;
         ticks as u32
+    }
+
+    fn ahead(&self, now: Instant) -> bool {
+        self.origin.is_some_and(|origin| {
+            (now.duration_since(origin).as_nanos() / 100) < self.advanced as u128
+        })
     }
 
     /// Restarts from the current moment, discarding time during which the guest was not running.
@@ -289,6 +298,7 @@ pub struct X68kVm {
     pub(crate) host_clock: HostClock,
     /// CPU cycles times 10 not yet turned into whole 10 MHz peripheral ticks.
     tick_remainder: u32,
+    dma_cpu_remainder: u32,
 }
 
 impl X68kVm {
@@ -311,6 +321,7 @@ impl X68kVm {
             debug: DebugState::default(),
             host_clock: HostClock::default(),
             tick_remainder: 0,
+            dma_cpu_remainder: 0,
         }
     }
 
@@ -392,6 +403,8 @@ impl X68kVm {
 
     /// Resets the CPU by loading initial `SSP` and `PC` from `$000000` and `$000004`.
     pub fn reset(&mut self) -> Result<u32, BusFault> {
+        self.tick_remainder = 0;
+        self.dma_cpu_remainder = 0;
         self.bus.soft_reset();
         with_policy!(self, reset_with())
     }
@@ -418,6 +431,41 @@ impl X68kVm {
         }
     }
 
+    #[inline(always)]
+    fn advance_instruction<P: CpuPolicy>(
+        bus: &mut X68kBus,
+        state: &mut CpuState,
+        ticks: u32,
+        outcome: StepOutcome,
+        remainder: &mut u32,
+    ) -> u32 {
+        if !bus.dmac.has_scheduled_work() {
+            bus.advance_devices(ticks);
+            return outcome.cycles;
+        }
+        Self::advance_dma_instruction::<P>(bus, state, ticks, outcome, remainder)
+    }
+
+    #[cold]
+    fn advance_dma_instruction<P: CpuPolicy>(
+        bus: &mut X68kBus,
+        state: &mut CpuState,
+        ticks: u32,
+        outcome: StepOutcome,
+        remainder: &mut u32,
+    ) -> u32 {
+        let stolen = bus.advance_dma_time(ticks);
+        if P::TRACK_CYCLES {
+            let total = stolen as u64 * bus.timing_config().cpu_mhz as u64 + *remainder as u64;
+            let cycles = (total / 10) as u32;
+            *remainder = (total % 10) as u32;
+            state.total_cycles += cycles as u64;
+            outcome.cycles.saturating_add(cycles)
+        } else {
+            outcome.cycles
+        }
+    }
+
     /// Executes a single instruction using the monomorphized policy matching the active speed mode,
     /// advancing motherboard peripherals (CRTC, MFP, OPM) and routing pending interrupts.
     #[inline]
@@ -432,9 +480,15 @@ impl X68kVm {
         self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
         let outcome = self.with_core::<P, _>(|core, bus| core.step(bus, trap_handler));
         let ticks = self.peripheral_ticks::<P>(outcome);
-        self.bus.advance_peripherals(ticks);
+        let cycles = Self::advance_instruction::<P>(
+            &mut self.bus,
+            &mut self.cpu_state,
+            ticks,
+            outcome,
+            &mut self.dma_cpu_remainder,
+        );
         self.cpu_state.set_ipl(self.bus.highest_pending_ipl());
-        outcome
+        StepOutcome { cycles, ..outcome }
     }
 
     /// Executes a single instruction with the default [`BusTrapHandler`].
@@ -463,9 +517,14 @@ impl X68kVm {
         for _ in 0..max_instructions {
             core.state.set_ipl(self.bus.highest_pending_ipl());
             let out = core.step(&mut self.bus, trap_handler);
-            elapsed += out.cycles as u64;
             let ticks = self.peripheral_ticks::<P>(out);
-            self.bus.advance_peripherals(ticks);
+            elapsed += Self::advance_instruction::<P>(
+                &mut self.bus,
+                &mut core.state,
+                ticks,
+                out,
+                &mut self.dma_cpu_remainder,
+            ) as u64;
         }
         core.state.set_ipl(self.bus.highest_pending_ipl());
         self.cpu_state = core.into_state();
@@ -486,7 +545,10 @@ impl X68kVm {
         trap_handler: &mut T,
     ) -> u32 {
         if self.is_running_burst() {
-            with_policy!(self, run_steps_with::<_>(target_cycles as usize, trap_handler));
+            with_policy!(
+                self,
+                run_steps_with::<_>(target_cycles as usize, trap_handler)
+            );
             return 0;
         }
         with_policy!(self, run_cycles_with::<_>(target_cycles, trap_handler))
@@ -502,9 +564,14 @@ impl X68kVm {
         while elapsed < target_cycles {
             core.state.set_ipl(self.bus.highest_pending_ipl());
             let out = core.step(&mut self.bus, trap_handler);
-            elapsed = elapsed.saturating_add(out.cycles);
             let ticks = self.peripheral_ticks::<P>(out);
-            self.bus.advance_peripherals(ticks);
+            elapsed = elapsed.saturating_add(Self::advance_instruction::<P>(
+                &mut self.bus,
+                &mut core.state,
+                ticks,
+                out,
+                &mut self.dma_cpu_remainder,
+            ));
         }
         core.state.set_ipl(self.bus.highest_pending_ipl());
         self.cpu_state = core.into_state();
@@ -547,7 +614,7 @@ impl X68kVm {
         let mut instructions_executed = 0usize;
 
         let num_inst = max_instructions.max(1);
-        while instructions_executed < max_instructions {
+        while instructions_executed < max_instructions && elapsed_ticks < target_ticks_10mhz {
             core.state.set_ipl(self.bus.highest_pending_ipl());
             let out = core.step(&mut self.bus, trap_handler);
             instructions_executed += 1;
@@ -558,19 +625,16 @@ impl X68kVm {
                     break;
                 }
                 let step = remaining.min(64);
-                self.bus.advance_peripherals(step);
-                elapsed_ticks += step;
+                let stolen = self.bus.advance_cpu_time(step);
+                elapsed_ticks += step + stolen;
             } else {
                 tick_accum += target_ticks_10mhz as usize;
                 let step = (tick_accum / num_inst) as u32;
                 tick_accum %= num_inst;
-                if step > 0 {
-                    let actual_step = step.min(target_ticks_10mhz.saturating_sub(elapsed_ticks));
-                    if actual_step > 0 {
-                        self.bus.advance_peripherals(actual_step);
-                        elapsed_ticks += actual_step;
-                    }
-                }
+                let actual_step = step.min(target_ticks_10mhz.saturating_sub(elapsed_ticks));
+                // Even a zero-tick Burst instruction can start DMA at this boundary.
+                let stolen = self.bus.advance_cpu_time(actual_step);
+                elapsed_ticks += actual_step + stolen;
             }
         }
 
@@ -598,18 +662,31 @@ impl X68kVm {
     }
 
     fn run_burst_real_time_with<P: CpuPolicy>(&mut self, deadline: Instant) {
+        if self.host_clock.ahead(Instant::now()) {
+            return;
+        }
         let state = std::mem::take(&mut self.cpu_state);
         let mut core = CpuCore::<P>::from_state(state);
         let mut handler = BusTrapHandler;
-        loop {
+        'running: loop {
             for _ in 0..BURST_SYNC_INSTRUCTIONS {
                 core.state.set_ipl(self.bus.highest_pending_ipl());
                 core.step(&mut self.bus, &mut handler);
+                if self.bus.dmac.has_scheduled_work() {
+                    let now = Instant::now();
+                    let ticks = self.host_clock.ticks_due(now);
+                    let stolen = self.bus.advance_dma_time(ticks);
+                    self.host_clock.advanced += stolen as u64;
+                    if self.host_clock.ahead(Instant::now()) || now >= deadline {
+                        break 'running;
+                    }
+                }
             }
             let now = Instant::now();
             let ticks = self.host_clock.ticks_due(now);
-            self.bus.advance_peripherals(ticks);
-            if now >= deadline {
+            let stolen = self.bus.advance_cpu_time(ticks);
+            self.host_clock.advanced += stolen as u64;
+            if now >= deadline || self.host_clock.ahead(Instant::now()) {
                 break;
             }
         }
@@ -632,6 +709,53 @@ impl X68kVm {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn dma_time_ahead_of_host_is_paid_before_burst_resumes() {
+        let start = Instant::now();
+        let mut clock = HostClock::default();
+        clock.ticks_due(start);
+        clock.advanced += 1000;
+        assert!(clock.ahead(start));
+        assert_eq!(clock.ticks_due(start + Duration::from_micros(50)), 0);
+        assert_eq!(clock.advanced, 1000);
+        assert!(!clock.ahead(start + Duration::from_micros(100)));
+        assert_eq!(clock.ticks_due(start + Duration::from_micros(110)), 100);
+    }
+
+    #[test]
+    fn dma_time_counts_toward_cpu_and_burst_budgets() {
+        use msx68k_cpu::Bus;
+        for speed in [
+            CpuSpeedMode::Mhz10,
+            CpuSpeedMode::Mhz16,
+            CpuSpeedMode::Burst,
+        ] {
+            let mut vm = X68kVm::new(VmConfig::app_vm().with_speed_mode(speed));
+            vm.cpu_state.pc = 0x2000;
+            vm.cpu_state.sr = 0; // DMA FC5 works while the CPU runs user code.
+            vm.bus.write_u16(0x2000, 0x60fe, true).unwrap(); // BRA.S self
+            let ch = &mut vm.bus.dmac.channels[2];
+            ch.dcr = 8;
+            ch.ocr = 0x11;
+            ch.scr = 5;
+            ch.mar = 0x3000;
+            ch.dar = 0x4000;
+            ch.mtc = 100;
+            ch.mfc = 5;
+            ch.dfc = 5;
+            vm.bus.dmac.write_u8(0xe84087, 0x80).unwrap();
+            if speed == CpuSpeedMode::Burst {
+                assert_eq!(vm.run_burst_frame(1000, 100), 1);
+            } else {
+                let before = vm.cpu_state.total_cycles;
+                let outcome = vm.step();
+                assert!(outcome.cycles >= 1000);
+                assert_eq!(vm.cpu_state.total_cycles - before, outcome.cycles as u64);
+            }
+            assert_eq!(vm.bus.dmac.channels[2].mtc, 0);
+        }
+    }
 
     #[test]
     fn host_clock_pays_time_off_gradually() {

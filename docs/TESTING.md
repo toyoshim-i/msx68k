@@ -139,3 +139,22 @@ stable descriptive registry name. Reuse the session, exercise normal shutdown,
 and leave lifecycle checks enabled. Use scenario-specific output paths so an
 old file cannot satisfy a new assertion. Add a separate cold-boot test only when
 initialization itself is the behavior under test.
+
+## DMA
+
+Run the DMA scheduler, VM timing, and FDC transfer tests:
+
+```sh
+cargo test -p msx68k-bus --lib dma_bus::tests
+cargo test -p msx68k-bus --lib vm::tests
+cargo test -p msx68k-bus --test fd_boot
+```
+
+Coverage includes idle/request-wait behavior, halt/resume/abort, limited/max auto
+requests, function-code bus faults, array/link chaining, byte packing, 8-bit ports,
+10/12.5 MHz timing, CPU/Burst budgets, FDC RAM/GVRAM reads, partial writes, and
+multi-track PIO. The transfer tests create synthetic disk images.
+
+`MSX68K_LOG_UNIMPLEMENTED=1` enables diagnostic messages for unconnected DMA
+request inputs. Messages are limited to one per channel/reason between resets;
+logging is disabled by default.

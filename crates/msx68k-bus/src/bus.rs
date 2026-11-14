@@ -135,6 +135,7 @@ pub struct X68kBus {
     pub vicon: Vicon,
     /// HD63450 4-Channel DMA Controller (`$E84000`–`$E85FFF`, Level 3).
     pub dmac: Dmac,
+    pub(crate) dma_in_bus: bool,
     /// MC68901 Multi-Function Peripheral (`$E88000`–`$E89FFF`, Level 6).
     pub mfp: Mfp,
     /// RP5C15 Real-Time Clock (`$E8A000`–`$E8BFFF`).
@@ -255,6 +256,7 @@ impl X68kBus {
             crtc: Crtc::new(),
             vicon: Vicon::new(),
             dmac: Dmac::new(),
+            dma_in_bus: false,
             mfp: Mfp::new(),
             rtc: Rtc::new(),
             sysport: SystemPort::new(),
@@ -623,7 +625,12 @@ impl X68kBus {
     }
 
     /// Advances peripherals without skipping scanline edges, even for a large host-time batch.
-    pub fn advance_peripherals(&mut self, mut cycles_10mhz: u32) {
+    /// Due DMA events add their transfer time on top of this CPU-time interval.
+    pub fn advance_peripherals(&mut self, cycles_10mhz: u32) {
+        self.advance_cpu_time(cycles_10mhz);
+    }
+
+    pub(crate) fn advance_devices(&mut self, mut cycles_10mhz: u32) {
         while cycles_10mhz != 0 {
             let until_sync = self.crtc.cycles_to_next_sync();
             let step = cycles_10mhz
@@ -824,7 +831,9 @@ impl Bus for X68kBus {
             MemoryRegion::Mfp => {
                 if (a & 0x3F) == 0x01 && !self.wait_table.config().wait_enabled {
                     // When polling GPIP in zero-wait Burst mode, advance virtual scanline ticks
-                    self.advance_peripherals(16);
+                    if !self.dma_in_bus {
+                        self.advance_peripherals(16);
+                    }
                 }
                 self.mfp.read_u8(a)
             }
@@ -854,7 +863,11 @@ impl Bus for X68kBus {
                     Ok(0xFF)
                 }
             }
-            MemoryRegion::Fdc => self.fdc.read_u8(a, &mut self.ioi),
+            MemoryRegion::Fdc => {
+                let result = self.fdc.read_u8(a, &mut self.ioi);
+                self.refresh_fdc_dma_request();
+                result
+            }
             MemoryRegion::Hdc => {
                 if (a & 1) == 0 {
                     Err(BusFault::BusError {
@@ -1063,7 +1076,7 @@ impl Bus for X68kBus {
                 self.vicon.write_u8(a, val);
                 Ok(())
             }
-            MemoryRegion::Dmac => self.dmac.write_u8(a, val, &mut self.main_ram),
+            MemoryRegion::Dmac => self.dmac.write_u8(a, val),
             MemoryRegion::AreaSet => {
                 if (a & 1) == 0 {
                     Err(BusFault::BusError {
@@ -1117,8 +1130,9 @@ impl Bus for X68kBus {
                 }
             }
             MemoryRegion::Fdc => {
-                self.fdc
-                    .write_u8(a, val, &mut self.dmac, &mut self.main_ram, &mut self.ioi)
+                let result = self.fdc.write_u8(a, val, &mut self.ioi);
+                self.refresh_fdc_dma_request();
+                result
             }
             MemoryRegion::Hdc => {
                 if (a & 1) == 0 {

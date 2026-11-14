@@ -29,7 +29,13 @@ pub const CCR_ITE: u8 = 0x08; // Interrupt Enable
 pub const CER_NONE: u8 = 0x00;
 pub const CER_CONFIG: u8 = 0x01;
 pub const CER_TIMING: u8 = 0x02;
+pub const CER_ADDR_MEM: u8 = 0x05;
+pub const CER_ADDR_DEV: u8 = 0x06;
+pub const CER_ADDR_BASE: u8 = 0x07;
 pub const CER_BUS_MEM: u8 = 0x09;
+pub const CER_BUS_DEV: u8 = 0x0a;
+pub const CER_BUS_BASE: u8 = 0x0b;
+pub const CER_BASE_COUNT: u8 = 0x0f;
 pub const CER_COUNT: u8 = 0x0D;
 pub const CER_SW_ABORT: u8 = 0x11;
 
@@ -97,7 +103,7 @@ impl DmaChannel {
         (self.ocr & 0x80) != 0
     }
 
-    fn step_mar(&mut self, step: u32) {
+    pub(crate) fn step_mar(&mut self, step: u32) {
         match (self.scr >> 2) & 0x03 {
             1 => self.mar = self.mar.wrapping_add(step),
             2 => self.mar = self.mar.wrapping_sub(step),
@@ -105,7 +111,7 @@ impl DmaChannel {
         }
     }
 
-    fn step_dar(&mut self, step: u32) {
+    pub(crate) fn step_dar(&mut self, step: u32) {
         match self.scr & 0x03 {
             1 => self.dar = self.dar.wrapping_add(step),
             2 => self.dar = self.dar.wrapping_sub(step),
@@ -113,78 +119,7 @@ impl DmaChannel {
         }
     }
 
-    fn load_next_chain_block(&mut self, main_ram: &[u8]) -> Result<bool, u8> {
-        let chain_mode = (self.ocr >> 2) & 0x03;
-        match chain_mode {
-            0 => {
-                // No chaining; check Continue (CNT)
-                if (self.ccr & CCR_CNT) != 0 {
-                    self.mar = self.bar;
-                    self.mtc = self.btc;
-                    self.ccr &= !CCR_CNT;
-                    self.csr |= CSR_BTC;
-                    if (self.ccr & CCR_ITE) != 0 {
-                        self.irq_pending = true;
-                    }
-                    Ok(self.mtc != 0)
-                } else {
-                    Ok(false)
-                }
-            }
-            2 => {
-                // Array chaining: BAR points to [MAR.L (4 bytes), MTC.W (2 bytes)]
-                if self.btc == 0 {
-                    return Ok(false);
-                }
-                let base = (self.bar & 0x00FF_FFFF) as usize;
-                if base + 6 > main_ram.len() {
-                    return Err(CER_BUS_MEM);
-                }
-                let next_mar = u32::from_be_bytes([
-                    main_ram[base],
-                    main_ram[base + 1],
-                    main_ram[base + 2],
-                    main_ram[base + 3],
-                ]);
-                let next_mtc = u16::from_be_bytes([main_ram[base + 4], main_ram[base + 5]]);
-                self.bar = self.bar.wrapping_add(6);
-                self.btc = self.btc.wrapping_sub(1);
-                self.mar = next_mar;
-                self.mtc = next_mtc;
-                Ok(next_mtc != 0)
-            }
-            3 => {
-                // Link array chaining: BAR points to [MAR.L (4), MTC.W (2), NEXT_BAR.L (4)]
-                if self.bar == 0 {
-                    return Ok(false);
-                }
-                let base = (self.bar & 0x00FF_FFFF) as usize;
-                if base + 10 > main_ram.len() {
-                    return Err(CER_BUS_MEM);
-                }
-                let next_mar = u32::from_be_bytes([
-                    main_ram[base],
-                    main_ram[base + 1],
-                    main_ram[base + 2],
-                    main_ram[base + 3],
-                ]);
-                let next_mtc = u16::from_be_bytes([main_ram[base + 4], main_ram[base + 5]]);
-                let next_bar = u32::from_be_bytes([
-                    main_ram[base + 6],
-                    main_ram[base + 7],
-                    main_ram[base + 8],
-                    main_ram[base + 9],
-                ]);
-                self.bar = next_bar;
-                self.mar = next_mar;
-                self.mtc = next_mtc;
-                Ok(next_mtc != 0)
-            }
-            _ => Err(CER_CONFIG),
-        }
-    }
-
-    fn finish_normal(&mut self) {
+    pub(crate) fn finish_normal(&mut self) {
         self.csr = (self.csr & !CSR_ACT) | CSR_COC;
         self.ccr &= !(CCR_STR | CCR_CNT | CCR_HLT);
         if (self.ccr & CCR_ITE) != 0 {
@@ -192,7 +127,7 @@ impl DmaChannel {
         }
     }
 
-    fn finish_error(&mut self, err_code: u8) {
+    pub(crate) fn finish_error(&mut self, err_code: u8) {
         self.cer = err_code;
         self.csr = (self.csr & !CSR_ACT) | CSR_COC | CSR_ERR;
         self.ccr &= !(CCR_STR | CCR_CNT | CCR_HLT);
@@ -207,6 +142,20 @@ impl DmaChannel {
 pub struct Dmac {
     pub channels: [DmaChannel; 4],
     pub gcr: u8,
+    diagnostics: Option<bool>,
+    reported_unsupported: [u8; 4],
+    /// Cached earliest event: the only new test on the idle instruction path.
+    pub(crate) next_event: u64,
+    pub(crate) deadlines: [u64; 4],
+    /// 400 MHz time units: 40 units per 10 MHz peripheral tick.
+    pub(crate) clock: u64,
+    pub(crate) requests: u8,
+    pub(crate) starting: [bool; 4],
+    pub(crate) memory_carry: [Option<u8>; 4],
+    pub(crate) device_carry: [Option<u8>; 4],
+    pub(crate) burst_start: [u64; 4],
+    pub(crate) burst_end: [u64; 4],
+    pub(crate) tick_fraction: u32,
 }
 
 impl Default for Dmac {
@@ -225,11 +174,41 @@ impl Dmac {
                 DmaChannel::new(),
             ],
             gcr: 0,
+            diagnostics: None,
+            reported_unsupported: [0; 4],
+            next_event: u64::MAX,
+            deadlines: [u64::MAX; 4],
+            clock: 0,
+            requests: 0,
+            starting: [false; 4],
+            memory_carry: [None; 4],
+            device_carry: [None; 4],
+            burst_start: [0; 4],
+            burst_end: [0; 4],
+            tick_fraction: 0,
         }
     }
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Report known emulation gaps, not reserved registers or ordinary bus faults.
+    /// Off by default; at most one message per reason/channel between resets.
+    #[cold]
+    fn report_unsupported(&mut self, channel: usize, reason: u8, description: &str) {
+        let enabled = *self.diagnostics.get_or_insert_with(|| {
+            std::env::var_os("MSX68K_LOG_UNIMPLEMENTED").is_some_and(|v| v == "1")
+        });
+        if !enabled || self.reported_unsupported[channel] & reason != 0 {
+            return;
+        }
+        self.reported_unsupported[channel] |= reason;
+        let ch = &self.channels[channel];
+        eprintln!(
+            "[msx68k][unimplemented][DMAC ch{channel}] {description}; MAR=${:06X} DAR=${:06X} MTC={} DCR=${:02X} OCR=${:02X} SCR=${:02X} CCR=${:02X}",
+            ch.mar, ch.dar, ch.mtc, ch.dcr, ch.ocr, ch.scr, ch.ccr,
+        );
     }
 
     /// Returns `true` if any DMA channel has a pending Level 3 interrupt.
@@ -262,139 +241,39 @@ impl Dmac {
         }
     }
 
-    /// Transfers a single byte from an external device (e.g., FDC channel 0) into `main_ram` via DMA channel `ch_idx`.
-    /// Returns `true` if the byte was transferred, or `false` if the channel is inactive/exhausted.
-    pub fn device_to_memory_u8(
-        &mut self,
-        ch_idx: usize,
-        val: u8,
-        main_ram: &mut [u8],
-    ) -> bool {
-        let ch = &mut self.channels[ch_idx & 3];
-        if !ch.is_active() || !ch.is_device_to_memory() {
-            return false;
-        }
-        if ch.mtc == 0 {
-            match ch.load_next_chain_block(main_ram) {
-                Ok(true) => {}
-                Ok(false) => {
-                    ch.finish_normal();
-                    return false;
-                }
-                Err(code) => {
-                    ch.finish_error(code);
-                    return false;
-                }
-            }
-        }
-
-        let addr = (ch.mar & 0x00FF_FFFF) as usize;
-        if addr >= main_ram.len() {
-            ch.finish_error(CER_BUS_MEM);
-            return false;
-        }
-        main_ram[addr] = val;
-        ch.step_mar(1);
-        ch.mtc = ch.mtc.wrapping_sub(1);
-
-        if ch.mtc == 0 {
-            match ch.load_next_chain_block(main_ram) {
-                Ok(true) => {}
-                Ok(false) => ch.finish_normal(),
-                Err(code) => ch.finish_error(code),
-            }
-        }
-        true
+    #[inline]
+    pub fn has_scheduled_work(&self) -> bool {
+        self.next_event != u64::MAX
     }
 
-    /// Transfers a single byte from `main_ram` to an external device via DMA channel `ch_idx`.
-    pub fn memory_to_device_u8(
-        &mut self,
-        ch_idx: usize,
-        main_ram: &[u8],
-    ) -> Option<u8> {
-        let ch = &mut self.channels[ch_idx & 3];
-        if !ch.is_active() || ch.is_device_to_memory() {
-            return None;
-        }
-        if ch.mtc == 0 {
-            match ch.load_next_chain_block(main_ram) {
-                Ok(true) => {}
-                Ok(false) => {
-                    ch.finish_normal();
-                    return None;
-                }
-                Err(code) => {
-                    ch.finish_error(code);
-                    return None;
-                }
-            }
-        }
-
-        let addr = (ch.mar & 0x00FF_FFFF) as usize;
-        if addr >= main_ram.len() {
-            ch.finish_error(CER_BUS_MEM);
-            return None;
-        }
-        let val = main_ram[addr];
-        ch.step_mar(1);
-        ch.mtc = ch.mtc.wrapping_sub(1);
-
-        if ch.mtc == 0 {
-            match ch.load_next_chain_block(main_ram) {
-                Ok(true) => {}
-                Ok(false) => ch.finish_normal(),
-                Err(code) => ch.finish_error(code),
-            }
-        }
-        Some(val)
+    pub(crate) fn schedule(&mut self, channel: usize, deadline: u64) {
+        self.deadlines[channel] = deadline;
+        self.next_event = *self.deadlines.iter().min().unwrap();
     }
 
-    /// Executes an auto-request (`REQG == 0` or `1`) memory-to-memory DMA transfer on channel `ch_idx`.
-    fn run_auto_request(&mut self, ch_idx: usize, main_ram: &mut [u8]) {
-        let ch = &mut self.channels[ch_idx & 3];
-        let size_code = (ch.ocr >> 4) & 0x03;
-        let unit_bytes: u32 = match size_code {
-            0 | 3 => 1,
-            1 => 2,
-            2 => 4,
-            _ => 1,
-        };
-        let dar_step = if unit_bytes >= 2 { unit_bytes } else { 2 };
+    /// Device request input, independent of CPU privilege and the memory endpoint.
+    pub fn set_request(&mut self, channel: usize, asserted: bool) {
+        self.set_request_with_delay(channel, asserted, 40);
+    }
 
-        while ch.is_active() {
-            if ch.mtc == 0 {
-                match ch.load_next_chain_block(main_ram) {
-                    Ok(true) => continue,
-                    Ok(false) => {
-                        ch.finish_normal();
-                        break;
-                    }
-                    Err(code) => {
-                        ch.finish_error(code);
-                        break;
-                    }
-                }
+    pub(crate) fn set_request_with_delay(&mut self, channel: usize, asserted: bool, cycle: u64) {
+        let channel = channel & 3;
+        let was_asserted = self.requests & (1 << channel) != 0;
+        if asserted {
+            self.requests |= 1 << channel;
+        } else {
+            self.requests &= !(1 << channel);
+        }
+        let ch = &self.channels[channel];
+        if ch.ocr & 2 != 0 && !self.starting[channel] {
+            let when = if asserted && ch.is_active() {
+                self.clock + cycle
+            } else {
+                u64::MAX
+            };
+            if !asserted || !was_asserted || self.deadlines[channel] == u64::MAX {
+                self.schedule(channel, when);
             }
-
-            let m_addr = (ch.mar & 0x00FF_FFFF) as usize;
-            let d_addr = (ch.dar & 0x00FF_FFFF) as usize;
-            let len = unit_bytes as usize;
-            if m_addr + len > main_ram.len() || d_addr + len > main_ram.len() {
-                ch.finish_error(CER_BUS_MEM);
-                break;
-            }
-
-            for b in 0..len {
-                if ch.is_device_to_memory() {
-                    main_ram[m_addr + b] = main_ram[d_addr + b];
-                } else {
-                    main_ram[d_addr + b] = main_ram[m_addr + b];
-                }
-            }
-            ch.step_mar(unit_bytes);
-            ch.step_dar(dar_step);
-            ch.mtc = ch.mtc.wrapping_sub(1);
         }
     }
 
@@ -448,12 +327,7 @@ impl Dmac {
     }
 
     /// Writes an 8-bit byte to the DMAC address window (`$E84000`–`$E85FFF`).
-    pub fn write_u8(
-        &mut self,
-        addr: u32,
-        val: u8,
-        main_ram: &mut [u8],
-    ) -> Result<(), BusFault> {
+    pub fn write_u8(&mut self, addr: u32, val: u8) -> Result<(), BusFault> {
         let a = addr & 0x00FF_FFFF;
         let offset = (a - 0x00E8_4000) as usize;
         if offset >= 0x0100 {
@@ -468,6 +342,23 @@ impl Dmac {
         }
         let ch_idx = (offset >> 6) & 3;
         let reg = offset & 0x3F;
+        if self.channels[ch_idx].csr & CSR_ACT != 0
+            && matches!(reg, 0x04..=0x06 | 0x0a..=0x0f | 0x14..=0x17 | 0x29 | 0x31)
+        {
+            self.channels[ch_idx].finish_error(CER_TIMING);
+            self.schedule(ch_idx, u64::MAX);
+            return Ok(());
+        }
+        if reg == 0x07 && val & CCR_STR != 0 && val & CCR_SAB == 0 {
+            let ch = &self.channels[ch_idx];
+            if ch.ocr & 2 != 0 && ch_idx != 0 {
+                self.report_unsupported(
+                    ch_idx,
+                    4,
+                    "external device request is not connected (FDC is connected on channel 0)",
+                );
+            }
+        }
         let ch = &mut self.channels[ch_idx];
 
         match reg {
@@ -487,34 +378,34 @@ impl Dmac {
             0x05 => ch.ocr = val,
             0x06 => ch.scr = val & 0x0F,
             0x07 => {
-                let start = (val & CCR_STR) != 0;
-                let abort = (val & CCR_SAB) != 0;
+                let start = val & CCR_STR != 0;
+                let abort = val & CCR_SAB != 0;
                 ch.ccr = val & (CCR_CNT | CCR_HLT | CCR_ITE);
                 if abort {
-                    if (ch.csr & CSR_ACT) != 0 {
+                    if ch.csr & CSR_ACT != 0 {
                         ch.finish_error(CER_SW_ABORT);
                     }
                 } else if start {
-                    if (ch.csr & (CSR_COC | CSR_BTC | CSR_NDT | CSR_ERR | CSR_ACT)) != 0 {
+                    if ch.csr & (CSR_COC | CSR_BTC | CSR_NDT | CSR_ERR | CSR_ACT) != 0 {
                         ch.finish_error(CER_TIMING);
+                    } else if ch.ocr & 0x0c == 4
+                        || ch.scr & 0x0c == 0x0c
+                        || ch.scr & 3 == 3
+                        || ch.dcr & 0xc0 == 0x40
+                    {
+                        ch.finish_error(CER_CONFIG);
                     } else {
                         ch.csr |= CSR_ACT;
-                        let chain_mode = (ch.ocr >> 2) & 0x03;
-                        if chain_mode == 2 || chain_mode == 3 {
-                            match ch.load_next_chain_block(main_ram) {
-                                Ok(true) => {}
-                                Ok(false) => ch.finish_error(CER_COUNT),
-                                Err(code) => ch.finish_error(code),
-                            }
-                        } else if ch.mtc == 0 {
-                            ch.finish_error(CER_COUNT);
-                        }
-                        if (ch.csr & CSR_ACT) != 0 && (ch.ocr & 0x02) == 0 {
-                            // Auto-request mode (REQG = 00 or 01)
-                            self.run_auto_request(ch_idx, main_ram);
-                        }
+                        self.starting[ch_idx] = true;
+                        self.memory_carry[ch_idx] = None;
+                        self.device_carry[ch_idx] = None;
                     }
                 }
+                let runnable = self.channels[ch_idx].is_active()
+                    && (self.starting[ch_idx]
+                        || self.channels[ch_idx].ocr & 2 == 0
+                        || self.requests & (1 << ch_idx) != 0);
+                self.schedule(ch_idx, if runnable { self.clock } else { u64::MAX });
             }
             0x0A => ch.mtc = (ch.mtc & 0x00FF) | ((val as u16) << 8),
             0x0B => ch.mtc = (ch.mtc & 0xFF00) | (val as u16),

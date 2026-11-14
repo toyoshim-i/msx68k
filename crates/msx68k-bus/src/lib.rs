@@ -4,6 +4,7 @@ pub mod bg;
 pub mod bus;
 pub mod crtc;
 pub mod dmac;
+mod dma_bus;
 pub mod fdc;
 pub mod floppy_image;
 pub mod gdb;

@@ -14,7 +14,7 @@ The X68000 uses four primary vectored interrupt controllers during IPL POST, Hum
 |---|---|---|---|---|
 | **Level 6** | **MC68901 MFP** ([`mfp.rs`](../crates/msx68k-bus/src/mfp.rs)) | `$E88001`–`$E8802F` (odd) | `$40`–`$4F` (`VR` `$E88017`) | `GPIP` sync (`V-DISP`, `H-SYNC`, `CRTC RINT`, `OPMIRQ`), Timer A (V-DISP event count & delay), Timer C (system tick, FDD motor timeout, & mouse polling trigger), USART keyboard receive (`RRDY`) |
 | **Level 5** | **Z8530 SCC** ([`peripherals.rs`](../crates/msx68k-bus/src/peripherals.rs)) | `$E98001`–`$E98007` (odd) | `$50`–`$5F` (`WR2` status-modified) | Serial Communications Controller; Channel B (`$E98001` Control, `$E98003` Data) receives 3-byte mouse packets at status-modified vector `$54` |
-| **Level 3** | **HD63450 DMAC** ([`dmac.rs`](../crates/msx68k-bus/src/dmac.rs)) | `$E84000`–`$E840FF` | `NIV` (`$E84025`) / `EIV` (`$E84027`) | 4-channel DMA controller; Channel 0 transfers sectors between FDC (`$E94003`) and Main RAM |
+| **Level 3** | **HD63450 DMAC** ([`dmac.rs`](../crates/msx68k-bus/src/dmac.rs)) | `$E84000`–`$E840FF` | `NIV` (`$E84025`) / `EIV` (`$E84027`) | 4-channel DMA controller; Channel 0 transfers sectors between FDC (`$E94003`) and mapped memory (including GVRAM) |
 | **Level 1** | **I/O Interrupt Controller** ([`fdc.rs`](../crates/msx68k-bus/src/fdc.rs)) | `$E9C001`–`$E9C003` (odd) | `$60`–`$63` (`$E9C003 & $FC`) | Arbitrates FDC (`vec | 0`), FDD (`vec | 1`), SASI HDC (`vec | 2`), and Printer (`vec | 3`) interrupts |
 
 ### 8-Bit Odd-Byte Bus Wiring
@@ -46,7 +46,9 @@ Implemented in [`crates/msx68k-bus/src/fdc.rs`](../crates/msx68k-bus/src/fdc.rs)
 3. **Sector DMA Transfers (`READ DATA` `0x06`, `WRITE DATA` `0x05`)**:
    - Supports standard 2HD `.XDF` (`1,261,568` bytes: `77` cylinders × `2` heads × `8` sectors × `1024` bytes, `N = 3`) as well as 9-sector 2HD, 18-sector 2HQ, and 2DD disk geometries.
    - `.DIM` images of 2HD, 2HC, and 2HQ media are expanded into raw sector images on insertion; tracks flagged absent in the DIM header read as `$E5` filler.
-   - Multi-sector (`EOT`) and multi-track (`MT = 0x80`) reads/writes stream bytes through **HD63450 DMAC Channel 0** (`No Chaining`, `Array Chaining`, and `Link Array Chaining`), updating `MAR`/`MTC`, setting `CSR_COC` (`0x80`), and asserting both DMAC Level 3 and FDC Level 1 interrupts upon completion.
+   - Multi-sector (`EOT`) and multi-track (`MT = 0x80`) reads/writes stream bytes through **HD63450 DMAC Channel 0** (`No Chaining`, `Array Chaining`, and `Link Array Chaining`), at instruction-boundary DMA events, updating `MAR`/`MTC`, setting `CSR_COC` (`0x80`), and asserting both DMAC Level 3 and FDC Level 1 interrupts upon completion.
+
+   - The execution phase owns the command-span buffer; each FDC data-register access consumes one byte. Terminal count commits the transferred write prefix and enters result phase. Local and remote disks share this path; remote I/O remains batched per command. PIO uses the same data register.
 
 ---
 
