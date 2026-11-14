@@ -144,6 +144,23 @@ mod tests {
     }
 
     #[test]
+    fn test_build_vmx68k_x_executable() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = workspace_root.join("guest/vmx68k/vmx68k.s");
+        let inc_dir = workspace_root.join("guest/include");
+
+        assert!(source_path.exists(), "vmx68k.s must exist");
+        assert!(inc_dir.exists(), "guest/include must exist");
+
+        let x_bytes = build_guest_x_executable(&source_path, &[&inc_dir])
+            .expect("Must assemble and link vmx68k.s into VMX68K.X");
+
+        assert!(x_bytes.len() >= 64, "X executable must have at least 64-byte header");
+        assert_eq!(&x_bytes[0..2], b"HU", "X executable must have 'HU' magic");
+        assert_eq!(&x_bytes[64..68], b"OBJR");
+    }
+
+    #[test]
     fn test_execute_built_sxmode_x_on_vm() {
         use crate::vm::X68kVm;
         use msx68k_cpu::Bus;

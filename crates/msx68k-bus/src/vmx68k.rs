@@ -638,6 +638,103 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
+    /// Check for floppy viruses and repair IPL.
+    /// D1: action (0 detect, 1 repair ForceBoot, 2 repair clean IPL).
+    pub(crate) fn hypercall_vm_virus(&mut self, state: &mut CpuState) -> TrapResult {
+        let action = state.d[1];
+        match action {
+            0 => {
+                // Detect virus
+                // a0: buffer, d2: length, d3: is_dim, a1: output buffer for Japanese name
+                let buf_addr = state.a[0];
+                let len = (state.d[2] as usize).min(8192);
+                let is_dim = state.d[3] != 0;
+                let sec1_off = if is_dim { 256 } else { 0 };
+                if len < sec1_off + 1024 {
+                    state.d[0] = 0;
+                    state.d[1] = 0;
+                    return TrapResult::Handled { extra_cycles: 0 };
+                }
+                let mut ipl = [0u8; 1024];
+                for i in 0..1024 {
+                    ipl[i] = self.peek_u8(buf_addr + (sec1_off + i) as u32).unwrap_or(0);
+                }
+                match crate::virus::detect_ipl_virus(&ipl) {
+                    None => {
+                        state.d[0] = 0;
+                        state.d[1] = 0;
+                    }
+                    Some(virus) => {
+                        state.d[0] = match virus {
+                            crate::virus::VirusType::ForceBoot => 1,
+                            crate::virus::VirusType::Hodson => 2,
+                            crate::virus::VirusType::Scheck => 3,
+                            crate::virus::VirusType::Surgeon => 4,
+                            crate::virus::VirusType::Unknown => 5,
+                        };
+                        state.d[1] = if virus.can_self_repair_from_sector4() { 1 } else { 0 };
+                        let name_bytes = virus.name_ja_sjis();
+                        let out_addr = state.a[1];
+                        for (i, &b) in name_bytes.iter().enumerate() {
+                            self.poke_u8(out_addr + i as u32, b);
+                        }
+                        self.poke_u8(out_addr + name_bytes.len() as u32, 0);
+                    }
+                }
+                TrapResult::Handled { extra_cycles: 0 }
+            }
+            1 => {
+                // Repair ForceBoot from Sector 4
+                // a0: 4096-byte buffer containing sectors 1..4, d3: is_dim
+                let buf_addr = state.a[0];
+                let is_dim = state.d[3] != 0;
+                let sec1_off = if is_dim { 256 } else { 0 };
+                let sec2_off = sec1_off + 1024;
+                let sec4_off = sec1_off + 3072;
+
+                // Read 640 bytes from sector 4 and copy to sector 1
+                for i in 0..640 {
+                    let b = self.peek_u8(buf_addr + (sec4_off + i) as u32).unwrap_or(0);
+                    self.poke_u8(buf_addr + (sec1_off + i) as u32, b);
+                }
+
+                // If sector 2 has FAT12 header, copy sector 2 (1024 bytes) to sector 4
+                let m1 = self.peek_u8(buf_addr + (sec2_off + 1) as u32).unwrap_or(0);
+                let m2 = self.peek_u8(buf_addr + (sec2_off + 2) as u32).unwrap_or(0);
+                if m1 == 0xFF && m2 == 0xFF {
+                    for i in 0..1024 {
+                        let b = self.peek_u8(buf_addr + (sec2_off + i) as u32).unwrap_or(0);
+                        self.poke_u8(buf_addr + (sec4_off + i) as u32, b);
+                    }
+                }
+
+                state.d[0] = 0;
+                TrapResult::Handled { extra_cycles: 0 }
+            }
+            2 => {
+                // Repair from clean IPL
+                // a0: target buffer, d2: target is_dim
+                // a1: clean buffer, d3: clean is_dim
+                let target_addr = state.a[0];
+                let clean_addr = state.a[1];
+                let target_sec1 = if state.d[2] != 0 { 256 } else { 0 };
+                let clean_sec1 = if state.d[3] != 0 { 256 } else { 0 };
+
+                for i in 0..1024 {
+                    let b = self.peek_u8(clean_addr + (clean_sec1 + i) as u32).unwrap_or(0);
+                    self.poke_u8(target_addr + (target_sec1 + i) as u32, b);
+                }
+
+                state.d[0] = 0;
+                TrapResult::Handled { extra_cycles: 0 }
+            }
+            _ => {
+                state.d[0] = u32::MAX;
+                TrapResult::Handled { extra_cycles: 0 }
+            }
+        }
+    }
+
     pub(crate) fn hypercall_vm_boot(&mut self, state: &mut CpuState) -> TrapResult {
         let (id, choice, rom) = (state.d[1], state.d[2], state.a[1]);
         // 0 creates a new setup; -1 edits a staged SRAM buffer without changing

@@ -27,6 +27,7 @@ pub mod timing;
 pub mod vicon;
 pub mod vm;
 pub mod vm_thread;
+pub mod virus;
 pub mod vmx68k;
 pub mod vmx68k_library;
 pub mod vram_pages;
@@ -36,6 +37,7 @@ pub use bus::{
     is_ext_screen_addr, HardwareAccessFlags, X68kBus, EXT_TVRAM_BASE, EXT_TVRAM_WINDOW, MSX68K_RESERVED_BASE, MSX68K_RESERVED_END, GVRAM_BYTES, IO_WINDOW_BYTES, MAX_MAIN_RAM_BYTES,
     ROM_WINDOW_BYTES, SPRITE_WINDOW_BYTES, TVRAM_BYTES,
 };
+pub use virus::VirusType;
 pub use crtc::{Crtc, CrtcSyncEvents, RASTER_BLOCK_BYTES, TVRAM_PLANE_BYTES};
 pub use dmac::{DmaChannel, Dmac};
 pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};

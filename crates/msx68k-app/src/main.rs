@@ -14,6 +14,7 @@
 //! - `F4`: Switch to `Burst` mode (0 wait, high-speed execution)
 //! - `F12`: Soft Reset X68000 VM
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -108,6 +109,125 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
         _ => return None,
     };
     Some(sc)
+}
+
+fn check_and_repair_cli_floppy(drive_name: &str, path: &Path, data: &mut Vec<u8>) {
+    let Some(virus) = msx68k_bus::virus::scan_floppy_image(data) else {
+        return;
+    };
+
+    println!(
+        "\n[WARNING] Virus detected in {drive_name} ('{}'): {}",
+        path.display(),
+        virus.name_en()
+    );
+
+    if virus.can_self_repair_from_sector4() {
+        println!("Original boot loader backup found in Sector 4.");
+        print!("Would you like to repair this disk image? [Y/n]: ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err()
+            || line.trim().eq_ignore_ascii_case("n")
+        {
+            eprintln!("Disk repair aborted. Exiting.");
+            std::process::exit(1);
+        }
+
+        let backup_path = path.with_extension("org");
+        if let Err(e) = std::fs::write(&backup_path, &data) {
+            eprintln!(
+                "Warning: Failed to create backup at '{}': {e}",
+                backup_path.display()
+            );
+        } else {
+            println!("Backed up original image to '{}'", backup_path.display());
+        }
+
+        if !msx68k_bus::virus::repair_floppy_forceboot_from_sector4(data) {
+            eprintln!("Error: Failed to restore IPL from Sector 4. Exiting.");
+            std::process::exit(1);
+        }
+
+        if let Err(e) = std::fs::write(path, &data) {
+            eprintln!(
+                "Error: Failed to write repaired image to '{}': {e}",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "Successfully repaired {drive_name} ('{}').\n",
+            path.display()
+        );
+        return;
+    }
+
+    print!("Would you like to repair this disk image? [Y/n]: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err()
+        || line.trim().eq_ignore_ascii_case("n")
+    {
+        eprintln!("Disk repair aborted. Exiting.");
+        std::process::exit(1);
+    }
+
+    let default_clean = "disks/HUMAN302.XDF";
+    print!("Enter path to clean disk image with original IPL [default: {default_clean}]: ");
+    let _ = std::io::stdout().flush();
+    let mut clean_input = String::new();
+    let clean_path = if std::io::stdin().read_line(&mut clean_input).is_ok()
+        && !clean_input.trim().is_empty()
+    {
+        clean_input.trim().to_string()
+    } else {
+        default_clean.to_string()
+    };
+
+    let clean_bytes = match std::fs::read(&clean_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "Error: Failed to read clean disk image from '{clean_path}': {e}. Exiting."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let Some(clean_ipl) = msx68k_bus::virus::read_floppy_ipl(&clean_bytes) else {
+        eprintln!(
+            "Error: Failed to extract IPL from clean disk image '{clean_path}'. Exiting."
+        );
+        std::process::exit(1);
+    };
+
+    let backup_path = path.with_extension("org");
+    if let Err(e) = std::fs::write(&backup_path, &data) {
+        eprintln!(
+            "Warning: Failed to create backup at '{}': {e}",
+            backup_path.display()
+        );
+    } else {
+        println!("Backed up original image to '{}'", backup_path.display());
+    }
+
+    if !msx68k_bus::virus::repair_floppy_from_clean_ipl(data, &clean_ipl) {
+        eprintln!("Error: Failed to repair IPL. Exiting.");
+        std::process::exit(1);
+    }
+
+    if let Err(e) = std::fs::write(path, &data) {
+        eprintln!(
+            "Error: Failed to write repaired image to '{}': {e}",
+            path.display()
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "Successfully repaired {drive_name} ('{}').\n",
+        path.display()
+    );
 }
 
 /// Host time left free each frame for rendering while Burst runs flat out.
@@ -459,7 +579,8 @@ impl Msx68kApp {
 
         if let Some(fd0) = &args.fd0_path {
             match std::fs::read(fd0) {
-                Ok(data) => {
+                Ok(mut data) => {
+                    check_and_repair_cli_floppy("FD0", fd0, &mut data);
                     if vm.bus.insert_floppy(0, data, true) {
                         println!("Mounted FD0: {}", fd0.display());
                     } else {
@@ -471,10 +592,17 @@ impl Msx68kApp {
         }
 
         if let Some(fd1) = &args.fd1_path {
-            if let Ok(data) = std::fs::read(fd1) {
+            if let Ok(mut data) = std::fs::read(fd1) {
+                check_and_repair_cli_floppy("FD1", fd1, &mut data);
                 if vm.bus.insert_floppy(1, data, true) {
                     println!("Mounted FD1: {}", fd1.display());
                 }
+            }
+        }
+
+        if let Some(vm_fd0) = &args.vm_fd0_path {
+            if let Ok(mut data) = std::fs::read(vm_fd0) {
+                check_and_repair_cli_floppy("VM FD0", vm_fd0, &mut data);
             }
         }
 

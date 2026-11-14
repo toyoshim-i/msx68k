@@ -177,6 +177,12 @@ old_path:	.ds.b	PATH_MAX
 new_command:	.ds.b	PATH_MAX+12
 image_path:	.ds.b	PATH_MAX+2
 dlg_text:	.ds.b	256		; a dialog item's text
+virus_can_repair:	.ds.w	1
+clean_fd:		.ds.w	1
+clean_len:		.ds.l	1
+backup_path:		.ds.b	PATH_MAX+4
+virus_msg:		.ds.b	256
+	.even
 VARS_SIZE:
 sram_buffer:	.ds.b	SRAM_SIZE	; the VM's own SRAM, kept in its setup
 disk_buffer:	.ds.b	DISK_BUFFER_SIZE
@@ -285,6 +291,17 @@ no_library:
 	bmi.s	no_drive0
 	lea	drive0_size(a5), a1
 	move.l	d0, (a1)
+	move.w	drive0_fd(a5),d7
+	move.l	drive0_size(a5),d5
+	lea	drive0_path(pc),a2
+	bsr	check_floppy_virus
+	tst.l	d0
+	bpl.s	no_drive0
+	move.w	drive0_fd(a5),-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	clr.w	drive0_fd(a5)
+	clr.l	drive0_size(a5)
 no_drive0:
 
 	* Count the primary's drives from A:, which a VM in shared mode sees as its own
@@ -1779,6 +1796,12 @@ open_custom_size:
 	bmi	open_custom_bad_file
 	cmpi.l	#1,d0
 	bne	open_custom_advance
+	move.w	2(a4),d7
+	move.l	4(a4),d5
+	lea	image_path(a5),a2
+	bsr	check_floppy_virus
+	tst.l	d0
+	bmi	open_custom_bad_file
 	move.w	#3,(a4)		; a floppy identified by the shared parser
 	bra	open_custom_advance
 open_custom_letter:
@@ -3253,6 +3276,11 @@ change_fd_found:
 	bsr	probe_image
 	cmpi.l	#1,d0
 	bne	change_fd_reject
+	move.w	d3,d7
+	lea	image_path(a5),a2
+	bsr	check_floppy_virus
+	tst.l	d0
+	bmi	change_fd_reject
 change_fd_request:
 	move.l	d4,d2
 	move.l	d5,d4
@@ -3679,6 +3707,264 @@ new_setup_done:
 	movem.l	(sp)+,d0-d7/a0-a4
 	rts
 
+* Backs up file at A2 to .ORG
+backup_file_to_org:
+	movem.l	d1-d4/a0-a3,-(sp)
+	lea	backup_path(a5),a0
+	movea.l	a2,a1
+backup_copy_path:
+	move.b	(a1)+,(a0)+
+	bne	backup_copy_path
+backup_find_dot:
+	cmpa.l	#backup_path,a0
+	bls	backup_append_dot
+	cmpi.b	#'.',-(a0)
+	beq	backup_found_dot
+	cmpi.b	#'\\',(a0)
+	beq	backup_append_dot
+	cmpi.b	#'/',(a0)
+	beq	backup_append_dot
+	bra	backup_find_dot
+backup_append_dot:
+	lea	backup_path(a5),a0
+backup_find_end:
+	tst.b	(a0)+
+	bne	backup_find_end
+	subq.l	#1,a0
+	move.b	#'.',(a0)
+backup_found_dot:
+	addq.l	#1,a0
+	move.b	#'O',(a0)+
+	move.b	#'R',(a0)+
+	move.b	#'G',(a0)+
+	clr.b	(a0)
+
+	clr.w	-(sp)			; mode 0: read-only
+	move.l	a2,-(sp)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	backup_done
+	move.w	d0,d3			; d3 = source handle
+
+	clr.w	-(sp)			; attribute 0: normal
+	pea	backup_path(a5)
+	DOS	_CREATE
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	backup_close_src
+	move.w	d0,d4			; d4 = backup handle
+
+backup_copy_loop:
+	move.l	#16384,-(sp)
+	pea	disk_buffer+8704(a5)
+	move.w	d3,-(sp)
+	DOS	_READ
+	lea	10(sp),sp
+	tst.l	d0
+	ble	backup_copy_done
+	move.l	d0,d2
+
+	move.l	d2,-(sp)
+	pea	disk_buffer+8704(a5)
+	move.w	d4,-(sp)
+	DOS	_WRITE
+	lea	10(sp),sp
+	cmp.l	d2,d0
+	bne	backup_copy_done
+	bra	backup_copy_loop
+
+backup_copy_done:
+	move.w	d4,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+backup_close_src:
+	move.w	d3,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+backup_done:
+	movem.l	(sp)+,d1-d4/a0-a3
+	rts
+
+* Checks open floppy D7 of length D5 and path A2 for viruses.
+* Prompts user and repairs if infected; returns 0 if clean/repaired, -1 on reject/error.
+check_floppy_virus:
+	movem.l	d1-d7/a0-a4,-(sp)
+
+	clr.w	-(sp)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi	check_virus_fail
+
+	move.l	#4352,-(sp)
+	pea	disk_buffer(a5)
+	move.w	d7,-(sp)
+	DOS	_READ
+	lea	10(sp),sp
+	tst.l	d0
+	bmi	check_virus_fail
+
+	moveq.l	#MSX68K_FN_VM_VIRUS,d0
+	moveq.l	#0,d1			; action 0 = detect
+	move.l	d5,d2			; file length
+	move.l	#4352,d3		; buffer length
+	lea	disk_buffer(a5),a0
+	lea	dlg_text(a5),a1
+	bsr	msx68k_call
+	tst.l	d0
+	ble	check_virus_ok		; 0 = clean, negative = no virus / call absent
+
+	move.w	d1,virus_can_repair(a5)
+
+	lea	virus_msg(a5),a1
+	lea	str_virus_warn_head(pc),a0
+check_msg_head:
+	move.b	(a0)+,(a1)+
+	bne	check_msg_head
+	subq.l	#1,a1
+	lea	dlg_text(a5),a0
+check_msg_name:
+	move.b	(a0)+,(a1)+
+	bne	check_msg_name
+	subq.l	#1,a1
+	lea	str_virus_warn_tail(pc),a0
+check_msg_tail:
+	move.b	(a0)+,(a1)+
+	bne	check_msg_tail
+
+	pea	virus_msg(a5)
+	move.w	#D_YESNO,-(sp)		; 4 = はい/いいえ
+	SXCALL	DMError
+	addq.l	#6,sp
+	cmpi.w	#1,d0			; 1 = はい (Yes)
+	bne	check_virus_reject
+
+	tst.w	virus_can_repair(a5)
+	beq	check_virus_need_clean
+
+	bsr	backup_file_to_org
+	moveq.l	#MSX68K_FN_VM_VIRUS,d0
+	moveq.l	#1,d1			; action 1 = repair ForceBoot
+	move.l	d5,d2
+	move.l	#4352,d3
+	lea	disk_buffer(a5),a0
+	bsr	msx68k_call
+	tst.l	d0
+	bmi	check_virus_reject
+	bra	check_virus_write_repaired
+
+check_virus_need_clean:
+	lea	clean_default_path(pc),a0
+	lea	dlg_text(a5),a1
+	moveq.l	#0,d0
+	move.b	(a0),d0
+	addq.w	#1,d0
+check_copy_default:
+	move.b	(a0)+,(a1)+
+	dbra	d0,check_copy_default
+
+	moveq.l	#4,d0			; DLOG 4 = text input dialog
+	lea	dlg_text(a5),a1
+	bsr	text_dialog
+	tst.l	d0
+	bmi	check_virus_reject
+
+	clr.w	-(sp)			; read-only
+	pea	image_path(a5)
+	DOS	_OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi	check_virus_err_open
+	move.w	d0,clean_fd(a5)
+
+	move.w	#2,-(sp)
+	clr.l	-(sp)
+	move.w	clean_fd(a5),-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	move.l	d0,clean_len(a5)
+
+	clr.w	-(sp)
+	clr.l	-(sp)
+	move.w	clean_fd(a5),-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+
+	move.l	#4352,-(sp)
+	pea	disk_buffer+4352(a5)
+	move.w	clean_fd(a5),-(sp)
+	DOS	_READ
+	lea	10(sp),sp
+
+	move.w	clean_fd(a5),-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+
+	moveq.l	#MSX68K_FN_VM_VIRUS,d0
+	moveq.l	#0,d1
+	move.l	clean_len(a5),d2
+	move.l	#4352,d3
+	lea	disk_buffer+4352(a5),a0
+	lea	dlg_text(a5),a1
+	bsr	msx68k_call
+	tst.l	d0
+	bne	check_virus_err_invalid
+
+	bsr	backup_file_to_org
+	moveq.l	#MSX68K_FN_VM_VIRUS,d0
+	moveq.l	#2,d1			; action 2 = repair from clean
+	move.l	d5,d2			; target length
+	move.l	clean_len(a5),d3	; clean length
+	lea	disk_buffer(a5),a0
+	lea	disk_buffer+4352(a5),a1
+	bsr	msx68k_call
+	tst.l	d0
+	bmi	check_virus_reject
+
+check_virus_write_repaired:
+	clr.w	-(sp)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+
+	move.l	#4352,-(sp)
+	pea	disk_buffer(a5)
+	move.w	d7,-(sp)
+	DOS	_WRITE
+	lea	10(sp),sp
+	tst.l	d0
+	bmi	check_virus_reject
+
+check_virus_ok:
+	moveq.l	#0,d0
+	bra	check_virus_done
+
+check_virus_err_open:
+	pea	str_virus_err_open(pc)
+	bsr	show_error
+	addq.l	#4,sp
+	bra	check_virus_reject
+
+check_virus_err_invalid:
+	pea	str_virus_err_invalid(pc)
+	bsr	show_error
+	addq.l	#4,sp
+	bra	check_virus_reject
+
+check_virus_reject:
+	moveq.l	#-1,d0
+	bra	check_virus_done
+
+check_virus_fail:
+	moveq.l	#-1,d0
+check_virus_done:
+	movem.l	(sp)+,d1-d7/a0-a4
+	rts
+
 * Pointer argument is on the caller's stack.
 show_error:
 	move.l	4(sp),-(sp)
@@ -3719,6 +4005,16 @@ rom_error:
 	.dc.b	$8B, $F4, $90, $94, $82, $CC, $52, $4F, $4D, $83, $41, $83, $68, $83, $8C, $83, $58, $82, $F0, $31, $36, $90, $69, $90, $94, $36, $8C, $85, $88, $C8, $93, $E0, $82, $C5, $93, $FC, $97, $CD, $82, $B5, $82, $C4, $82, $AD, $82, $BE, $82, $B3, $82, $A2, $81, $42, 0
 media_error:
 	.dc.b	$91, $CE, $89, $9E, $82, $B7, $82, $E9, $46, $44, $83, $43, $83, $81, $81, $5B, $83, $57, $82, $F0, $8A, $4A, $82, $AF, $82, $DC, $82, $B9, $82, $F1, $81, $42, 0
+str_virus_warn_head:
+	.dc.b	$83, $66, $83, $42, $83, $58, $83, $4E, $82, $C9, $83, $45, $83, $43, $83, $8B, $83, $58, $81, $69, 0
+str_virus_warn_tail:
+	.dc.b	$81, $6A, $82, $AA, $8C, $9F, $8F, $6F, $82, $B3, $82, $EA, $82, $DC, $82, $B5, $82, $BD, $81, $42, $8F, $43, $95, $9C, $82, $B5, $82, $DC, $82, $B7, $82, $A9, $81, $48, 0
+str_virus_err_open:
+	.dc.b	$95, $9C, $8B, $8C, $8C, $B3, $82, $CC, $83, $66, $83, $42, $83, $58, $83, $4E, $82, $F0, $8A, $4A, $82, $AF, $82, $DC, $82, $B9, $82, $F1, $82, $C5, $82, $B5, $82, $BD, $81, $42, 0
+str_virus_err_invalid:
+	.dc.b	$95, $9C, $8B, $8C, $8C, $B3, $82, $CC, $83, $66, $83, $42, $83, $58, $83, $4E, $82, $AA, $96, $B3, $8C, $F8, $82, $C5, $82, $B7, $81, $42, 0
+clean_default_path:
+	.dc.b	19, "A:\VMX68K\DRIVE0.XDF", 0
 	.even
 * Items of the speed submenus, in the order of MSX68K_FN_VM_SPEED's speeds;
 * Burst is "最高速"

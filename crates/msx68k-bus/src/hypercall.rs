@@ -103,6 +103,8 @@ pub enum AppFunction {
     VmImage = 14,
     /// Queries or changes live sprite scanout options without restarting a VM.
     VmSpriteOptions = 15,
+    /// Checks for floppy viruses and repairs infected IPLs.
+    VmVirus = 16,
 }
 
 impl AppFunction {
@@ -124,6 +126,7 @@ impl AppFunction {
             13 => Some(Self::VmBoot),
             14 => Some(Self::VmImage),
             15 => Some(Self::VmSpriteOptions),
+            16 => Some(Self::VmVirus),
             _ => None,
         }
     }
@@ -217,6 +220,7 @@ impl X68kBus {
                 Some(AppFunction::VmBoot) => self.hypercall_vm_boot(state),
                 Some(AppFunction::VmImage) => self.hypercall_vm_image(state),
                 Some(AppFunction::VmSpriteOptions) => self.hypercall_vm_sprite_options(state),
+                Some(AppFunction::VmVirus) => self.hypercall_vm_virus(state),
                 None => TrapResult::Unhandled,
             },
         }
