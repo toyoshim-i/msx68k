@@ -228,6 +228,7 @@ EMLBttn			.equ	$A0A8
 CMTitleSet		.equ	$A29F
 CMCheck			.equ	$A29A	; Track a control until mouse release
 CMValueSet		.equ	$A290	; Set a control's value (handle, value.w)
+CMMaxSet		.equ	$A294	; Set a control maximum (handle, value.w)
 CMValueGet		.equ	$A291	; A control's value (handle) -> D0
 
 * -----------------------------------------------------------------------------
@@ -296,3 +297,11 @@ TSGetDrag	.equ	$A389
 TSEndDrag	.equ	$A38C
 TSCellToStr	.equ	$A427
 TSFock	.equ	$A351
+
+* Native Filer drag conversion (Workroom DRAG sample).
+MMHdlLock		.equ	$A040
+MMHdlUnlock		.equ	$A041
+TSISRecToStr		.equ	$A3BB
+
+CMFind			.equ	$A299
+EMSysTime		.equ	$A0AF

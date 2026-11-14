@@ -13,6 +13,11 @@ pub const SPEED_MENU_ID: u16 = 1;
 /// `'DLOG'` and `'DITL'` of the configuration dialog, and `'CNTL'` of its memory slider.
 pub const CONFIG_DIALOG_ID: u16 = 1;
 pub const MEMORY_SLIDER_ID: u16 = 1;
+const FREQUENCY_CONTROL_ID: u16 = 2;
+const BOOT_CONTROL_ID: u16 = 3;
+const ADJUST_PROC: u16 = 0x14 << 4;
+const FREQUENCY_BOUNDS: [i16; 4] = [90, 222, 186, 240];
+const BOOT_BOUNDS: [i16; 4] = [90, 258, 186, 276];
 
 /// Items of the configuration dialog, by their numbers in `'DITL'` [`CONFIG_DIALOG_ID`], which
 /// VMX68K.X uses: 1 設定 and 2 取消, the 68000's and the 68030's radio buttons, the memory slider,
@@ -324,12 +329,12 @@ const MEMORY_SLIDER_BOUNDS: [i16; 4] = [90, 122, 254, 140];
 fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     vec![
         (
-            [164, 359, 248, 385],
+            [193, 362, 223, 381],
             D_CHRBTN,
             pascal_even(b"\x90\xDD\x92\xE8"),
         ),
         (
-            [264, 359, 356, 385],
+            [295, 362, 325, 381],
             D_CHRBTN,
             pascal_even(b"\x8E\xE6\x8F\xC1"),
         ),
@@ -349,24 +354,24 @@ fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
         ([90, 162, 123, 171], D_RADBTN, vec![0, 0]),
         ([90, 190, 123, 199], D_RADBTN, vec![0, 0]),
         (
-            [238, 182, 348, 208],
+            [265, 186, 313, 205],
             D_CHRBTN,
             pascal_even(b"\x8F\xDA\x8D\xD7..."),
         ),
         ([18, 160, 82, 178], D_STCTXT | D_DISABL, static_text()),
         ([126, 160, 190, 178], D_STCTXT | D_DISABL, static_text()),
         ([126, 188, 214, 206], D_STCTXT | D_DISABL, static_text()),
-        ([90, 42, 356, 66], D_EDTTXT | D_DISABL, text_field(91)),
-        ([18, 42, 82, 66], D_STCTXT | D_DISABL, static_text()),
-        ([90, 218, 276, 244], D_CHRBTN, pascal_even(b"10MHz")),
-        ([90, 254, 276, 280], D_CHRBTN, pascal_even(b"STD")),
+        ([90, 46, 356, 62], D_EDTTXT | D_DISABL, text_field(91)),
+        ([18, 46, 82, 62], D_STCTXT | D_DISABL, static_text()),
+        (FREQUENCY_BOUNDS, D_RSCITM, FREQUENCY_CONTROL_ID.to_be_bytes().to_vec()),
+        (BOOT_BOUNDS, D_RSCITM, BOOT_CONTROL_ID.to_be_bytes().to_vec()),
         ([18, 218, 82, 242], D_STCTXT | D_DISABL, static_text()),
         ([18, 254, 82, 278], D_STCTXT | D_DISABL, static_text()),
-        ([252, 224, 270, 240], D_STCTXT | D_DISABL, static_text()),
-        ([252, 260, 270, 276], D_STCTXT | D_DISABL, static_text()),
-        ([18, 296, 51, 305], D_CHKBOX, vec![0, 0]),
+        ([0, 0, 0, 0], D_STCTXT | D_DISABL, static_text()),
+        ([0, 0, 0, 0], D_STCTXT | D_DISABL, static_text()),
+        ([28, 294, 41, 307], D_CHKBOX, vec![0, 0]),
         ([54, 294, 360, 312], D_STCTXT | D_DISABL, static_text()),
-        ([18, 324, 51, 333], D_CHKBOX, vec![0, 0]),
+        ([28, 322, 41, 335], D_CHKBOX, vec![0, 0]),
         ([54, 322, 360, 340], D_STCTXT | D_DISABL, static_text()),
     ]
 }
@@ -375,10 +380,10 @@ fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
 /// the labels ドライブの詳細, ドライブ数, 番号, ファイル, 共有, パススルー, and 割り当て, then the rows.
 fn drive_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     let mut items = vec![
-        ([360, 247, 400, 265], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
-        ([410, 247, 450, 265], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
-        ([80, 30, 96, 46], D_CHRBTN, pascal_even(b"-")),
-        ([118, 30, 134, 46], D_CHRBTN, pascal_even(b"+")),
+        ([365, 247, 395, 266], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
+        ([415, 247, 445, 266], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
+        ([80, 29, 96, 48], D_CHRBTN, pascal_even(b"-")),
+        ([118, 29, 134, 48], D_CHRBTN, pascal_even(b"+")),
         ([100, 32, 114, 44], D_STCTXT | D_DISABL, static_text()),
         ([190, 6, 290, 20], D_STCTXT | D_DISABL, static_text()), // ドライブの詳細
         ([14, 32, 76, 44], D_STCTXT | D_DISABL, static_text()), // ドライブ数
@@ -444,18 +449,6 @@ fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
     plot_image(&rows.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-fn choice_items(count: usize) -> Vec<([i16; 4], u8, Vec<u8>)> {
-    let mut items = vec![([0, 0, 0, 0], D_STCTXT | D_DISABL, static_text()); 2];
-    for row in 0..count as i16 {
-        items.push((
-            [4, 4 + row * 18, 182, 20 + row * 18],
-            D_CHRBTN,
-            pascal_even(b" "),
-        ));
-    }
-    items
-}
-
 pub fn vmx68k_library() -> Vec<u8> {
     let mut library = ResourceLibrary::new();
     library.insert(b"MENU", Resource::new(SPEED_MENU_ID, menu(&SPEEDS)));
@@ -473,6 +466,12 @@ pub fn vmx68k_library() -> Vec<u8> {
         b"CNTL",
         Resource::new(MEMORY_SLIDER_ID, control(MEMORY_SLIDER_BOUNDS, 4, 1, 12, SLIDER_PROC)),
     );
+    for (id, bounds, max) in [
+        (FREQUENCY_CONTROL_ID, FREQUENCY_BOUNDS, 3),
+        (BOOT_CONTROL_ID, BOOT_BOUNDS, 13),
+    ] {
+        library.insert(b"CNTL", Resource::new(id, control(bounds, 0, 0, max, ADJUST_PROC)));
+    }
     library.insert(
         b"PLOT",
         Resource::new(CONFIGURATION_ICON_ID, plot_image(&CONFIGURATION_ICON)),
@@ -507,9 +506,9 @@ pub fn vmx68k_library() -> Vec<u8> {
         Resource::new(
             4,
             dialog_items(&[
-                ([150, 72, 200, 90], D_CHRBTN, pascal_even(b"OK")),
-                ([210, 72, 280, 90], D_CHRBTN, pascal_even(b"Cancel")),
-                ([20, 38, 280, 54], D_EDTTXT | D_DISABL, text_field(6)),
+                ([194, 71, 222, 90], D_CHRBTN, pascal_even(b"OK")),
+                ([234, 71, 278, 90], D_CHRBTN, pascal_even(b"Cancel")),
+                ([20, 38, 280, 54], D_EDTTXT | D_DISABL, text_field(91)),
                 (
                     [20, 12, 280, 28],
                     D_STCTXT | D_DISABL,
@@ -517,10 +516,6 @@ pub fn vmx68k_library() -> Vec<u8> {
                 ),
             ])),
     );
-    for (id, count, bounds) in [(5,4,[284,325,470,405]), (6,14,[284,79,470,339])] {
-        library.insert(b"DLOG", Resource::new(id, dialog_template(bounds,id)));
-        library.insert(b"DITL", Resource::new(id, dialog_items(&choice_items(count))));
-    }
     library.to_bytes()
 }
 

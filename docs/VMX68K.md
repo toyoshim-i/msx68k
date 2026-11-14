@@ -56,8 +56,10 @@ run in a VM of their own from the start.
     CPU, memory slider, shared/custom drives with the existing 詳細... window,
     frequency, boot device, sprite scanline-limit override and full pattern memory.
     The path is read-only for existing setups and
-    editable for new ones; the action is 設定 or 作成 respectively. Choice windows
-    use the left mouse button. 起動装置 is disabled for shared drives. All edits
+    editable for new ones; the action is 設定 or 作成 respectively. Frequency and
+    boot device use SX's native adjustment controls: a value box with two arrows
+    on its right. The arrows step through choices and repeat while held, without
+    wrapping at the limits. Clicking the ROM value opens its address editor. 起動装置 is disabled for shared drives. All edits
     are staged until accepted. Existing CPU/memory/drive changes ask whether to
     restart; frequency and sprite-option changes apply live. Boot changes take
     effect at the next reset. Sprite options default to off and never trigger
@@ -73,8 +75,10 @@ run in a VM of their own from the start.
     sector by sector, a real FD to it, write-protected on the primary meanwhile), and what it is
     given, a path or a drive letter such as `C:`. Its 設定 keeps the changes until the
     configuration dialog's 設定 saves them with the rest and asks about the restart once; that
-    dialog's 取消 drops them too. Paths are typed into text fields; dropping a file from the
-    Filer onto an FD icon is available for live media exchange. An HDD image goes on the VM's SCSI and is the VM's alone. Custom mode
+    dialog's 取消 drops them too. Paths can be typed or set by dropping a single file
+    from the Filer onto the assignment field, which selects ファイル for that row.
+    Directories and multiple-file drops are rejected. Dropping onto an FD icon
+    is available for live media exchange. An HDD image goes on the VM's SCSI and is the VM's alone. Custom mode
     keeps the machine's own limits: two or four floppy drives, and the drive letters Human68k
     gives them. The VM boots as its SRAM says, and making a new setup (4d) chooses the boot
     device it writes there.

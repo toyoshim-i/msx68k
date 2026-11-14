@@ -110,7 +110,7 @@ cfg_speed:	.ds.w	1
 cfg_boot:	.ds.w	1
 cfg_rom:	.ds.l	1
 cfg_edit:	.ds.w	1
-popup_parent:	.ds.l	1
+dlg_part:	.ds.w	1		; C_INDEC/C_ININC/C_INTITLE from CMCheck
 text_parent:	.ds.l	1
 text_record:	.ds.b	DIALOG_RECORD
 		.ds.w	1
@@ -1461,48 +1461,63 @@ config_dialog_done:
 config_frequency:
 	move.w	dlg_cpu(a5),d0
 	bsr	speed_list
-	moveq.l	#0,d2
-	move.w	cfg_speed(a5),d2
-	moveq.l	#5,d0
-	bsr	config_selector
-	tst.l	d0
-	bmi	config_dialog_loop
+	subq.w	#1,d1
+	move.w	cfg_speed(a5),d0
+	bsr	config_adjust
 	move.w	d0,cfg_speed(a5)
 	bsr	config_choices_refresh
 	bra	config_dialog_loop
 config_boot:
 	tst.w	dlg_drives+DRV_MODE(a5)
 	beq	config_dialog_loop
-	moveq.l	#6,d0
-	moveq.l	#14,d1
-	moveq.l	#0,d2
-	move.w	cfg_boot(a5),d2
-	lea	boot_items(pc),a0
-	bsr	config_selector
-	tst.l	d0
-	bmi	config_dialog_loop
-	cmpi.w	#13,d0
-	bne.s	config_boot_selected
+	cmpi.w	#24,dlg_part(a5)	; C_INTITLE: edit only the ROM address
+	bne.s	config_boot_adjust
+	cmpi.w	#13,cfg_boot(a5)
+	bne	config_dialog_loop
 	movea.l	cfg_rom(a5),a1
 	bsr	rom_dialog
 	tst.l	d0
 	bmi	config_dialog_loop
 	move.l	a1,cfg_rom(a5)
-	moveq.l	#13,d0
-config_boot_selected:
+	bra.s	config_boot_refresh
+config_boot_adjust:
+	move.w	cfg_boot(a5),d0
+	moveq.l	#13,d1
+	bsr	config_adjust
 	move.w	d0,cfg_boot(a5)
+config_boot_refresh:
 	bsr	config_choices_refresh
 	bra	config_dialog_loop
-config_choices_refresh:
-	bsr	config_choices_draw
-	move.l	dlg_ptr(a5),-(sp)
-	SXCALL	DMDraw
-	addq.l	#4,sp
+* D0 current index, D1 maximum. Native adjustment controls do not wrap.
+config_adjust:
+	cmpi.w	#20,dlg_part(a5)
+	bne.s	config_adjust_inc
+	tst.w	d0
+	beq.s	config_adjust_done
+	subq.w	#1,d0
 	rts
+config_adjust_inc:
+	cmpi.w	#21,dlg_part(a5)
+	bne.s	config_adjust_done
+	cmp.w	d1,d0
+	bge.s	config_adjust_done
+	addq.w	#1,d0
+config_adjust_done:
+	rts
+config_choices_refresh:
 config_choices_draw:
 	movem.l	d0-d3/a0-a1,-(sp)
 	move.w	dlg_cpu(a5),d0
 	bsr	speed_list
+	move.l	a0,-(sp)
+	subq.w	#1,d1
+	move.w	d1,-(sp)
+	moveq.l	#ITEM_FREQUENCY,d0
+	bsr	dlg_item
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMMaxSet
+	addq.l	#6,sp
+	movea.l	(sp)+,a0
 	move.w	cfg_speed(a5),d1
 	moveq.l	#ITEM_FREQUENCY,d0
 	bsr	config_choice_title
@@ -1521,20 +1536,11 @@ config_boot_shine:
 	move.l	dlg_hdl(a5),-(sp)
 	SXCALL	CMShine
 	addq.l	#6,sp
-	move.w	#25,-(sp)
-	move.l	dlg_ptr(a5),-(sp)
-	tst.w	dlg_drives+DRV_MODE(a5)
-	beq.s	config_boot_arrow_hide
-	SXCALL	DIShow
-	bra.s	config_boot_arrow_done
-config_boot_arrow_hide:
-	SXCALL	DIHide
-config_boot_arrow_done:
-	addq.l	#6,sp
 	movem.l	(sp)+,d0-d3/a0-a1
 	rts
 * D0 item, D1 index, A0 NUL-separated labels.
 config_choice_title:
+	move.w	d1,-(sp)
 	tst.w	d1
 	beq.s	config_title_copy
 config_title_skip:
@@ -1553,97 +1559,15 @@ config_title_byte:
 config_title_done:
 	move.b	d1,dlg_text(a5)
 	bsr	dlg_item
-	pea	dlg_text(a5)
+	move.w	(sp)+,d1
+	move.w	d1,-(sp)
 	move.l	dlg_hdl(a5),-(sp)
-	SXCALL	CMTitleSet
-	addq.l	#8,sp
-	rts
-* D0 resource, D1 visible count, D2 selected index, A0 label list.
-* A small native choice window accepts left-button selection.
-config_selector:
-	movem.l	d1-d7/a0-a3,-(sp)
-	move.l	a0,a3
-	move.w	d0,d5
-	move.w	d1,d6
-	move.w	d2,d7
-	bsr	dialog_store_edit
-	move.l	dlg_ptr(a5),popup_parent(a5)
-	lea	det_dialog(a5),a0
-	bsr	clear_dialog_record
-	move.w	#det_dialog,det_dialog+DIALOG_RECORD(a5)
-	move.l	#-1,-(sp)
-	pea	det_dialog(a5)
-	move.w	d5,-(sp)
-	SXCALL	DMRefer
-	lea	10(sp),sp
-	move.l	a0,d0
-	beq	config_selector_failed
-	move.l	app_task_id(a5),WINDOW_TASK(a0)
-	move.l	a0,dlg_ptr(a5)
-	moveq.l	#0,d4
-config_selector_labels:
-	move.w	d4,d0
-	addq.w	#3,d0
-	cmp.w	d6,d4
-	bcc.s	config_selector_hide
-	lea	dlg_text+1(a5),a1
-	move.b	#' ',(a1)+
-	cmp.w	d7,d4
-	bne.s	config_selector_marked
-	move.b	#'*',-1(a1)
-config_selector_marked:
-	move.b	#' ',(a1)+
-	moveq.l	#2,d3
-config_selector_label:
-	move.b	(a3)+,(a1)+
-	beq.s	config_selector_label_done
-	addq.w	#1,d3
-	bra.s	config_selector_label
-config_selector_label_done:
-	move.b	d3,dlg_text(a5)
-	bsr	dlg_item
-	pea	dlg_text(a5)
-	move.l	dlg_hdl(a5),-(sp)
-	SXCALL	CMTitleSet
-	addq.l	#8,sp
-	bra.s	config_selector_next
-config_selector_hide:
-	move.w	d0,-(sp)
-	move.l	dlg_ptr(a5),-(sp)
-	SXCALL	DIHide
+	SXCALL	CMValueSet
 	addq.l	#6,sp
-config_selector_next:
-	addq.w	#1,d4
-	moveq.l	#4,d0
-	cmpi.w	#5,d5
-	beq.s	config_selector_limit
-	moveq.l	#14,d0
-config_selector_limit:
-	cmp.w	d0,d4
-	bcs	config_selector_labels
-	move.l	dlg_ptr(a5),-(sp)
-	SXCALL	WMShow
-	SXCALL	WMSelect
-	SXCALL	GMSetGraph
-	SXCALL	DMDraw
-	addq.l	#4,sp
-	bsr	dialog_control
-	subi.w	#3,d0
-	move.w	d0,d4
-	bsr	dlg_dispose
-	bra.s	config_selector_restore
-config_selector_failed:
-	moveq.l	#-1,d4
-config_selector_restore:
-	move.l	popup_parent(a5),dlg_ptr(a5)
-	clr.l	popup_parent(a5)
-	move.l	dlg_ptr(a5),-(sp)
-	SXCALL	WMSelect
-	SXCALL	GMSetGraph
-	addq.l	#4,sp
-	move.w	d4,d0
-	ext.l	d0
-	movem.l	(sp)+,d1-d7/a0-a3
+	pea	dlg_text(a5)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMTitleSet
+	addq.l	#8,sp
 	rts
 * Set or retain boot fields in the setup SRAM, and notify a live custom VM.
 config_commit_boot:
@@ -2311,8 +2235,6 @@ dialog_control_key:
 	beq	dialog_control_cancel
 	cmpi.w	#13,event_win+2(a5)
 	bne	dialog_control_text
-	tst.l	popup_parent(a5)
-	bne	dialog_control_cancel
 	moveq.l	#ITEM_OK,d0
 	bra	dialog_control_return
 dialog_control_user:
@@ -2339,8 +2261,6 @@ dialog_control_click:
 	move.l	event_win(a5),d0
 	cmp.l	dlg_ptr(a5),d0
 	beq.s	dialog_control_own_click
-	tst.l	popup_parent(a5)
-	bne	dialog_control_cancel
 	bra	dialog_control_next
 dialog_control_own_click:
 	SXCALL	WMActive
@@ -2386,12 +2306,21 @@ dialog_control_hit:
 	bne.s	dialog_control_button
 	tst.l	cfg_ptr(a5)
 	bne.s	dialog_control_button
-	tst.l	popup_parent(a5)
-	bne.s	dialog_control_button
 	bsr	dialog_track_memory
 	moveq.l	#ITEM_MEMORY,d0
 	bra	dialog_control_return
 dialog_control_button:
+	tst.l	cfg_ptr(a5)
+	bne.s	dialog_control_plain_button
+	cmpi.w	#ITEM_FREQUENCY,d7
+	beq.s	dialog_control_adjust
+	cmpi.w	#ITEM_BOOT,d7
+	bne.s	dialog_control_plain_button
+dialog_control_adjust:
+	bsr	dialog_track_adjust
+	move.w	d7,d0
+	bra	dialog_control_return
+dialog_control_plain_button:
 	clr.l	-(sp)			; handlers apply changes; track/highlight only
 	move.l	d5,-(sp)
 	move.l	dlg_hdl(a5),-(sp)
@@ -2399,6 +2328,7 @@ dialog_control_button:
 	lea	12(sp),sp
 	tst.w	d0
 	ble	dialog_control_next
+	move.w	d0,dlg_part(a5)
 	move.w	d7,d0
 	bra	dialog_control_return
 dialog_control_hit_next:
@@ -2445,6 +2375,102 @@ dialog_control_cancel:
 	moveq.l	#ITEM_CANCEL,d0
 dialog_control_return:
 	movem.l	(sp)+,d1-d7/a0-a4
+	rts
+
+* Native adjustment parts, including the title, are identified by the CDEF.
+* Like Workroom's ADJUST sample, repeat after 40 centiseconds, then every 12.
+* Never retain a callback in the control after the settings window closes.
+dialog_track_adjust:
+	movem.l	d0-d6/a0-a2,-(sp)
+	clr.w	dlg_part(a5)
+	cmpi.w	#ITEM_BOOT,d7
+	bne.s	dialog_adjust_find
+	tst.w	dlg_drives+DRV_MODE(a5)
+	beq	dialog_adjust_done
+dialog_adjust_find:
+	move.l	dlg_ptr(a5),-(sp)
+	move.l	d5,-(sp)
+	SXCALL	CMFind
+	addq.l	#8,sp
+	cmpi.w	#24,d0
+	beq	dialog_adjust_title
+	cmpi.w	#20,d0
+	beq.s	dialog_adjust_start
+	cmpi.w	#21,d0
+	bne	dialog_adjust_done
+dialog_adjust_start:
+	move.w	d0,d6
+	moveq.l	#40,d3
+dialog_adjust_step:
+	SXCALL	EMSysTime
+	move.l	d0,d4
+	move.w	d6,dlg_part(a5)
+	cmpi.w	#ITEM_BOOT,d7
+	beq.s	dialog_adjust_boot
+	move.w	dlg_cpu(a5),d0
+	bsr	speed_list
+	subq.w	#1,d1
+	move.w	cfg_speed(a5),d0
+	bsr	config_adjust
+	move.w	d0,cfg_speed(a5)
+	bra.s	dialog_adjust_redraw
+dialog_adjust_boot:
+	move.w	cfg_boot(a5),d0
+	moveq.l	#13,d1
+	bsr	config_adjust
+	move.w	d0,cfg_boot(a5)
+dialog_adjust_redraw:
+	bsr	config_choices_refresh
+	move.w	d7,d0
+	bsr	dlg_item
+	move.w	d6,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMShine
+	addq.l	#6,sp
+dialog_adjust_wait:
+	SXCALL	EMLBttn
+	tst.b	d0
+	beq.s	dialog_adjust_release
+	SXCALL	EMMSLoc
+	move.l	dlg_ptr(a5),-(sp)
+	move.l	d0,-(sp)
+	SXCALL	CMFind
+	addq.l	#8,sp
+	cmp.w	d6,d0
+	bne.s	dialog_adjust_outside
+	cmpa.l	dlg_hdl(a5),a0
+	bne.s	dialog_adjust_outside
+	move.w	d6,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMShine
+	addq.l	#6,sp
+	SXCALL	EMSysTime
+	sub.l	d4,d0
+	cmp.l	d3,d0
+	bcs.s	dialog_adjust_wait
+	moveq.l	#12,d3
+	bra	dialog_adjust_step
+dialog_adjust_outside:
+	clr.w	-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMShine
+	addq.l	#6,sp
+	bra.s	dialog_adjust_wait
+dialog_adjust_release:
+	clr.w	-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMShine
+	addq.l	#6,sp
+	clr.w	dlg_part(a5)		; values already applied, don't step twice
+	bra.s	dialog_adjust_done
+dialog_adjust_title:
+	move.w	#24,dlg_part(a5)
+dialog_adjust_title_wait:
+	SXCALL	EMLBttn
+	tst.b	d0
+	bne.s	dialog_adjust_title_wait
+dialog_adjust_done:
+	movem.l	(sp)+,d0-d6/a0-a2
 	rts
 
 * Track the memory control explicitly. No CDEF default callback is retained
@@ -2535,7 +2561,7 @@ dialog_drop:
 	move.l	event_win(a5),d0
 	cmp.l	dlg_ptr(a5),d0
 	bne	dialog_drop_done
-	bsr	dialog_store_edit
+	bsr	dialog_end_edit
 	move.l	dlg_ptr(a5),-(sp)
 	SXCALL	GMSetGraph
 	addq.l	#4,sp
@@ -2560,18 +2586,36 @@ dialog_drop_row:
 	bcs	dialog_drop_row
 	bra	dialog_drop_done
 dialog_drop_take:
+	* Use the Filer's icon record, as Workroom does, rather than converting
+	* arbitrary cells to text (which can also concatenate multiple files).
 	SXCALL	TSGetDrag
 	tst.l	d0
-	bne	dialog_drop_done
-	move.l	#PATH_MAX,-(sp)
+	bmi	dialog_drop_done
+	cmpi.l	#60,(a0)		; one Cell header (8) + IcState (52)
+	bne	dialog_drop_reject
+	movea.l	4(a0),a4
+	move.l	a4,-(sp)
+	SXCALL	MMHdlLock
+	addq.l	#4,sp
+	movea.l	(a4),a0
+	cmpi.w	#'FS',(a0)
+	bne	dialog_drop_unlock_reject
+	move.b	37(a0),d0		; Cell.data + IcState.attrib
+	andi.b	#$18,d0		; no volume label or directory
+	bne	dialog_drop_unlock_reject
 	pea	image_path(a5)
-	move.l	4(a0),-(sp)
-	SXCALL	TSCellToStr
-	lea	12(sp),sp
+	pea	8(a0)
+	SXCALL	TSISRecToStr		; full Human68k path, buffer >= 90 bytes
+	addq.l	#8,sp
+	move.l	d0,-(sp)
+	move.l	a4,-(sp)
+	SXCALL	MMHdlUnlock
+	addq.l	#4,sp
+	move.l	(sp)+,d0
 	tst.l	d0
-	ble	dialog_drop_done
+	ble	dialog_drop_reject
 	cmpi.l	#PATH_MAX,d0
-	bcc	dialog_drop_done
+	bcc	dialog_drop_reject
 	lea	dlg_text(a5),a0
 	move.b	d0,(a0)+
 	lea	image_path(a5),a1
@@ -2587,19 +2631,19 @@ dialog_drop_copy:
 	bsr	row_entry
 	clr.w	(a2)
 	bsr	det_show_kind
-	bsr	row_item
-	addq.w	#4,d4
-	move.w	d4,dlg_edit(a5)
-	move.l	#$7FFFFFFF,-(sp)
-	clr.l	-(sp)
-	move.w	d4,-(sp)
-	move.l	dlg_ptr(a5),-(sp)
-	SXCALL	DITSelect
-	lea	14(sp),sp
 	move.l	dlg_ptr(a5),-(sp)
 	SXCALL	DMDraw
 	addq.l	#4,sp
-	move.w	#1,-(sp)
+	clr.w	-(sp)			; TS_FINISH
+	SXCALL	TSEndDrag
+	addq.l	#2,sp
+	bra.s	dialog_drop_done
+dialog_drop_unlock_reject:
+	move.l	a4,-(sp)
+	SXCALL	MMHdlUnlock
+	addq.l	#4,sp
+dialog_drop_reject:
+	move.w	#-1,-(sp)		; TS_PUTBACK
 	SXCALL	TSEndDrag
 	addq.l	#2,sp
 dialog_drop_done:
@@ -2651,6 +2695,7 @@ dialog_filter_update:
 dialog_filter_dialog:
 	* Never consume an update without painting the exposed items.
 	move.l	d0, -(sp)
+	SXCALL	GMSetGraph		; $A131
 	SXCALL	WMUpdate		; $A20D
 	movea.l	(sp),a0
 	move.l	WINDOW_UPDATE(a0),-(sp)		; Window.update
@@ -3400,14 +3445,15 @@ boot_menu_done:
 	movem.l	(sp)+,d0-d3/a0-a1
 	rts
 
-* ROM address editor. It keeps its own record while settings remains open.
-* D0 resource ID, A1 Pascal initial text. Returns 0 accepted, -1 cancelled;
+* ROM address / clean-disk path editor. Keeps its own record while settings remains open.
+* D0 resource ID, A0 labels table, A1 Pascal initial text. Returns 0 accepted, -1 cancelled;
 * accepted text is NUL-terminated in image_path, whitespace trimmed.
 text_dialog:
-	movem.l	d1-d4/a0-a2,-(sp)
+	movem.l	d1-d4/a0-a3,-(sp)
 	move.l	dlg_ptr(a5),text_parent(a5)
 	move.w	d0,d4
-	move.l	a1,a2
+	movea.l	a0,a3
+	movea.l	a1,a2
 	lea	text_record(a5),a0
 	bsr	clear_dialog_record
 	move.w	#text_record,text_record+DIALOG_RECORD(a5)
@@ -3418,6 +3464,7 @@ text_dialog:
 	lea	10(sp),sp
 	move.l	a0,d0
 	beq	text_dialog_cancelled
+	move.l	app_task_id(a5),WINDOW_TASK(a0)
 	move.l	a0,dlg_ptr(a5)
 	moveq.l	#3,d0
 	bsr	dlg_item
@@ -3426,11 +3473,12 @@ text_dialog:
 	move.w	dlg_type(a5),-(sp)
 	SXCALL	DITSet
 	lea	10(sp),sp
-	lea	rom_labels(pc),a1
+	movea.l	a3,a1
 	bsr	dlg_labels
 text_dialog_show:
 	move.l	dlg_ptr(a5),-(sp)
 	SXCALL	WMShow
+	SXCALL	WMSelect
 	SXCALL	GMSetGraph
 	SXCALL	DMDraw
 	addq.l	#4,sp
@@ -3491,7 +3539,7 @@ text_dialog_done:
 	addq.l	#4,sp
 text_dialog_restored:
 	move.l	(sp)+,d0
-	movem.l	(sp)+,d1-d4/a0-a2
+	movem.l	(sp)+,d1-d4/a0-a3
 	rts
 
 rom_dialog:
@@ -3514,6 +3562,7 @@ rom_address_store:
 	move.b	d0,(a0)+
 	dbra	d3,rom_address_digit
 	moveq.l	#4,d0
+	lea	rom_labels(pc),a0
 	lea	dlg_text(a5),a1
 	bsr	text_dialog
 	tst.l	d0
@@ -3867,6 +3916,7 @@ check_copy_default:
 	dbra	d0,check_copy_default
 
 	moveq.l	#4,d0			; DLOG 4 = text input dialog
+	lea	virus_clean_labels(pc),a0
 	lea	dlg_text(a5),a1
 	bsr	text_dialog
 	tst.l	d0
@@ -4014,7 +4064,7 @@ str_virus_err_open:
 str_virus_err_invalid:
 	.dc.b	$95, $9C, $8B, $8C, $8C, $B3, $82, $CC, $83, $66, $83, $42, $83, $58, $83, $4E, $82, $AA, $96, $B3, $8C, $F8, $82, $C5, $82, $B7, $81, $42, 0
 clean_default_path:
-	.dc.b	19, "A:\VMX68K\DRIVE0.XDF", 0
+	.dc.b	20, "A:\VMX68K\DRIVE0.XDF", 0
 	.even
 * Items of the speed submenus, in the order of MSX68K_FN_VM_SPEED's speeds;
 * Burst is "最高速"
@@ -4026,6 +4076,8 @@ speed_items_68030:
 * Static text is set with DITSet, matching configuration and drive details.
 rom_labels:
 	.dc.b	4,9,"ROM (hex)",0
+virus_clean_labels:
+	.dc.b	4,24,$95,$9C,$8C,$B3,$82,$C9,$8E,$67,$82,$A4,$90,$B3,$8F,$ED,$82,$C8,$83,$66,$83,$42,$83,$58,$83,$4E,0
 config_labels:
 	.dc.b	7, 8, $56, $4D, $82, $CC, $90, $DD, $92, $E8		; VMの設定
 	.dc.b	8, 3, "CPU"
@@ -4038,8 +4090,6 @@ config_labels:
 	.dc.b	19,8,$83,$74,$83,$40,$83,$43,$83,$8B
 	.dc.b	22,6,$8E,$FC,$94,$67,$90,$94
 	.dc.b	23,8,$8B,$4E,$93,$AE,$91,$95,$92,$75
-	.dc.b	24,2,$81,$A5
-	.dc.b	25,2,$81,$A5
 	.dc.b	27,24,$83,$58,$83,$76,$83,$89,$83,$43,$83,$67,$82,$CC,$8D,$73,$90,$A7,$8C,$C0,$82,$F0,$89,$F0,$8F,$9C
 	.dc.b	29,22,$83,$70,$83,$5E,$81,$5B,$83,$93,$52,$41,$4D,$82,$F0,$32,$94,$7B,$82,$C9,$8A,$67,$92,$A3
 	.dc.b	0

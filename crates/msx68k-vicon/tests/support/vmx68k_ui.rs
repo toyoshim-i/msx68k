@@ -805,20 +805,33 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     click(&mut vm, (500, 202), 1, 500_000);
     type_keys(&mut vm, "a:\\vmx68k\\raw.xdf");
     click(&mut vm, (529, 374), 1, 1_000_000);
-    click(&mut vm, (372, 312), 1, 1_000_000);
+    // Native CI_ADJBTN: increment the indexed choices with its right arrow.
+    click(&mut vm, (369, 311), 2, 1_000_000); // Clamp at the 68030's highest speed.
+    click(&mut vm, (347, 311), 1, 500_000); // Decrease to 25MHz.
+    click(&mut vm, (369, 311), 1, 500_000);
     screenshot(&vm, "new_frequency");
-    click(&mut vm, (360, 355), 1, 1_000_000); // 68030: highest speed, second choice
-    click(&mut vm, (372, 348), 1, 1_000_000);
+    click(&mut vm, (369, 347), 7, 1_000_000); // STD -> SCSI2
+    let settings_window = vm.bus.active_window();
+    click(&mut vm, (369, 347), 6, 1_000_000); // SCSI2 -> ROM, no automatic dialog.
+    vm.run_steps(3_000_000);
+    screenshot(&vm, "rom_selected");
+    assert_eq!(vm.bus.active_window(), settings_window);
+    click(&mut vm, (310, 347), 1, 1_000_000); // ROM title opens its address editor.
+    assert_ne!(vm.bus.active_window(), settings_window);
+    // The existing ROM editor's Cancel returns without changing its address.
+    click(&mut vm, (480, 280), 1, 1_000_000);
+    assert_eq!(vm.bus.active_window(), settings_window);
+    click(&mut vm, (347, 347), 6, 1_000_000); // ROM -> SCSI2.
     screenshot(&vm, "new_boot");
-    click(&mut vm, (360, 217), 1, 1_000_000); // SCSI2, eighth choice
     wait_ui(
         &mut vm,
         |vm| {
             (125..137).any(|y| (290..400).any(|x| text_index(vm, (x, y)) == 10))
-                && (305..317).any(|y| (346..398).any(|x| text_index(vm, (x, y)) == 11))
+                && (305..317).any(|y| (286..334).any(|x| text_index(vm, (x, y)) == 11))
         },
         "common form repainted after selecting a device",
     );
+    vm.run_steps(2_000_000); // Finish native redraw before the review screenshot.
     screenshot(&vm, "new_setup");
     click(&mut vm, (228, 381), 1, 350_000);
     click(&mut vm, (228, 409), 1, 350_000);
@@ -1230,7 +1243,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
     };
     wait_ui(
         &mut vm,
-        |vm| (341..354).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11)),
+        |vm| (341..354).any(|y| (348..378).any(|x| text_index(vm, (x, y)) == 11)),
         "enabled boot selector drawn",
     );
     // Modeless controls repaint independently: the boot selector can appear before
@@ -1241,10 +1254,11 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         |vm| (166..185).any(|y| (284..382).any(|x| text_index(vm, (x, y)) == 11))
             && (123..145).any(|y| (284..548).any(|x| text_index(vm, (x, y)) == 8))
             && (123..140).any(|y| (212..276).any(|x| text_index(vm, (x, y)) == 11))
-            && (305..318).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11))
-            && (341..354).any(|y| (446..464).any(|x| text_index(vm, (x, y)) == 11)),
+            && (305..318).any(|y| (348..378).any(|x| text_index(vm, (x, y)) == 11))
+            && (341..354).any(|y| (348..378).any(|x| text_index(vm, (x, y)) == 11)),
         "settings controls and path drawn",
     );
+    vm.run_steps(2_000_000);
     let expected = parent(&vm);
     screenshot(&vm, "settings_parent_before");
     click(&mut vm, (480, 275), 1, 1_500_000);
@@ -1254,6 +1268,10 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         |vm| text_index(vm, (500, 194)) == 11,
         "details fields drawn",
     );
+    click(&mut vm, (275, 156), 1, 500_000); // Two drive rows.
+    // Dropping on another row must preserve the currently edited field.
+    click(&mut vm, (500, 202), 1, 300_000);
+    type_keys(&mut vm, "old.xdf");
     // Activate and resize another application's window while details stays open.
     click(&mut vm, DRIVE_ICON, 2, 750_000);
     assert_ne!(
@@ -1277,7 +1295,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
     for i in 1..=24 {
         vm.bus.set_host_mouse_position(Some((
             source.0 + (500 - source.0) * i / 24,
-            source.1 + (202 - source.1) * i / 24,
+            source.1 + (222 - source.1) * i / 24,
         )));
         vm.run_steps(150_000);
     }
@@ -1297,7 +1315,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
     click(&mut vm, (402, 453), 1, 1_000_000);
     assert_eq!(
         saved_drives(&vm, "DEFAULT"),
-        Some((true, vec![(0, "A:\\X68\\ZZZ.XDF".into())]))
+        Some((true, vec![(0, "old.xdf".into()), (0, "A:\\X68\\ZZZ.XDF".into())]))
     );
     // Keep the running VM; the next lifecycle scenario must still see normal cleanup.
     click(&mut vm, (680, 198), 1, 1_000_000);
