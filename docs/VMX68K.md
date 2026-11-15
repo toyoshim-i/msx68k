@@ -43,7 +43,16 @@ run in a VM of their own from the start.
   restart is changed in a dialog, saved when the dialog closes, and followed, if anything
   changed, by a dialog saying the settings take effect when the VM restarts and asking whether
   to restart now or later by hand.
-  - **Configuration**: one icon whose menu has, in order: "新規...", a disabled blank
+  - **INTERRUPT / RESET**: two buttons at the left end of the bar, matching the buttons on the
+    top of a real X68000. Left-clicking `INTERRUPT` triggers a level-7 NMI on the VM (`VmInterrupt`,
+    18); left-clicking `RESET` resets the VM (`VmReset`, 17).
+  - **Joypad**: an Atari DE-9 `JOY` icon to the right of `RESET` (and left of the floppy icons).
+    Left-clicking toggles keyboard-to-joypad mode on Joystick 1 (`VmJoypad`, 19; enabled state and
+    6-key scancode map saved in `'V68J'` inside `*.V68`). Right-clicking opens `"割当..."`, which
+    displays a joypad-layout dialog where clicking any button (`↑`, `↓`, `←`, `→`, `A`, `B`)
+    captures the next key press.
+  - **Configuration**: one icon to the left of the access lamp on the right side of the bar, whose
+    menu has, in order: "新規...", a disabled blank
     row, "設定...", "起動装置", and "周波数". 設定 opens the configuration
     dialog; 周波数 is a submenu of the current CPU's
     speeds, applied and saved when chosen (for the 68000: 10MHz, 16MHz, 24MHz, and 最高速,

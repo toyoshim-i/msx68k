@@ -9,6 +9,10 @@ use crate::sx_resource::{Resource, ResourceLibrary};
 /// `'MENU'` of the CPU's speeds, in the order of `VmSpeed`'s `D2.L`. VMX68K.X rebuilds it with
 /// `MNConvert2` before showing it, to check the current speed.
 pub const SPEED_MENU_ID: u16 = 1;
+/// `'MENU'` of the joypad icon's context menu (`割当...`).
+pub const JOYPAD_MENU_ID: u16 = 3;
+/// `'DLOG'` and `'DITL'` of the joypad key-assignment dialog.
+pub const JOYPAD_DIALOG_ID: u16 = 3;
 
 /// `'DLOG'` and `'DITL'` of the configuration dialog, and `'CNTL'` of its memory slider.
 pub const CONFIG_DIALOG_ID: u16 = 1;
@@ -48,6 +52,14 @@ pub const DRIVE_ROWS: u16 = 8;
 
 /// `'PLOT'` of the Configuration icon, a plot image ([`plot_image`]).
 pub const CONFIGURATION_ICON_ID: u16 = 1;
+/// `'PLOT'` of the INTERRUPT (NMI) button icon, a plot image ([`plot_image`]).
+pub const INTERRUPT_ICON_ID: u16 = 2;
+/// `'PLOT'` of the RESET button icon, a plot image ([`plot_image`]).
+pub const RESET_ICON_ID: u16 = 3;
+/// `'PLOT'` of the Joypad icon while disabled, an Atari DE-9 connector labeled `JOY`.
+pub const JOYPAD_OFF_ICON_ID: u16 = 4;
+/// `'PLOT'` of the Joypad icon while enabled, a highlighted Atari DE-9 connector labeled `JOY`.
+pub const JOYPAD_ON_ICON_ID: u16 = 5;
 
 /// ID of the `'ICN#'` entry and its `'PAT3'` icon that `\SHELL\ICON.LB` gets for VM setups,
 /// after Sharp's entries (`$80`..`$BB`).
@@ -121,6 +133,104 @@ const CONFIGURATION_ICON: [&str; 20] = [
     "#+++++++++++++###++++++++++++o",
     "#++++++++++++++++++++++++++++o",
     "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// The INTERRUPT (NMI) icon (see [`plot_image`]), a raised pushbutton labeled `INT` inside the
+/// same 30x20 rectangular recess as [`CONFIGURATION_ICON`].
+const INTERRUPT_ICON: [&str; 20] = [
+    "##############################",
+    "#++++++++++++++++++++++++++++o",
+    "#+ooooooooooooooooooooooooo#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o...###..#...#..#####...o#+o",
+    "#+o....#...##..#....#.....o#+o",
+    "#+o....#...#.#.#....#.....o#+o",
+    "#+o....#...#.#.#....#.....o#+o",
+    "#+o....#...#..##....#.....o#+o",
+    "#+o....#...#...#....#.....o#+o",
+    "#+o...###..#...#....#.....o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o#######################o#+o",
+    "#+#########################++o",
+    "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// The RESET icon (see [`plot_image`]), a raised pushbutton labeled `RESET` inside the same 30x20
+/// rectangular recess as [`CONFIGURATION_ICON`].
+const RESET_ICON: [&str; 20] = [
+    "##############################",
+    "#++++++++++++++++++++++++++++o",
+    "#+ooooooooooooooooooooooooo#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o..##..###..##.###.###..o#+o",
+    "#+o..#.#.#...#...#....#...o#+o",
+    "#+o..#.#.#...#...#....#...o#+o",
+    "#+o..##..##...#..##...#...o#+o",
+    "#+o..#.#.#.....#.#....#...o#+o",
+    "#+o..#.#.#.....#.#....#...o#+o",
+    "#+o..#.#.###.##..###..#...o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o.......................o#+o",
+    "#+o#######################o#+o",
+    "#+#########################++o",
+    "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// Joypad icon (disabled): Atari DE-9 connector recess with `JOY` inside.
+const JOYPAD_OFF_ICON: [&str; 20] = [
+    "##############################",
+    "#++++++++++++++++++++++++++++o",
+    "#++oooooooooooooooooooooooo++o",
+    "#++o......................o++o",
+    "#++o..##################..o++o",
+    "#++o..#++++++++++++++++#..o++o",
+    "#++o..#+..#++..#++.#.#+#..o++o",
+    "#++o...#++#+#.#+#.#.#.#...o++o",
+    "#++o...#++#+#.#+#++#++#...o++o",
+    "#++o...#.#+#+#.#+++#++#...o++o",
+    "#++o....#.#+++..+++#.#....o++o",
+    "#++o....#++++++++++#......o++o",
+    "#++o.....##########.......o++o",
+    "#++o......................o++o",
+    "#++o......................o++o",
+    "#++o......................o++o",
+    "#++o######################o++o",
+    "#++++++++++++++++++++++++++++o",
+    "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// Joypad icon (enabled): highlighted Atari DE-9 connector with bright `o` shell and `#` `JOY`.
+const JOYPAD_ON_ICON: [&str; 20] = [
+    "##############################",
+    "#ooooooooooooooooooooooooooooo",
+    "#o++++++++++++++++++++++++++oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+o..##################..o+oo",
+    "#o+o..#oooooooooooooooo#..o+oo",
+    "#o+o..#o###oo###oo#o#oo#..o+oo",
+    "#o+o...#oo#o#ooo#o#o#o#...o+oo",
+    "#o+o...#oo#o#ooo#oo#oo#...o+oo",
+    "#o+o...##o#o#ooo#oo#oo#...o+oo",
+    "#o+o....###oo###ooo#o#....o+oo",
+    "#o+o....#oooooooooo#......o+oo",
+    "#o+o.....##########.......o+oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+o######################o+oo",
+    "#o++++++++++++++++++++++++++oo",
+    "#ooooooooooooooooooooooooooooo",
     "#ooooooooooooooooooooooooooooo",
 ];
 
@@ -477,6 +587,51 @@ pub fn vmx68k_library() -> Vec<u8> {
         Resource::new(CONFIGURATION_ICON_ID, plot_image(&CONFIGURATION_ICON)),
     );
     library.insert(
+        b"PLOT",
+        Resource::new(INTERRUPT_ICON_ID, plot_image(&INTERRUPT_ICON)),
+    );
+    library.insert(
+        b"PLOT",
+        Resource::new(RESET_ICON_ID, plot_image(&RESET_ICON)),
+    );
+    library.insert(
+        b"PLOT",
+        Resource::new(JOYPAD_OFF_ICON_ID, plot_image(&JOYPAD_OFF_ICON)),
+    );
+    library.insert(
+        b"PLOT",
+        Resource::new(JOYPAD_ON_ICON_ID, plot_image(&JOYPAD_ON_ICON)),
+    );
+    library.insert(
+        b"MENU",
+        Resource::new(JOYPAD_MENU_ID, menu(&[b"\x8A\x84\x93\x96..."])),
+    );
+    library.insert(
+        b"DLOG",
+        Resource::new(JOYPAD_DIALOG_ID, dialog_template([214, 150, 554, 340], JOYPAD_DIALOG_ID)),
+    );
+    library.insert(
+        b"DITL",
+        Resource::new(
+            JOYPAD_DIALOG_ID,
+            dialog_items(&[
+                ([244, 156, 274, 175], D_CHRBTN, pascal_even(b"\x90\xDD\x92\xE8")), // 設定
+                ([294, 156, 324, 175], D_CHRBTN, pascal_even(b"\x8E\xE6\x8F\xC1")), // 取消
+                ([68, 22, 124, 44], D_CHRBTN, pascal_even(b"")),
+                ([68, 86, 124, 108], D_CHRBTN, pascal_even(b"")),
+                ([14, 54, 70, 76], D_CHRBTN, pascal_even(b"")),
+                ([122, 54, 178, 76], D_CHRBTN, pascal_even(b"")),
+                ([204, 54, 260, 76], D_CHRBTN, pascal_even(b"")),
+                ([268, 54, 324, 76], D_CHRBTN, pascal_even(b"")),
+                ([14, 156, 62, 175], D_CHRBTN, pascal_even(b"\x8F\x89\x8A\xFA\x92\x6C")), // 初期値
+                ([82, 58, 114, 74], D_STCTXT | D_DISABL, static_text()),
+                ([228, 34, 240, 50], D_STCTXT | D_DISABL, static_text()),
+                ([292, 34, 304, 50], D_STCTXT | D_DISABL, static_text()),
+                ([14, 124, 326, 140], D_STCTXT | D_DISABL, static_text()),
+            ]),
+        ),
+    );
+    library.insert(
         b"MENU",
         Resource::new(
             2,
@@ -543,6 +698,11 @@ mod tests {
         let icon = library.get(b"PLOT", CONFIGURATION_ICON_ID).unwrap();
         assert_eq!(&icon.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
         assert_eq!(icon.data.len(), 8 + 3 * 20 * 4, "two planes and the mask");
+        for id in [INTERRUPT_ICON_ID, RESET_ICON_ID, JOYPAD_OFF_ICON_ID, JOYPAD_ON_ICON_ID] {
+            let btn = library.get(b"PLOT", id).unwrap();
+            assert_eq!(&btn.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
+            assert_eq!(btn.data.len(), 8 + 3 * 20 * 4);
+        }
     }
 
     #[test]

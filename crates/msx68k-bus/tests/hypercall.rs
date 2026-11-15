@@ -118,6 +118,9 @@ fn the_guest_include_matches_the_host() {
         ("MSX68K_FN_VM_STATUS", AppFunction::VmStatus),
         ("MSX68K_FN_VM_SRAM", AppFunction::VmSram),
         ("MSX68K_FN_VM_RESTART", AppFunction::VmRestart),
+        ("MSX68K_FN_VM_RESET", AppFunction::VmReset),
+        ("MSX68K_FN_VM_INTERRUPT", AppFunction::VmInterrupt),
+        ("MSX68K_FN_VM_JOYPAD", AppFunction::VmJoypad),
     ] {
         assert_eq!(value(name), function as u32, "{name}");
     }

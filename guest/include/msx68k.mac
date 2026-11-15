@@ -35,6 +35,9 @@ MSX68K_FN_VM_BOOT	.equ	13	; D1 VM, D2 menu choice (0..13), A1 ROM address
 MSX68K_FN_VM_IMAGE	.equ	14	; D1 DOS handle, D2 file length, D3 chunk length (0 starts probing), A0 chunk
 				; returns D0 0 other, 1 floppy, 2 read D1 bytes at offset D2
 MSX68K_FN_VM_VIRUS	.equ	16	; D1 action (0 detect, 1 repair forceboot, 2 repair clean IPL)
+MSX68K_FN_VM_RESET	.equ	17	; D1.L = VM ID; resets the VM
+MSX68K_FN_VM_INTERRUPT	.equ	18	; D1.L = VM ID; triggers a level-7 NMI on the VM
+MSX68K_FN_VM_JOYPAD	.equ	19	; D1.L = VM ID, D2.L = enabled (0/1), A0.L = 6 scancodes
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the

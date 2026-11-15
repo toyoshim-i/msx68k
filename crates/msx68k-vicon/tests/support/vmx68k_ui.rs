@@ -35,17 +35,17 @@ fn choose_speed(vm: &mut X68kVm, item: Option<i16>, name: &str) {
         vm.bus.scc.add_mouse_delta(1, 1);
         vm.run_steps(steps);
     };
-    point(vm, (56, 52), 200_000);
+    point(vm, (768, 52), 200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
-    point(vm, (56, 52), 250_000);
+    point(vm, (768, 52), 250_000);
     // The menu shows below the point, its frequency item fifth; the submenu opens over it.
-    point(vm, (90, 134), 1_500_000);
+    point(vm, (802, 134), 1_500_000);
     screenshot(vm, name);
     // The menus are text over the window, which the host keeps in front of the VM's screen.
-    assert_ne!(text_index(vm, (90, 134)), 0, "the frequency item");
-    assert_ne!(text_index(vm, (120, 152)), 0, "the submenu");
-    point(vm, (120, 134), 250_000);
-    let at = item.map_or((300, 300), |item| (120, 136 + item * 16));
+    assert_ne!(text_index(vm, (802, 134)), 0, "the frequency item");
+    assert_ne!(text_index(vm, (832, 152)), 0, "the submenu");
+    point(vm, (832, 134), 250_000);
+    let at = item.map_or((300, 300), |item| (832, 136 + item * 16));
     point(vm, at, 250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     point(vm, at, 750_000);
@@ -210,22 +210,69 @@ pub fn vmx68k_opens_a_vm_in_its_window() {
         panic!("VMX68K.X must open one VM: {events:?}");
     };
     // Shared mode keeps 起動装置 visible but must not open or select its submenu.
-    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.bus.set_host_mouse_position(Some((768, 52)));
     vm.run_steps(200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
     vm.run_steps(250_000);
-    vm.bus.set_host_mouse_position(Some((90, 118)));
+    vm.bus.set_host_mouse_position(Some((802, 118)));
     vm.run_steps(750_000);
     screenshot(&vm, "shared_boot_disabled");
-    let disabled: Vec<_> = (111..123).flat_map(|y| (65..113).map(move |x| (x, y)))
+    let disabled: Vec<_> = (111..123).flat_map(|y| (777..825).map(move |x| (x, y)))
         .map(|at| text_index(&vm, at)).collect();
     assert!(disabled.contains(&8) && !disabled.contains(&11),
         "boot device must remain visible in the inactive text color");
-    vm.bus.set_host_mouse_position(Some((120, 152)));
+    vm.bus.set_host_mouse_position(Some((832, 152)));
     vm.run_steps(250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(500_000);
     assert_eq!(case_events(&mut vm), [], "shared boot-device entry must be disabled");
+    // Left-clicking INTERRUPT and RESET at the left end of the bar sends their VM events.
+    click(&mut vm, (59, 52), 1, 500_000);
+    assert_eq!(case_events(&mut vm), [VmEvent::Interrupt { id: 1 }]);
+    click(&mut vm, (95, 52), 1, 500_000);
+    assert_eq!(case_events(&mut vm), [VmEvent::Reset { id: 1 }]);
+    // Left-clicking the Joypad icon toggles it on/off; right-clicking opens 割当....
+    click(&mut vm, (131, 52), 1, 500_000);
+    assert_eq!(
+        case_events(&mut vm),
+        [VmEvent::Joypad {
+            id: 1,
+            enabled: true,
+            map: [0x3C, 0x3E, 0x3B, 0x3D, 0x2A, 0x2B],
+        }]
+    );
+    vm.bus.set_host_mouse_position(Some((131, 52)));
+    vm.run_steps(200_000);
+    vm.bus.scc.set_mouse_buttons(false, true);
+    vm.run_steps(250_000);
+    vm.bus.set_host_mouse_position(Some((165, 70)));
+    vm.run_steps(250_000);
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(1_500_000);
+    screenshot(&vm, "joypad_dialog");
+    click(&mut vm, (446, 215), 1, 400_000); // A button
+    vm.bus.mfp.push_keyboard_byte(0x35); // Space
+    vm.bus.mfp.push_keyboard_byte(0xB5);
+    vm.run_steps(600_000);
+    screenshot(&vm, "joypad_mapped");
+    click(&mut vm, (473, 315), 1, 1_000_000); // 設定
+    assert_eq!(
+        case_events(&mut vm),
+        [VmEvent::Joypad {
+            id: 1,
+            enabled: true,
+            map: [0x3C, 0x3E, 0x3B, 0x3D, 0x35, 0x2B],
+        }]
+    );
+    click(&mut vm, (131, 52), 1, 500_000);
+    assert_eq!(
+        case_events(&mut vm),
+        [VmEvent::Joypad {
+            id: 1,
+            enabled: false,
+            map: [0x3C, 0x3E, 0x3B, 0x3D, 0x35, 0x2B],
+        }]
+    );
     // The content is VMX68K.X's icon bar over the VM's 768x512 screen, at the window's bounds.
     // SX-Window's icon panel at the top left of the desktop covers a corner of it.
     let layout = vm
@@ -265,7 +312,7 @@ pub fn vmx68k_opens_a_vm_in_its_window() {
     // with it, the screen's top left staying where it was.
     for (width, height) in [(512, 512), (256, 256), (768, 512)] {
         vm.bus.set_vm_screen_size(case_id(1), width, height);
-        vm.run_steps(1_000_000);
+        vm.run_steps(1_500_000);
         screenshot(&vm, &format!("size_{width}x{height}"));
         let layout = vm
             .bus
@@ -544,12 +591,12 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     };
 
     // 設定..., the Configuration menu's third item, opens the dialog.
-    point(&mut vm, (56, 52), 200_000);
+    point(&mut vm, (768, 52), 200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
-    point(&mut vm, (56, 52), 250_000);
-    point(&mut vm, (90, 102), 250_000);
+    point(&mut vm, (768, 52), 250_000);
+    point(&mut vm, (802, 102), 250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (90, 102), 1_500_000);
+    point(&mut vm, (802, 102), 1_500_000);
     screenshot(&vm, "dialog");
     assert_ne!(
         text_index(&vm, (300, 200)),
@@ -598,13 +645,13 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
         [0, 3]
     );
     // Reopening initializes both checked controls; toggling them back disables both.
-    for at in [(56, 52), (90, 102)] {
+    for at in [(768, 52), (802, 102)] {
         point(&mut vm, at, 200_000);
-        vm.bus.scc.set_mouse_buttons(false, at == (56, 52));
+        vm.bus.scc.set_mouse_buttons(false, at == (768, 52));
         point(&mut vm, at, 250_000);
     }
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (90, 102), 1_000_000);
+    point(&mut vm, (802, 102), 1_000_000);
     click(&mut vm, (228, 381), 1, 350_000);
     click(&mut vm, (228, 409), 1, 350_000);
     click(&mut vm, (402, 453), 1, 750_000);
@@ -615,12 +662,12 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
             options: msx68k_bus::sprite::SpriteOptions::default(),
         }]
     );
-    point(&mut vm, (56, 52), 200_000);
+    point(&mut vm, (768, 52), 200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
-    point(&mut vm, (56, 52), 250_000);
-    point(&mut vm, (90, 102), 250_000);
+    point(&mut vm, (768, 52), 250_000);
+    point(&mut vm, (802, 102), 250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
-    point(&mut vm, (90, 102), 1_000_000);
+    point(&mut vm, (802, 102), 1_000_000);
 
     // The 68030, and the slider's knob dragged from 4 MB to 8 MB.
     click(&mut vm, (420, 174), 1, 500_000);
@@ -731,11 +778,11 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     let original = saved_drives(&vm, "DEFAULT");
     let original_setup = saved_setup(&vm, "DEFAULT");
     let open_new = |vm: &mut X68kVm| {
-        vm.bus.set_host_mouse_position(Some((56, 52)));
+        vm.bus.set_host_mouse_position(Some((768, 52)));
         vm.run_steps(200_000);
         vm.bus.scc.set_mouse_buttons(false, true);
         vm.run_steps(250_000);
-        vm.bus.set_host_mouse_position(Some((90, 70)));
+        vm.bus.set_host_mouse_position(Some((802, 70)));
         vm.run_steps(250_000);
         vm.bus.scc.set_mouse_buttons(false, false);
         vm.run_steps(2_000_000);
@@ -861,7 +908,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
         sram: Some(sram),
         custom: Some(drives),
         ..
-    }, VmEvent::SpriteOptions { id: 2, options }] = events.as_slice()
+    }, VmEvent::SpriteOptions { id: 2, options }, VmEvent::Joypad { id: 2, enabled: false, .. }] = events.as_slice()
     else {
         panic!("new settings must create one separately configured VM: {events:?}");
     };
@@ -998,7 +1045,7 @@ fn floppy_controls(dim: bool) {
     vm.run_steps(300_000);
     for i in 1..=24 {
         vm.bus.set_host_mouse_position(Some((
-            source.0 + (472 - source.0) * i / 24,
+            source.0 + (547 - source.0) * i / 24,
             source.1 + (52 - source.1) * i / 24,
         )));
         vm.run_steps(150_000);
@@ -1069,11 +1116,11 @@ fn floppy_controls(dim: bool) {
     vm.bus.set_vm_floppies(case_id(1), 3 | 1 << 4 | 1 << 8, 0);
     vm.run_steps(500_000);
     assert_eq!(
-        text_index(&vm, (483, 57)),
+        text_index(&vm, (555, 57)),
         13,
         "FD0 has its own access lamp"
     );
-    click(&mut vm, (472, 52), 2, 1_000_000);
+    click(&mut vm, (547, 52), 2, 1_000_000);
     let events = case_events(&mut vm);
     assert_eq!(
         events,
@@ -1126,18 +1173,28 @@ fn floppy_controls(dim: bool) {
     guest_sram[12..16].copy_from_slice(&0xBFFFFCu32.to_be_bytes());
     vm.bus.set_vm_sram(case_id(1), guest_sram);
     vm.run_steps(500_000);
+    // Move the VM back left so its Configuration icon on the right side of the bar is on-screen.
+    vm.bus.set_host_mouse_position(Some((680, 30)));
+    vm.bus.scc.set_mouse_buttons(true, false);
+    vm.run_steps(300_000);
+    for x in (300..=670).rev().step_by(10) {
+        vm.bus.set_host_mouse_position(Some((x, 30)));
+        vm.run_steps(100_000);
+    }
+    vm.bus.scc.set_mouse_buttons(false, false);
+    vm.run_steps(500_000);
     // Boot submenu, FD1: changing it saves SRAM without a Restart event.
     let point = |vm: &mut X68kVm, at| {
         vm.bus.set_host_mouse_position(Some(at));
         vm.run_steps(250_000);
     };
-    point(&mut vm, (436, 52));
+    point(&mut vm, (768, 52));
     vm.bus.scc.set_mouse_buttons(false, true);
-    point(&mut vm, (436, 52));
-    point(&mut vm, (470, 118));
+    point(&mut vm, (768, 52));
+    point(&mut vm, (802, 118));
     vm.run_steps(1_250_000);
     screenshot(&vm, "boot_menu");
-    point(&mut vm, (500, 152));
+    point(&mut vm, (832, 152));
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(1_000_000);
     let events = case_events(&mut vm);
@@ -1162,15 +1219,15 @@ fn floppy_controls(dim: bool) {
         msx68k_bus::vmx68k::boot_choice(&saved.get(b"SRAM", 0).unwrap().data),
         2
     );
-    point(&mut vm, (436, 52));
+    point(&mut vm, (768, 52));
     vm.bus.scc.set_mouse_buttons(false, true);
-    point(&mut vm, (436, 52));
-    point(&mut vm, (470, 118));
+    point(&mut vm, (768, 52));
+    point(&mut vm, (802, 118));
     vm.run_steps(1_250_000);
-    point(&mut vm, (500, 328)); // ROM...
+    point(&mut vm, (832, 334)); // ROM...
     vm.bus.scc.set_mouse_buttons(false, false);
-    vm.run_steps(1_000_000);
-    click(&mut vm, (409, 281), 1, 1_000_000); // accept the current BFFFFC address
+    vm.run_steps(1_500_000);
+    click(&mut vm, (440, 280), 1, 1_000_000); // accept the current BFFFFC address
     assert_eq!(
         case_events(&mut vm),
         [VmEvent::Boot {
@@ -1182,7 +1239,7 @@ fn floppy_controls(dim: bool) {
     vm.bus.set_vm_floppies(case_id(1), 0, 13);
     vm.run_steps(500_000);
     assert_eq!(
-        text_index(&vm, (483, 57)),
+        text_index(&vm, (175, 57)),
         9,
         "retiring the FD icons clears every lamp plane"
     );
@@ -1199,7 +1256,10 @@ fn case_events(vm: &mut X68kVm) -> Vec<VmEvent> {
             | VmEvent::Media { id, .. }
             | VmEvent::Boot { id, .. }
             | VmEvent::Speed { id, .. }
-            | VmEvent::SpriteOptions { id, .. } => id,
+            | VmEvent::SpriteOptions { id, .. }
+            | VmEvent::Reset { id }
+            | VmEvent::Interrupt { id }
+            | VmEvent::Joypad { id, .. } => id,
         };
         *id = *id - base + 1;
     }
@@ -1227,11 +1287,11 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         case_events(&mut vm).as_slice(),
         [VmEvent::Opened { .. }]
     ));
-    vm.bus.set_host_mouse_position(Some((56, 52)));
+    vm.bus.set_host_mouse_position(Some((768, 52)));
     vm.run_steps(200_000);
     vm.bus.scc.set_mouse_buttons(false, true);
     vm.run_steps(250_000);
-    vm.bus.set_host_mouse_position(Some((90, 102)));
+    vm.bus.set_host_mouse_position(Some((802, 102)));
     vm.run_steps(250_000);
     vm.bus.scc.set_mouse_buttons(false, false);
     vm.run_steps(1_500_000);

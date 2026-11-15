@@ -105,6 +105,12 @@ pub enum AppFunction {
     VmSpriteOptions = 15,
     /// Checks for floppy viruses and repairs infected IPLs.
     VmVirus = 16,
+    /// Resets VM `D1.L`.
+    VmReset = 17,
+    /// Triggers a level-7 NMI on VM `D1.L`.
+    VmInterrupt = 18,
+    /// Configures keyboard-to-joypad mapping (`D2.L` bit 0 = enabled, `A0.L` = 6 scancodes).
+    VmJoypad = 19,
 }
 
 impl AppFunction {
@@ -127,6 +133,9 @@ impl AppFunction {
             14 => Some(Self::VmImage),
             15 => Some(Self::VmSpriteOptions),
             16 => Some(Self::VmVirus),
+            17 => Some(Self::VmReset),
+            18 => Some(Self::VmInterrupt),
+            19 => Some(Self::VmJoypad),
             _ => None,
         }
     }
@@ -221,6 +230,9 @@ impl X68kBus {
                 Some(AppFunction::VmImage) => self.hypercall_vm_image(state),
                 Some(AppFunction::VmSpriteOptions) => self.hypercall_vm_sprite_options(state),
                 Some(AppFunction::VmVirus) => self.hypercall_vm_virus(state),
+                Some(AppFunction::VmReset) => self.hypercall_vm_reset(state),
+                Some(AppFunction::VmInterrupt) => self.hypercall_vm_interrupt(state),
+                Some(AppFunction::VmJoypad) => self.hypercall_vm_joypad(state),
                 None => TrapResult::Unhandled,
             },
         }

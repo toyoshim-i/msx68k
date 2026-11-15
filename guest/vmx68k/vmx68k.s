@@ -20,6 +20,12 @@
 BAR_HEIGHT	.equ	24		; Lines of the icon bar above the VM's screen
 SPEED_MENU_ID	.equ	1		; 'MENU' of the CPU's speeds in VMX68K.LB
 CONFIG_ICON_ID	.equ	1		; 'PLOT' of the Configuration icon in VMX68K.LB
+INTERRUPT_ICON_ID .equ	2		; 'PLOT' of the INTERRUPT button icon in VMX68K.LB
+RESET_ICON_ID	.equ	3		; 'PLOT' of the RESET button icon in VMX68K.LB
+JOYPAD_OFF_ICON_ID .equ	4		; 'PLOT' of the Joypad icon (disabled)
+JOYPAD_ON_ICON_ID .equ	5		; 'PLOT' of the Joypad icon (enabled)
+JOYPAD_MENU_ID	.equ	3		; 'MENU' of the Joypad icon in VMX68K.LB
+JOYPAD_DIALOG_ID .equ	3		; 'DLOG'/'DITL' of the Joypad assignment dialog
 SETUP_TYPE	.equ	'V68S'		; The setup's settings: version.w, speed.w, CPU.w, RAM MB.w
 SETUP_VERSION	.equ	2		; Version 1 had the speed only, for a 68000 with 4 MB
 SETUP_SIZE	.equ	8
@@ -142,6 +148,7 @@ bar_rect:	.ds.w	4
 bar_line_rect:	.ds.w	4
 screen_rect:	.ds.w	4
 lamp_rects:	.ds.w	12
+config_icon_rect: .ds.w	4
 win_active:	.ds.b	1
 library_open:	.ds.b	1
 lamp_lit:	.ds.b	1		; the access lamp as drawn
@@ -149,7 +156,16 @@ has_sram:	.ds.b	1		; sram_buffer holds the VM's SRAM
 setup_found:	.ds.b	1		; the setup file is there
 setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
 start_config:	.ds.b	1
+joypad_capturing: .ds.b	1		; 0 = idle, 1..6 = capturing button index
+joypad_shift_prev: .ds.b 1
 	.even
+joypad_rec:
+joypad_enabled:	.ds.b	1
+joypad_loaded:	.ds.b	1
+joypad_map:	.ds.b	6		; Up, Down, Left, Right, A, B scancodes
+joypad_edit_map: .ds.b	6
+joypad_handle:	.ds.l	1
+joypad_label:	.ds.b	12		; Pascal string for button label
 library_path:	.ds.b	PATH_MAX
 setup_path:	.ds.b	PATH_MAX
 menu_string:	.ds.b	64		; the speed submenu's items as MNConvert2 takes them
@@ -259,6 +275,7 @@ copy_rects:
 	SXCALL	TSGetTdb		; $A35B
 	addq.l	#6, sp
 	bsr	take_paths
+	bsr	init_joypad
 	bsr	load_setup
 
 	* Open VMX68K.LB and read all of it, leaving no file open; without it the bar
@@ -349,6 +366,13 @@ vm_open_sram:
 	beq.s	vm_graphics_opened
 	bsr	apply_graphics
 vm_graphics_opened:
+	tst.b	joypad_enabled(a5)
+	bne.s	vm_joypad_sync
+	tst.b	joypad_loaded(a5)
+	beq.s	vm_joypad_opened
+vm_joypad_sync:
+	bsr	send_joypad
+vm_joypad_opened:
 	* A setup that is not there yet is made with what the VM starts with
 	tst.b	setup_found(a5)
 	bne.s	setup_kept
@@ -439,6 +463,47 @@ handle_mouse_down:
 	addq.l	#4, sp
 	bra	event_loop
 track_window:
+	move.l	win_ptr(a5), -(sp)
+	SXCALL	GMSetGraph		; $A131
+	addq.l	#4, sp
+	move.l	event_where(a5), -(sp)
+	SXCALL	GMGlobalToLocal		; $A13F
+	addq.l	#4, sp
+	move.l	d0, d4
+	move.l	d4, -(sp)
+	pea	interrupt_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq.s	track_check_reset
+	moveq.l	#MSX68K_FN_VM_INTERRUPT, d0
+	move.l	vm_id(a5), d1
+	bsr	msx68k_call
+	bra	event_loop
+track_check_reset:
+	move.l	d4, -(sp)
+	pea	reset_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq.s	track_check_joypad
+	moveq.l	#MSX68K_FN_VM_RESET, d0
+	move.l	vm_id(a5), d1
+	bsr	msx68k_call
+	bra	event_loop
+track_check_joypad:
+	move.l	d4, -(sp)
+	pea	joypad_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq.s	track_check_fd
+	eori.b	#1, joypad_enabled(a5)
+	bsr	send_joypad
+	bsr	draw_bar
+	bsr	save_setup
+	bra	event_loop
+track_check_fd:
 	bsr	fd_hit
 	tst.l	d4
 	bmi.s	track_window_frame
@@ -467,13 +532,23 @@ handle_right_down:
 	move.l	event_where(a5), -(sp)
 	SXCALL	GMGlobalToLocal		; $A13F
 	addq.l	#4, sp
-	move.l	d0, -(sp)
-	pea	config_icon_rect(pc)
+	move.l	d0, d4
+	move.l	d4, -(sp)
+	pea	config_icon_rect(a5)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq.s	right_check_joypad
+	bsr	config_menu
+	bra	event_loop
+right_check_joypad:
+	move.l	d4, -(sp)
+	pea	joypad_icon_rect(pc)
 	SXCALL	GMPtInRect		; $A156
 	addq.l	#8, sp
 	tst.b	d0
 	beq	event_loop
-	bsr	config_menu
+	bsr	joypad_menu
 	bra	event_loop
 
 quit_app:
@@ -549,25 +624,48 @@ draw_bar:
 	SXCALL	GMAPage			; $A149
 	addq.l	#2, sp
 
-	* The Configuration icon, a plot image whose planes follow its rectangle
+	* The bar's plot icons: INTERRUPT and RESET at the left, Configuration left of the lamp
 	tst.b	library_open(a5)
 	beq.s	draw_bar_done
-	move.w	#CONFIG_ICON_ID, -(sp)
-	move.l	#'PLOT', -(sp)
-	SXCALL	TSRscGet		; $A4AB
-	addq.l	#6, sp
-	move.l	a0, d0
-	beq.s	draw_bar_done
-	movea.l	(a0), a0
-	clr.w	-(sp)			; two planes, plain
-	pea	config_icon_rect(pc)
-	pea	8(a0)
-	SXCALL	GMPlotImg		; $A182
-	lea	10(sp), sp
+	move.w	#INTERRUPT_ICON_ID, d0
+	lea	interrupt_icon_rect(pc), a1
+	bsr.s	draw_plot_icon
+	move.w	#RESET_ICON_ID, d0
+	lea	reset_icon_rect(pc), a1
+	bsr.s	draw_plot_icon
+	move.w	#JOYPAD_OFF_ICON_ID, d0
+	tst.b	joypad_enabled(a5)
+	beq.s	draw_joypad_icon
+	move.w	#JOYPAD_ON_ICON_ID, d0
+draw_joypad_icon:
+	lea	joypad_icon_rect(pc), a1
+	bsr.s	draw_plot_icon
+	move.w	#CONFIG_ICON_ID, d0
+	lea	config_icon_rect(a5), a1
+	bsr.s	draw_plot_icon
 draw_bar_done:
 	bsr	draw_floppies
 	bsr	draw_lamp
 	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* Draws 'PLOT' resource D0.W in rectangle A1.
+draw_plot_icon:
+	move.l	a1, -(sp)
+	move.w	d0, -(sp)
+	move.l	#'PLOT', -(sp)
+	SXCALL	TSRscGet		; $A4AB
+	addq.l	#6, sp
+	movea.l	(sp)+, a1
+	move.l	a0, d0
+	beq.s	draw_plot_icon_done
+	movea.l	(a0), a0
+	clr.w	-(sp)			; two planes, plain
+	move.l	a1, -(sp)
+	pea	8(a0)
+	SXCALL	GMPlotImg		; $A182
+	lea	10(sp), sp
+draw_plot_icon_done:
 	rts
 
 * -----------------------------------------------------------------------------
@@ -786,11 +884,29 @@ load_setup_graphics:
 	SXCALL	TSRscGet
 	addq.l	#6,sp
 	move.l	a0,d0
-	beq.s	load_setup_sram
+	beq.s	load_setup_joypad
 	movea.l	(a0),a0
 	move.w	(a0),d0
 	andi.w	#3,d0
 	move.w	d0,vm_graphics(a5)
+load_setup_joypad:
+	clr.w	-(sp)
+	move.l	#'V68J',-(sp)
+	SXCALL	TSRscGet
+	addq.l	#6,sp
+	move.l	a0,d0
+	beq.s	load_setup_sram
+	movea.l	(a0),a0
+	move.b	(a0),d0
+	andi.b	#1,d0
+	move.b	d0,joypad_enabled(a5)
+	st	joypad_loaded(a5)
+	lea	2(a0),a0
+	lea	joypad_map(a5),a1
+	moveq.l	#5,d0
+load_setup_joy_map:
+	move.b	(a0)+,(a1)+
+	dbra	d0,load_setup_joy_map
 load_setup_sram:
 	clr.w	-(sp)
 	move.l	#SRAM_TYPE, -(sp)
@@ -880,6 +996,19 @@ save_setup_add:
 	SXCALL	TSRscAdd
 	lea	14(sp),sp
 
+	lea	joypad_rec(a5),a0
+	move.l	a0,joypad_handle(a5)
+	clr.w	-(sp)
+	move.l	#'V68J',-(sp)
+	SXCALL	TSRscRemove
+	addq.l	#6,sp
+	move.l	#8,-(sp)
+	pea	joypad_handle(a5)
+	clr.w	-(sp)
+	move.l	#'V68J',-(sp)
+	SXCALL	TSRscAdd
+	lea	14(sp),sp
+
 	lea	vm_drives(a5), a0
 	move.l	a0, drives_handle(a5)
 	clr.w	-(sp)
@@ -949,6 +1078,13 @@ resize_window:
 	move.w	d0, 12(a1)
 	subq.w	#1, d0
 	move.w	d0, 20(a1)
+	* The Configuration icon, 55 dots in from the right (left of the access lamp)
+	lea	config_icon_rect(a5), a1
+	move.w	d1, d0
+	subi.w	#55, d0
+	move.w	d0, 0(a1)
+	addi.w	#30, d0
+	move.w	d0, 4(a1)
 
 	move.w	#-1, -(sp)		; fUpdate: draw it anew
 	move.w	d2, d0			; sizePt: the height with the bar in its low word,
@@ -2663,17 +2799,60 @@ dialog_filter:
 	suba.w	d0, a5
 	movea.l	8+52(sp), a0		; the event
 	move.w	(a0), d0
-	bne.s	dialog_filter_user
+	bne.s	dialog_filter_key
+	* E_IDLE: check Shift/Ctrl capture if joypad_capturing is active
+	tst.b	joypad_capturing(a5)
+	beq.s	dialog_filter_idle_te
+	moveq.l	#$04, d0		; IOCS _BITSNS
+	moveq.l	#$0E, d1
+	trap	#15
+	andi.b	#3, d0
+	move.b	joypad_shift_prev(a5), d1
+	move.b	d0, joypad_shift_prev(a5)
+	not.b	d1
+	and.b	d0, d1
+	beq	dialog_filter_done
+	moveq.l	#$70, d2		; SHIFT
+	btst	#0, d1
+	bne.s	dialog_filter_idle_cap
+	moveq.l	#$71, d2		; CTRL
+dialog_filter_idle_cap:
+	bsr.s	dialog_filter_capture
+	bra	dialog_filter_back
+dialog_filter_idle_te:
 	* E_IDLE: the text field's cursor blinks, in ドライブの詳細, the dialog with them
 	tst.l	cfg_ptr(a5)
-	beq.s	dialog_filter_done
+	beq	dialog_filter_done
 	movea.l	dlg_ptr(a5), a0
 	move.l	DIALOG_TEDIT(a0), d0
-	beq.s	dialog_filter_done
+	beq	dialog_filter_done
 	move.l	d0, -(sp)
 	SXCALL	TMIdle			; $A30E
 	addq.l	#4, sp
-	bra.s	dialog_filter_done
+	bra	dialog_filter_done
+dialog_filter_key:
+	cmpi.w	#5, d0			; E_KEYDWN
+	bne.s	dialog_filter_user
+	tst.b	joypad_capturing(a5)
+	beq.s	dialog_filter_user
+	move.w	2(a0), d2		; event.message high word: scancode
+	andi.w	#$7F, d2
+	beq.s	dialog_filter_consume
+	bsr.s	dialog_filter_capture
+dialog_filter_consume:
+	moveq.l	#-1, d0
+	movem.l	(sp)+, d1-d7/a0-a5
+	rts
+dialog_filter_capture:
+	moveq.l	#0, d0
+	move.b	joypad_capturing(a5), d0
+	subq.w	#1, d0
+	lea	joypad_edit_map(a5), a1
+	move.b	d2, (a1, d0.w)
+	clr.b	joypad_capturing(a5)
+	move.w	d2, d1
+	bsr	joypad_set_button_label
+	rts
 dialog_filter_user:
 	cmpi.w	#14, d0			; E_USER1
 	bne.s	dialog_filter_update
@@ -3049,7 +3228,7 @@ serve_done:
 fd_rectangle:
 	move.w	d4,d0
 	mulu	#36,d0
-	addi.w	#40,d0
+	addi.w	#112,d0
 	lea	fd_rect(a5),a0
 	move.w	d0,(a0)+
 	move.w	#2,(a0)+
@@ -3067,6 +3246,14 @@ draw_floppies:
 draw_fd_next:
 	move.l	fd_state(a5),d5
 	bsr	fd_rectangle
+	move.w	config_icon_rect(a5),d0
+	cmp.w	fd_rect(a5),d0
+	bls	draw_fd_skip
+	cmp.w	fd_rect+4(a5),d0
+	bcc.s	draw_fd_erase
+	move.w	d0,fd_rect+4(a5)
+	bclr	d4,d5
+draw_fd_erase:
 	* Erase retired icons and all lamp planes when the connected set changes.
 	move.w	#$000F,-(sp)
 	SXCALL	GMAPage
@@ -4123,9 +4310,288 @@ rects_init:
 	.dc.w	749, 8, 763, 16
 	.dc.w	750, 9, 763, 16
 	.dc.w	750, 9, 762, 15
-RECTS_SIZE	.equ	6*8
-config_icon_rect:
+	.dc.w	713, 2, 743, 22		; Configuration icon, 30 x 20 left of the lamp
+RECTS_SIZE	.equ	7*8
+interrupt_icon_rect:
 	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
+reset_icon_rect:
+	.dc.w	40, 2, 70, 22
+joypad_icon_rect:
+	.dc.w	76, 2, 106, 22
+
+* -----------------------------------------------------------------------------
+* Joypad helpers: init_joypad, send_joypad, joypad_menu, joypad_dialog
+* -----------------------------------------------------------------------------
+init_joypad:
+	lea	joypad_defaults(pc), a0
+	lea	joypad_map(a5), a1
+	moveq.l	#5, d0
+init_joypad_copy:
+	move.b	(a0)+, (a1)+
+	dbra	d0, init_joypad_copy
+	clr.b	joypad_enabled(a5)
+	clr.b	joypad_loaded(a5)
+	clr.b	joypad_capturing(a5)
+	rts
+
+joypad_defaults:
+	.dc.b	$3C, $3E, $3B, $3D, $2A, $2B	; Up, Down, Left, Right, Z, X
+	.even
+
+send_joypad:
+	movem.l	d0-d2/a0, -(sp)
+	moveq.l	#MSX68K_FN_VM_JOYPAD, d0
+	move.l	vm_id(a5), d1
+	moveq.l	#0, d2
+	move.b	joypad_enabled(a5), d2
+	lea	joypad_map(a5), a0
+	bsr	msx68k_call
+	movem.l	(sp)+, d0-d2/a0
+	rts
+
+joypad_menu:
+	movem.l	d0-d1/a0/a2, -(sp)
+	tst.b	library_open(a5)
+	beq.s	joypad_menu_done
+	clr.w	-(sp)			; MI_PLN
+	pea	joypad_menu_str(pc)
+	clr.l	-(sp)			; a new record
+	SXCALL	MNConvert2		; $A26B
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq.s	joypad_menu_done
+	movea.l	a0, a2
+	move.l	event_where(a5), -(sp)
+	move.l	a2, -(sp)
+	SXCALL	MNSelect		; $A268
+	addq.l	#8, sp
+	move.l	d0, d1
+	move.l	a2, -(sp)
+	SXCALL	MMHdlDispose		; $A038
+	addq.l	#4, sp
+	cmpi.l	#1, d1
+	bne.s	joypad_menu_done
+	bsr.s	joypad_dialog
+joypad_menu_done:
+	movem.l	(sp)+, d0-d1/a0/a2
+	rts
+
+joypad_menu_str:
+	.dc.b	$8A, $84, $93, $96, $2E, $2E, $2E, 0
+	.even
+
+joypad_dialog:
+	movem.l	d0-d4/a0-a2, -(sp)
+	lea	joypad_map(a5), a0
+	lea	joypad_edit_map(a5), a1
+	moveq.l	#5, d0
+joypad_dlg_copy_in:
+	move.b	(a0)+, (a1)+
+	dbra	d0, joypad_dlg_copy_in
+	clr.b	joypad_capturing(a5)
+
+	lea	text_record(a5), a0
+	bsr	clear_dialog_record
+	move.w	#text_record, text_record+DIALOG_RECORD(a5)
+	move.l	#-1, -(sp)
+	pea	text_record(a5)
+	move.w	#JOYPAD_DIALOG_ID, -(sp)
+	SXCALL	DMRefer			; $A2B2
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq	joypad_dlg_done
+	move.l	app_task_id(a5), WINDOW_TASK(a0)
+	move.l	a0, dlg_ptr(a5)
+	lea	joypad_labels(pc), a1
+	bsr	dlg_labels
+	bsr	joypad_refresh_buttons
+
+	move.l	dlg_ptr(a5), -(sp)
+	SXCALL	WMShow
+	SXCALL	WMSelect
+	SXCALL	GMSetGraph
+	SXCALL	DMDraw
+	addq.l	#4, sp
+
+joypad_dlg_loop:
+	pea	dialog_filter(pc)
+	SXCALL	DMControl
+	addq.l	#4, sp
+	cmpi.w	#1, d0			; OK
+	beq	joypad_dlg_ok
+	cmpi.w	#2, d0			; Cancel
+	beq	joypad_dlg_cancel
+	cmpi.w	#9, d0			; 初期値
+	beq.s	joypad_dlg_defaults
+	cmpi.w	#3, d0
+	bcs.s	joypad_dlg_loop
+	cmpi.w	#8, d0
+	bhi.s	joypad_dlg_loop
+	move.w	d0, d3
+	* Restore any previously capturing button first
+	tst.b	joypad_capturing(a5)
+	beq.s	joypad_dlg_start_cap
+	moveq.l	#0, d0
+	move.b	joypad_capturing(a5), d0
+	subq.w	#1, d0
+	lea	joypad_edit_map(a5), a0
+	moveq.l	#0, d1
+	move.b	(a0, d0.w), d1
+	bsr	joypad_set_button_label
+joypad_dlg_start_cap:
+	move.w	d3, d0
+	subq.w	#2, d0
+	move.b	d0, joypad_capturing(a5)
+	moveq.l	#$04, d0		; IOCS _BITSNS
+	moveq.l	#$0E, d1
+	trap	#15
+	andi.b	#3, d0
+	move.b	d0, joypad_shift_prev(a5)
+	move.w	d3, d0
+	bsr	dlg_item
+	pea	joypad_wait_str(pc)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMTitleSet
+	addq.l	#8, sp
+	bra.s	joypad_dlg_loop
+
+joypad_dlg_defaults:
+	clr.b	joypad_capturing(a5)
+	lea	joypad_defaults(pc), a0
+	lea	joypad_edit_map(a5), a1
+	moveq.l	#5, d0
+joypad_dlg_def_copy:
+	move.b	(a0)+, (a1)+
+	dbra	d0, joypad_dlg_def_copy
+	bsr.s	joypad_refresh_buttons
+	bra	joypad_dlg_loop
+
+joypad_dlg_ok:
+	clr.b	joypad_capturing(a5)
+	lea	joypad_edit_map(a5), a0
+	lea	joypad_map(a5), a1
+	moveq.l	#5, d0
+joypad_dlg_copy_out:
+	move.b	(a0)+, (a1)+
+	dbra	d0, joypad_dlg_copy_out
+	bsr	dlg_dispose
+	clr.l	dlg_ptr(a5)
+	bsr	send_joypad
+	bsr	save_setup
+	bra.s	joypad_dlg_done
+
+joypad_dlg_cancel:
+	clr.b	joypad_capturing(a5)
+	bsr	dlg_dispose
+	clr.l	dlg_ptr(a5)
+joypad_dlg_done:
+	movem.l	(sp)+, d0-d4/a0-a2
+	rts
+
+joypad_refresh_buttons:
+	movem.l	d0-d2/a0, -(sp)
+	moveq.l	#0, d2
+joypad_refresh_next:
+	lea	joypad_edit_map(a5), a0
+	moveq.l	#0, d1
+	move.b	(a0, d2.w), d1
+	move.w	d2, d0
+	bsr.s	joypad_set_button_label
+	addq.w	#1, d2
+	cmpi.w	#6, d2
+	bcs.s	joypad_refresh_next
+	movem.l	(sp)+, d0-d2/a0
+	rts
+
+* Sets dialog item (3 + D0.W) text to the key name of scancode D1.W.
+joypad_set_button_label:
+	movem.l	d0-d2/a0-a1, -(sp)
+	addq.w	#3, d0
+	move.w	d0, d2
+	move.w	d1, d0
+	bsr.s	joypad_key_name
+	move.w	d2, d0
+	bsr	dlg_item
+	pea	joypad_label(a5)
+	move.l	dlg_hdl(a5), -(sp)
+	SXCALL	CMTitleSet
+	addq.l	#8, sp
+	movem.l	(sp)+, d0-d2/a0-a1
+	rts
+
+* Formats scancode D0.W into Pascal string joypad_label(a5).
+joypad_key_name:
+	andi.w	#$7F, d0
+	lea	joypad_key_table(pc), a0
+joypad_key_scan:
+	move.b	(a0)+, d1
+	beq.s	joypad_key_hex
+	cmp.b	d0, d1
+	beq.s	joypad_key_found
+	moveq.l	#0, d1
+	move.b	(a0)+, d1
+	adda.w	d1, a0
+	bra.s	joypad_key_scan
+joypad_key_found:
+	lea	joypad_label(a5), a1
+	moveq.l	#0, d1
+	move.b	(a0), d1
+joypad_key_copy:
+	move.b	(a0)+, (a1)+
+	dbra	d1, joypad_key_copy
+	rts
+joypad_key_hex:
+	lea	joypad_label(a5), a1
+	move.b	#3, (a1)+
+	move.b	#'$', (a1)+
+	move.w	d0, d1
+	lsr.w	#4, d1
+	bsr.s	joypad_hex_digit
+	move.w	d0, d1
+	andi.w	#15, d1
+joypad_hex_digit:
+	cmpi.b	#9, d1
+	bls.s	joypad_hex_num
+	addq.b	#7, d1
+joypad_hex_num:
+	addi.b	#'0', d1
+	move.b	d1, (a1)+
+	rts
+
+joypad_labels:
+	.dc.b	10, 4, $8F, $5C, $8E, $9A
+	.dc.b	11, 1, "A"
+	.dc.b	12, 1, "B"
+	.dc.b	13, 24, $83, $7B, $83, $5E, $83, $93, $82, $F0, $89, $9F, $82, $B5, $82, $C4, $83, $4C, $81, $5B, $82, $F0, $93, $FC, $97, $CD
+	.dc.b	0
+	.even
+joypad_wait_str:
+	.dc.b	3, "...", 0
+	.even
+joypad_key_table:
+	.dc.b	$01, 3, "ESC"
+	.dc.b	$02, 1, "1", $03, 1, "2", $04, 1, "3", $05, 1, "4", $06, 1, "5"
+	.dc.b	$07, 1, "6", $08, 1, "7", $09, 1, "8", $0A, 1, "9", $0B, 1, "0"
+	.dc.b	$0C, 1, "-", $0D, 1, "^", $0E, 1, $5C, $0F, 2, "BS"
+	.dc.b	$10, 3, "TAB"
+	.dc.b	$11, 1, "Q", $12, 1, "W", $13, 1, "E", $14, 1, "R", $15, 1, "T"
+	.dc.b	$16, 1, "Y", $17, 1, "U", $18, 1, "I", $19, 1, "O", $1A, 1, "P"
+	.dc.b	$1B, 1, "@", $1C, 1, "[", $1D, 3, "RET"
+	.dc.b	$1E, 1, "A", $1F, 1, "S", $20, 1, "D", $21, 1, "F", $22, 1, "G"
+	.dc.b	$23, 1, "H", $24, 1, "J", $25, 1, "K", $26, 1, "L"
+	.dc.b	$27, 1, ";", $28, 1, ":", $29, 1, "]"
+	.dc.b	$2A, 1, "Z", $2B, 1, "X", $2C, 1, "C", $2D, 1, "V", $2E, 1, "B"
+	.dc.b	$2F, 1, "N", $30, 1, "M", $31, 1, ",", $32, 1, ".", $33, 1, "/"
+	.dc.b	$34, 1, "_", $35, 5, "SPACE"
+	.dc.b	$36, 4, "HOME", $37, 3, "DEL", $38, 4, "RLUP", $39, 4, "RLDN", $3A, 4, "UNDO"
+	.dc.b	$3B, 2, $81, $A9	; ←
+	.dc.b	$3C, 2, $81, $AA	; ↑
+	.dc.b	$3D, 2, $81, $A8	; →
+	.dc.b	$3E, 2, $81, $AB	; ↓
+	.dc.b	$55, 3, "XF1", $56, 3, "XF2"
+	.dc.b	$70, 5, "SHIFT", $71, 4, "CTRL"
+	.dc.b	0
+	.even
 
 prog_end:
 	.end	_start

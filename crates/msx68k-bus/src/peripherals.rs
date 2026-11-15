@@ -439,6 +439,12 @@ impl Ppi {
         }
     }
 
+    /// Sets Joystick 1 (Port A, `$E9A001`, active-low) state.
+    #[inline]
+    pub fn set_port_a(&mut self, value: u8) {
+        self.port_a = value;
+    }
+
     pub fn read_u8(&self, addr: u32) -> Result<u8, BusFault> {
         let a = addr & 0x00FF_FFFF;
         if (a & 1) == 0 {

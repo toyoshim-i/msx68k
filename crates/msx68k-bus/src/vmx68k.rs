@@ -411,6 +411,17 @@ pub enum VmEvent {
     /// VMX68K.SX chose a speed for the VM from its menu.
     Speed { id: u32, mode: CpuSpeedMode },
     SpriteOptions { id: u32, options: crate::sprite::SpriteOptions },
+    /// VMX68K.SX pressed the VM's RESET button.
+    Reset { id: u32 },
+    /// VMX68K.SX pressed the VM's INTERRUPT (NMI) button.
+    Interrupt { id: u32 },
+    /// VMX68K.SX toggled or remapped keyboard-to-joypad input for VM `id`.
+    Joypad {
+        id: u32,
+        enabled: bool,
+        /// Scancodes for `[Up, Down, Left, Right, A, B]`.
+        map: [u8; 6],
+    },
     /// The VM was closed.
     Closed { id: u32 },
 }
@@ -1575,6 +1586,49 @@ impl X68kBus {
         TrapResult::Handled { extra_cycles: 0 }
     }
 
+    /// `VmReset`: resets VM `D1.L`. Returns 0, or -1 for an unknown VM.
+    pub(crate) fn hypercall_vm_reset(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        state.d[0] = if self.vm_windows.open.iter().any(|open| open.id == id) {
+            self.vm_windows.events.push(VmEvent::Reset { id });
+            0
+        } else {
+            u32::MAX
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmInterrupt`: triggers a level-7 NMI on VM `D1.L`. Returns 0, or -1 for an unknown VM.
+    pub(crate) fn hypercall_vm_interrupt(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        state.d[0] = if self.vm_windows.open.iter().any(|open| open.id == id) {
+            self.vm_windows.events.push(VmEvent::Interrupt { id });
+            0
+        } else {
+            u32::MAX
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmJoypad`: sets keyboard-to-joypad mode (`D2.L` bit 0) and 6-byte scancode map
+    /// `[Up, Down, Left, Right, A, B]` at `A0.L` for VM `D1.L`. Returns 0 or -1.
+    pub(crate) fn hypercall_vm_joypad(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        let enabled = (state.d[2] & 1) != 0;
+        let addr = state.a[0] & 0x00FF_FFFF;
+        let mut map = [0u8; 6];
+        for (i, slot) in map.iter_mut().enumerate() {
+            *slot = self.peek_u8(addr + i as u32).unwrap_or(0);
+        }
+        state.d[0] = if self.vm_windows.open.iter().any(|open| open.id == id) {
+            self.vm_windows.events.push(VmEvent::Joypad { id, enabled, map });
+            0
+        } else {
+            u32::MAX
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
     /// `VmStatus`: tells VMX68K.SX the state of VM `D1.L`: in `D0.L` bit 0 its access lamp,
     /// bit 1 SRAM to save, and bit 2 a window to draw anew, or -1 for an unknown VM, and in `D1.L` its screen's width and height (`width << 16 |
     /// height`, 0 before its first frame).
@@ -2282,6 +2336,20 @@ mod tests {
         state.d[2] = 3;
         bus.hypercall_vm_speed(&mut state);
         assert_eq!(bus.take_vm_events(), [VmEvent::Speed { id, mode: CpuSpeedMode::Burst }]);
+        state.d[1] = id;
+        bus.hypercall_vm_interrupt(&mut state);
+        assert_eq!(state.d[0], 0);
+        bus.hypercall_vm_reset(&mut state);
+        assert_eq!(state.d[0], 0);
+        assert_eq!(
+            bus.take_vm_events(),
+            [VmEvent::Interrupt { id }, VmEvent::Reset { id }]
+        );
+        state.d[1] = 999;
+        bus.hypercall_vm_interrupt(&mut state);
+        assert_eq!(state.d[0], u32::MAX);
+        bus.hypercall_vm_reset(&mut state);
+        assert_eq!(state.d[0], u32::MAX);
     }
 }
 

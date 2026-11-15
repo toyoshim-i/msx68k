@@ -111,6 +111,8 @@ fn map_keycode_to_x68k_scancode(code: KeyCode) -> Option<u8> {
     Some(sc)
 }
 
+const JOYPAD_BITS: [u8; 6] = [0x01, 0x02, 0x04, 0x08, 0x20, 0x40];
+
 fn check_and_repair_cli_floppy(drive_name: &str, path: &Path, data: &mut Vec<u8>) {
     let Some(virus) = msx68k_bus::virus::scan_floppy_image(data) else {
         return;
@@ -470,6 +472,13 @@ struct GuestVm {
     fd_until: [Option<Instant>; 4],
     media_states: std::sync::mpsc::Receiver<(u32, u32)>,
     media_state: (u32, u32),
+    joypad_enabled: bool,
+    joypad_map: [u8; 6],
+    joypad_pressed: u8,
+    joypad_latched: u8,
+    joypad_latched_frame: u64,
+    joypad_sent: u8,
+    joypad_frames: Arc<AtomicU64>,
 }
 
 /// The machine a VM of VMX68K.X is set up as.
@@ -498,6 +507,7 @@ struct Msx68kApp {
     guest_vms: Vec<GuestVm>,
     /// The VM each held key went to, so its release follows it: `None` for the primary VM.
     key_targets: std::collections::HashMap<u8, Option<u32>>,
+    joypad_held: std::collections::HashMap<u8, (u32, u8)>,
     gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
     last_title_update: Instant,
@@ -718,6 +728,7 @@ impl Msx68kApp {
             guest_cgrom: cgrom,
             guest_vms: Vec::new(),
             key_targets: Default::default(),
+            joypad_held: Default::default(),
             gdb,
             gpu: None,
             last_title_update: now,
@@ -915,9 +926,58 @@ impl Msx68kApp {
         }
     }
 
+    fn sync_joypad_port_a(guest: &mut GuestVm) {
+        let port_a = !(guest.joypad_pressed | guest.joypad_latched);
+        if port_a != guest.joypad_sent {
+            guest.joypad_sent = port_a;
+            guest.thread.post(move |vm| vm.bus.ppi.set_port_a(port_a));
+        }
+    }
+
     /// Sends a key to the VM whose window SX-Window has active, straight into its MFP, or to
     /// the primary VM. A release goes where its press went.
-    fn send_key(&mut self, scancode: u8, pressed: bool) {
+    fn send_key(&mut self, scancode: u8, pressed: bool, repeat: bool) {
+        if pressed {
+            let active = self.vm.bus.active_window();
+            if let Some(guest) = self
+                .guest_vms
+                .iter_mut()
+                .find(|guest| Some(guest.window) == active)
+            {
+                if guest.joypad_enabled {
+                    let mask = guest
+                        .joypad_map
+                        .iter()
+                        .zip(JOYPAD_BITS)
+                        .filter(|(&mapped, _)| mapped == scancode)
+                        .fold(0u8, |acc, (_, bit)| acc | bit);
+                    if mask != 0 {
+                        self.joypad_held.insert(scancode, (guest.id, mask));
+                        guest.joypad_pressed |= mask;
+                        if !repeat {
+                            guest.joypad_latched |= mask;
+                            guest.joypad_latched_frame =
+                                guest.joypad_frames.load(Ordering::Relaxed);
+                        }
+                        Self::sync_joypad_port_a(guest);
+                        return;
+                    }
+                }
+            }
+        } else if !repeat {
+            if let Some((id, mask)) = self.joypad_held.remove(&scancode) {
+                if let Some(guest) = self.guest_vms.iter_mut().find(|guest| guest.id == id) {
+                    guest.joypad_pressed &= !mask;
+                    Self::sync_joypad_port_a(guest);
+                }
+                return;
+            }
+        } else if self.joypad_held.contains_key(&scancode) {
+            return;
+        }
+        if repeat {
+            return;
+        }
         let target = if pressed {
             let active = self.vm.bus.active_window();
             let guest = self
@@ -956,10 +1016,18 @@ impl Msx68kApp {
                     // Nothing may wait on the bridge while the old VM's thread stops.
                     self.vm.bus.detach_vm_bridge(id);
                     let old = self.guest_vms.remove(at);
-                    let (window, drives, sram) = (old.window, old.drives, old.sram.clone());
+                    let (window, drives, sram, joypad_enabled, joypad_map) = (
+                        old.window,
+                        old.drives,
+                        old.sram.clone(),
+                        old.joypad_enabled,
+                        old.joypad_map,
+                    );
                     drop(old);
                     let machine = GuestMachine { cpu, ram_mb, speed };
-                    if let Some(guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
+                    if let Some(mut guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
+                        guest.joypad_enabled = joypad_enabled;
+                        guest.joypad_map = joypad_map;
                         self.guest_vms.push(guest);
                     } else {
                         self.vm.bus.detach_vm_bridge(id);
@@ -1021,6 +1089,31 @@ impl Msx68kApp {
                         guest.thread.post(move |vm| vm.bus.sprite_options = options);
                     }
                 }
+                VmEvent::Reset { id } => {
+                    if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
+                        guest.thread.post(move |vm| {
+                            if let Err(e) = vm.reset() {
+                                eprintln!("VM {id} failed to reset: {e:?}");
+                            }
+                        });
+                    }
+                }
+                VmEvent::Interrupt { id } => {
+                    if let Some(guest) = self.guest_vms.iter().find(|guest| guest.id == id) {
+                        guest.thread.post(move |vm| vm.bus.request_nmi());
+                    }
+                }
+                VmEvent::Joypad { id, enabled, map } => {
+                    if let Some(guest) = self.guest_vms.iter_mut().find(|guest| guest.id == id) {
+                        guest.joypad_enabled = enabled;
+                        guest.joypad_map = map;
+                        if !enabled {
+                            guest.joypad_pressed = 0;
+                            guest.joypad_latched = 0;
+                            Self::sync_joypad_port_a(guest);
+                        }
+                    }
+                }
                 VmEvent::Closed { id } => self.guest_vms.retain(|guest| guest.id != id),
             }
         }
@@ -1031,6 +1124,16 @@ impl Msx68kApp {
     fn update_vm_lamps(&mut self) {
         let now = Instant::now();
         for guest in &mut self.guest_vms {
+            if guest.joypad_latched != 0
+                && guest
+                    .joypad_frames
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(guest.joypad_latched_frame)
+                    >= 2
+            {
+                guest.joypad_latched = 0;
+                Self::sync_joypad_port_a(guest);
+            }
             let accesses = guest.accesses.load(Ordering::Relaxed);
             if accesses != guest.accesses_seen {
                 guest.accesses_seen = accesses;
@@ -1170,9 +1273,12 @@ impl Msx68kApp {
         );
         let (media_state, media_states) = std::sync::mpsc::sync_channel(1);
         let (sram_changed, sram_changes) = std::sync::mpsc::channel();
+        let joypad_frames = Arc::new(AtomicU64::new(0));
+        let vblank_frames = Arc::clone(&joypad_frames);
         let mut screen = VmScreen::new(gpu.compositor.device(), gpu.compositor.queue());
         let output = screen.output();
         let thread = VmThread::spawn_with_vblank(vm, Pace::RealTime, move |vm| {
+            vblank_frames.fetch_add(1, Ordering::Relaxed);
             let _ = media_state.try_send((
                 if custom_media {
                     vm.bus.floppy_state()
@@ -1204,6 +1310,13 @@ impl Msx68kApp {
             fd_until: [None; 4],
             media_states,
             media_state: initial_media,
+            joypad_enabled: false,
+            joypad_map: [0x3C, 0x3E, 0x3B, 0x3D, 0x2A, 0x2B],
+            joypad_pressed: 0,
+            joypad_latched: 0,
+            joypad_latched_frame: 0,
+            joypad_sent: 0xFF,
+            joypad_frames,
         })
     }
 
@@ -1475,10 +1588,8 @@ impl ApplicationHandler for Msx68kApp {
                             _ => {}
                         }
                     }
-                    if !event.repeat {
-                        if let Some(sc) = map_keycode_to_x68k_scancode(code) {
-                            self.send_key(sc, event.state == ElementState::Pressed);
-                        }
+                    if let Some(sc) = map_keycode_to_x68k_scancode(code) {
+                        self.send_key(sc, event.state == ElementState::Pressed, event.repeat);
                     }
                 }
             }

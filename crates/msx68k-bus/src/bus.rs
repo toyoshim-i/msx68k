@@ -206,6 +206,8 @@ pub struct X68kBus {
     pub host_native_resolution: (u32, u32),
     /// Whether host native fullscreen mode is active.
     pub fullscreen_mode: bool,
+    /// Pending level-7 Non-Maskable Interrupt (INTERRUPT switch on the X68000 top panel).
+    nmi_pending: bool,
 }
 
 impl X68kBus {
@@ -290,6 +292,7 @@ impl X68kBus {
             max_desktop_size: (0, 0),
             host_native_resolution: (1920, 1080),
             fullscreen_mode: false,
+            nmi_pending: false,
         }
     }
 
@@ -489,6 +492,7 @@ impl X68kBus {
         self.saved_ext_tvram = None;
         self.max_desktop_size = (0, 0);
         self.target_resolution = None;
+        self.nmi_pending = false;
     }
 
     /// Loads binary data into Main RAM starting at `dest_addr`.
@@ -675,14 +679,24 @@ impl X68kBus {
         }
     }
 
+    /// Triggers a level-7 Non-Maskable Interrupt (NMI), equivalent to pressing the INTERRUPT
+    /// button on the top of a real X68000.
+    #[inline]
+    pub fn request_nmi(&mut self) {
+        self.nmi_pending = true;
+    }
+
     /// Returns the highest pending hardware interrupt priority level (`0..=7`) across all peripherals:
+    /// - Level 7: NMI (`INTERRUPT` button)
     /// - Level 6: MFP (`MC68901`)
     /// - Level 5: SCC (`Z8530` Mouse / RS-232C)
     /// - Level 3: DMAC (`HD63450`)
     /// - Level 1: I/O Interrupt Controller (`FDC`, `FDD`, `HDC`, `PRN`)
     #[inline]
     pub fn highest_pending_ipl(&self) -> u8 {
-        if self.mfp.has_pending_interrupt() {
+        if self.nmi_pending {
+            7
+        } else if self.mfp.has_pending_interrupt() {
             6
         } else if self.scc.has_pending_interrupt() {
             5
@@ -768,6 +782,10 @@ impl Bus for X68kBus {
 
     fn acknowledge_interrupt(&mut self, level: u8) -> Option<u8> {
         match level {
+            7 => {
+                self.nmi_pending = false;
+                None
+            }
             6 => self.mfp.acknowledge_interrupt(),
             5 => self.scc.acknowledge_interrupt(),
             3 => self.dmac.acknowledge_interrupt(),
