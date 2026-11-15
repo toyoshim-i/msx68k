@@ -909,15 +909,8 @@ impl Msx68kApp {
                 }
             }
             mode => {
-                // If FDD motor is spinning during floppy access, give a higher instruction budget
-                // so floppy boot and program loads complete smoothly.
-                let fdd_busy = self.vm.bus.fdc.drives.iter().any(|d| d.motor_on);
                 let cpu_mhz = mode.timing_config().cpu_mhz.max(10);
-                FrameBudget::Cycles(if fdd_busy {
-                    (cpu_mhz * 1_000_000) / 15
-                } else {
-                    (cpu_mhz * 1_000_000) / 60
-                })
+                FrameBudget::Cycles((cpu_mhz * 1_000_000) / 60)
             }
         }
     }
