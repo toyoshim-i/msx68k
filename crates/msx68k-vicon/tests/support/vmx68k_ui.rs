@@ -1045,7 +1045,7 @@ fn floppy_controls(dim: bool) {
     vm.run_steps(300_000);
     for i in 1..=24 {
         vm.bus.set_host_mouse_position(Some((
-            source.0 + (547 - source.0) * i / 24,
+            source.0 + (583 - source.0) * i / 24,
             source.1 + (52 - source.1) * i / 24,
         )));
         vm.run_steps(150_000);
@@ -1116,11 +1116,11 @@ fn floppy_controls(dim: bool) {
     vm.bus.set_vm_floppies(case_id(1), 3 | 1 << 4 | 1 << 8, 0);
     vm.run_steps(500_000);
     assert_eq!(
-        text_index(&vm, (555, 57)),
+        text_index(&vm, (591, 57)),
         13,
         "FD0 has its own access lamp"
     );
-    click(&mut vm, (547, 52), 2, 1_000_000);
+    click(&mut vm, (583, 52), 2, 1_000_000);
     let events = case_events(&mut vm);
     assert_eq!(
         events,
@@ -1239,7 +1239,7 @@ fn floppy_controls(dim: bool) {
     vm.bus.set_vm_floppies(case_id(1), 0, 13);
     vm.run_steps(500_000);
     assert_eq!(
-        text_index(&vm, (175, 57)),
+        text_index(&vm, (211, 57)),
         9,
         "retiring the FD icons clears every lamp plane"
     );

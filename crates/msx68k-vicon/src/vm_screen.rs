@@ -350,6 +350,9 @@ pub struct VmLayer<'a> {
     /// Position of the frame's top-left pixel on the primary VM's screen.
     pub left: i32,
     pub top: i32,
+    /// Target size in primary screen pixels (`0` uses the frame's native size).
+    pub width: u32,
+    pub height: u32,
     /// Visible region of the window's content rectangle.
     pub visible: &'a [ScreenRect],
 }
@@ -392,7 +395,7 @@ struct LayerUniforms {
     size: [u32; 2],
     origin: [i32; 2],
     primary: [u32; 2],
-    _pad: [u32; 2],
+    dest_size: [u32; 2],
 }
 
 /// Draws [`VmLayer`]s in the final pass.
@@ -506,17 +509,19 @@ impl LayerPipeline {
                 if scissors.is_empty() {
                     return None;
                 }
+                let dest_w = if layer.width != 0 { layer.width } else { frame.width };
+                let dest_h = if layer.height != 0 { layer.height } else { frame.height };
                 let (x0, y0) = placement.to_target(layer.left, layer.top);
                 let (x1, y1) = placement.to_target(
-                    layer.left + frame.width as i32,
-                    layer.top + frame.height as i32,
+                    layer.left + dest_w as i32,
+                    layer.top + dest_h as i32,
                 );
                 let uniforms = LayerUniforms {
                     dest: [x0 / tw * 2.0 - 1.0, 1.0 - y0 / th * 2.0, x1 / tw * 2.0 - 1.0, 1.0 - y1 / th * 2.0],
                     size: [frame.width, frame.height],
                     origin: [layer.left, layer.top],
                     primary: [placement.screen.0, placement.screen.1],
-                    _pad: [0; 2],
+                    dest_size: [dest_w, dest_h],
                 };
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("vm_layer_uniforms"),

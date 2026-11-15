@@ -849,15 +849,17 @@ impl Msx68kApp {
                             bottom,
                         })
                         .collect();
-                    Some((guest, layout.left, layout.top, visible))
+                    Some((guest, layout.left, layout.top, layout.width, layout.height, visible))
                 })
                 .collect();
             let layers: Vec<VmLayer> = placed
                 .iter()
-                .map(|(guest, left, top, visible)| VmLayer {
+                .map(|(guest, left, top, width, height, visible)| VmLayer {
                     output: &guest.output,
                     left: *left,
                     top: *top,
+                    width: *width,
+                    height: *height,
                     visible,
                 })
                 .collect();

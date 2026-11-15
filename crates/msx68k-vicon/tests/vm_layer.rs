@@ -116,6 +116,8 @@ fn a_vm_layer_shows_only_in_its_visible_region() {
                 output: &output,
                 left,
                 top,
+                width: 0,
+                height: 0,
                 visible: &visible,
             }],
         );

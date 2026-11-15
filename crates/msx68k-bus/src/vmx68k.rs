@@ -1044,6 +1044,9 @@ pub struct VmWindowLayout {
     /// Screen position of the top-left of the VM's screen in the window's content.
     pub left: i32,
     pub top: i32,
+    /// Size of the window's content area below the bar, in primary screen pixels.
+    pub width: u32,
+    pub height: u32,
     /// Visible parts of the content, as screen rectangles `(left, top, right, bottom)`, right
     /// and bottom exclusive.
     pub visible: Vec<(i32, i32, i32, i32)>,
@@ -1711,6 +1714,8 @@ impl X68kBus {
         Some(VmWindowLayout {
             left: content.left as i32 + dx,
             top: content.top as i32 + dy,
+            width: (content.right - content.left).max(0) as u32,
+            height: (content.bottom - content.top).max(0) as u32,
             visible: rects,
         })
     }

@@ -24,6 +24,8 @@ INTERRUPT_ICON_ID .equ	2		; 'PLOT' of the INTERRUPT button icon in VMX68K.LB
 RESET_ICON_ID	.equ	3		; 'PLOT' of the RESET button icon in VMX68K.LB
 JOYPAD_OFF_ICON_ID .equ	4		; 'PLOT' of the Joypad icon (disabled)
 JOYPAD_ON_ICON_ID .equ	5		; 'PLOT' of the Joypad icon (enabled)
+CRT_OFF_ICON_ID	.equ	6		; 'PLOT' of the 4:3 CRT icon (disabled)
+CRT_ON_ICON_ID	.equ	7		; 'PLOT' of the 4:3 CRT icon (enabled)
 JOYPAD_MENU_ID	.equ	3		; 'MENU' of the Joypad icon in VMX68K.LB
 JOYPAD_DIALOG_ID .equ	3		; 'DLOG'/'DITL' of the Joypad assignment dialog
 SETUP_TYPE	.equ	'V68S'		; The setup's settings: version.w, speed.w, CPU.w, RAM MB.w
@@ -99,7 +101,8 @@ request_length:	.ds.l	1
 request_handle:	.ds.l	1
 setup_handle:	.ds.l	1		; pseudo-handles to setup_rec and sram_buffer
 sram_handle:	.ds.l	1
-screen_size:	.ds.l	1		; the VM's screen the window fits, width << 16 | height
+screen_size:	.ds.l	1		; the window content's size, width << 16 | height
+vm_native_size:	.ds.l	1		; the VM's native screen size, width << 16 | height
 drive0_fd:	.ds.w	1
 vm_graphics:	.ds.w	1
 cfg_graphics:	.ds.w	1
@@ -158,6 +161,7 @@ setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
 start_config:	.ds.b	1
 joypad_capturing: .ds.b	1		; 0 = idle, 1..6 = capturing button index
 joypad_shift_prev: .ds.b 1
+crt_aspect:	.ds.b	1		; 0 = 1:1 pixel, 1 = 4:3 CRT aspect ratio
 	.even
 joypad_rec:
 joypad_enabled:	.ds.b	1
@@ -238,6 +242,7 @@ clear_work:
 	move.l	#-1, pending_old+4(a5)
 	move.w	#-1, drive0_fd(a5)
 	move.l	#768 << 16 | 512, screen_size(a5)
+	move.l	#768 << 16 | 512, vm_native_size(a5)
 	move.w	#4, vm_ram(a5)		; what setups that do not say have
 	move.w	#1, vm_drives(a5)	; shared, one drive
 	move.w	#1, vm_drives+DRV_COUNT(a5)
@@ -497,11 +502,22 @@ track_check_joypad:
 	SXCALL	GMPtInRect		; $A156
 	addq.l	#8, sp
 	tst.b	d0
-	beq.s	track_check_fd
+	beq.s	track_check_crt
 	eori.b	#1, joypad_enabled(a5)
 	bsr	send_joypad
 	bsr	draw_bar
 	bsr	save_setup
+	bra	event_loop
+track_check_crt:
+	move.l	d4, -(sp)
+	pea	crt_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq.s	track_check_fd
+	eori.b	#1, crt_aspect(a5)
+	move.l	vm_native_size(a5), d1
+	bsr	resize_window
 	bra	event_loop
 track_check_fd:
 	bsr	fd_hit
@@ -640,6 +656,13 @@ draw_bar:
 draw_joypad_icon:
 	lea	joypad_icon_rect(pc), a1
 	bsr.s	draw_plot_icon
+	move.w	#CRT_OFF_ICON_ID, d0
+	tst.b	crt_aspect(a5)
+	beq.s	draw_crt_icon
+	move.w	#CRT_ON_ICON_ID, d0
+draw_crt_icon:
+	lea	crt_icon_rect(pc), a1
+	bsr.s	draw_plot_icon
 	move.w	#CONFIG_ICON_ID, d0
 	lea	config_icon_rect(a5), a1
 	bsr.s	draw_plot_icon
@@ -682,7 +705,7 @@ update_status:
 	bmi	update_lamp_done
 	tst.l	d1
 	beq.s	update_lamp
-	cmp.l	screen_size(a5), d1
+	cmp.l	vm_native_size(a5), d1
 	beq.s	update_lamp
 	bsr	resize_window
 update_lamp:
@@ -1050,11 +1073,34 @@ save_setup_close:
 * moving what is drawn by the right edge, and draws the bar anew.
 * -----------------------------------------------------------------------------
 resize_window:
-	movem.l	d0-d2/a1, -(sp)
-	lea	screen_size(a5), a1
+	movem.l	d0-d3/a1, -(sp)
+	lea	vm_native_size(a5), a1
 	move.l	d1, (a1)
 	move.w	d1, d2			; height
 	swap	d1			; width
+	tst.b	crt_aspect(a5)
+	beq.s	resize_crt_done
+	move.w	d1, d0
+	mulu	#3, d0			; w * 3
+	move.w	d2, d3
+	mulu	#4, d3			; h * 4
+	cmp.l	d3, d0
+	beq.s	resize_crt_done
+	bhi.s	resize_crt_stretch_h
+	addq.l	#1, d3			; (h * 4 + 1) / 3
+	divu	#3, d3
+	move.w	d3, d1
+	bra.s	resize_crt_done
+resize_crt_stretch_h:
+	addq.l	#2, d0			; (w * 3 + 2) / 4
+	lsr.l	#2, d0
+	move.w	d0, d2
+resize_crt_done:
+	move.w	d1, d0
+	swap	d0
+	move.w	d2, d0
+	lea	screen_size(a5), a1
+	move.l	d0, (a1)
 	lea	bar_rect(a5), a1
 	move.w	d1, 4(a1)
 	lea	bar_line_rect(a5), a1
@@ -1096,7 +1142,7 @@ resize_window:
 	lea	10(sp), sp
 	* Shrinking exposes nothing to update: the lamp has moved all the same
 	bsr	draw_bar
-	movem.l	(sp)+, d0-d2/a1
+	movem.l	(sp)+, d0-d3/a1
 	rts
 
 * -----------------------------------------------------------------------------
@@ -3228,7 +3274,7 @@ serve_done:
 fd_rectangle:
 	move.w	d4,d0
 	mulu	#36,d0
-	addi.w	#112,d0
+	addi.w	#148,d0
 	lea	fd_rect(a5),a0
 	move.w	d0,(a0)+
 	move.w	#2,(a0)+
@@ -4318,6 +4364,8 @@ reset_icon_rect:
 	.dc.w	40, 2, 70, 22
 joypad_icon_rect:
 	.dc.w	76, 2, 106, 22
+crt_icon_rect:
+	.dc.w	112, 2, 142, 22
 
 * -----------------------------------------------------------------------------
 * Joypad helpers: init_joypad, send_joypad, joypad_menu, joypad_dialog

@@ -60,6 +60,10 @@ pub const RESET_ICON_ID: u16 = 3;
 pub const JOYPAD_OFF_ICON_ID: u16 = 4;
 /// `'PLOT'` of the Joypad icon while enabled, a highlighted Atari DE-9 connector labeled `JOY`.
 pub const JOYPAD_ON_ICON_ID: u16 = 5;
+/// `'PLOT'` of the 4:3 CRT aspect ratio icon while disabled.
+pub const CRT_OFF_ICON_ID: u16 = 6;
+/// `'PLOT'` of the 4:3 CRT aspect ratio icon while enabled.
+pub const CRT_ON_ICON_ID: u16 = 7;
 
 /// ID of the `'ICN#'` entry and its `'PAT3'` icon that `\SHELL\ICON.LB` gets for VM setups,
 /// after Sharp's entries (`$80`..`$BB`).
@@ -226,6 +230,54 @@ const JOYPAD_ON_ICON: [&str; 20] = [
     "#o+o....#oooooooooo#......o+oo",
     "#o+o.....##########.......o+oo",
     "#o+oooooooooooooooooooooooo+oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+o######################o+oo",
+    "#o++++++++++++++++++++++++++oo",
+    "#ooooooooooooooooooooooooooooo",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// 4:3 CRT aspect ratio icon (disabled): CRT bezel with `4:3` inside.
+const CRT_OFF_ICON: [&str; 20] = [
+    "##############################",
+    "#++++++++++++++++++++++++++++o",
+    "#++oooooooooooooooooooooooo++o",
+    "#++o......................o++o",
+    "#++o..##################..o++o",
+    "#++o..#++++++++++++++++#..o++o",
+    "#++o..#+..#+++#++++##++#..o++o",
+    "#++o..#++##+++#.#++++#+#..o++o",
+    "#++o..#+#.#+++++++++#++#..o++o",
+    "#++o..#+#.#+++#.#++++#+#..o++o",
+    "#++o..#+####++#++++##++#..o++o",
+    "#++o..#+++#++++++++++++#..o++o",
+    "#++o..##################..o++o",
+    "#++o.....############.....o++o",
+    "#++o......................o++o",
+    "#++o......................o++o",
+    "#++o######################o++o",
+    "#++++++++++++++++++++++++++++o",
+    "#++++++++++++++++++++++++++++o",
+    "#ooooooooooooooooooooooooooooo",
+];
+
+/// 4:3 CRT aspect ratio icon (enabled): highlighted CRT bezel with bright `o` face and `#` `4:3`.
+const CRT_ON_ICON: [&str; 20] = [
+    "##############################",
+    "#ooooooooooooooooooooooooooooo",
+    "#o++++++++++++++++++++++++++oo",
+    "#o+oooooooooooooooooooooooo+oo",
+    "#o+o..##################..o+oo",
+    "#o+o..#oooooooooooooooo#..o+oo",
+    "#o+o..#oo#o#oo#o#oo##oo#..o+oo",
+    "#o+o..#o##oooo#.#oooo#o#..o+oo",
+    "#o+o..##oo#ooooooooo#oo#..o+oo",
+    "#o+o..#o####oo#.#oooo#o#..o+oo",
+    "#o+o..#ooo#ooo#oooo##oo#..o+oo",
+    "#o+o..#ooo#oooooooooooo#..o+oo",
+    "#o+o..##################..o+oo",
+    "#o+o.....############.....o+oo",
     "#o+oooooooooooooooooooooooo+oo",
     "#o+oooooooooooooooooooooooo+oo",
     "#o+o######################o+oo",
@@ -603,6 +655,14 @@ pub fn vmx68k_library() -> Vec<u8> {
         Resource::new(JOYPAD_ON_ICON_ID, plot_image(&JOYPAD_ON_ICON)),
     );
     library.insert(
+        b"PLOT",
+        Resource::new(CRT_OFF_ICON_ID, plot_image(&CRT_OFF_ICON)),
+    );
+    library.insert(
+        b"PLOT",
+        Resource::new(CRT_ON_ICON_ID, plot_image(&CRT_ON_ICON)),
+    );
+    library.insert(
         b"MENU",
         Resource::new(JOYPAD_MENU_ID, menu(&[b"\x8A\x84\x93\x96..."])),
     );
@@ -698,7 +758,14 @@ mod tests {
         let icon = library.get(b"PLOT", CONFIGURATION_ICON_ID).unwrap();
         assert_eq!(&icon.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
         assert_eq!(icon.data.len(), 8 + 3 * 20 * 4, "two planes and the mask");
-        for id in [INTERRUPT_ICON_ID, RESET_ICON_ID, JOYPAD_OFF_ICON_ID, JOYPAD_ON_ICON_ID] {
+        for id in [
+            INTERRUPT_ICON_ID,
+            RESET_ICON_ID,
+            JOYPAD_OFF_ICON_ID,
+            JOYPAD_ON_ICON_ID,
+            CRT_OFF_ICON_ID,
+            CRT_ON_ICON_ID,
+        ] {
             let btn = library.get(b"PLOT", id).unwrap();
             assert_eq!(&btn.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
             assert_eq!(btn.data.len(), 8 + 3 * 20 * 4);

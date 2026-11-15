@@ -14,6 +14,8 @@ struct Layer {
     origin: vec2<i32>,
     // Size of the primary VM's screen.
     primary: vec2<u32>,
+    // Destination size in primary screen pixels.
+    dest_size: vec2<u32>,
 };
 
 @group(0) @binding(0)
@@ -48,10 +50,11 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let size = max(layer.size, vec2<u32>(1u, 1u));
+    let dest_size = max(layer.dest_size, vec2<u32>(1u, 1u));
     let px = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(size.x)), size.x - 1u);
     let py = min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(size.y)), size.y - 1u);
-    let mx = layer.origin.x + i32(px);
-    let my = layer.origin.y + i32(py);
+    let mx = layer.origin.x + i32(min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(dest_size.x)), dest_size.x - 1u));
+    let my = layer.origin.y + i32(min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(dest_size.y)), dest_size.y - 1u));
     if (mx < 0 || my < 0 || u32(mx) >= layer.primary.x || u32(my) >= layer.primary.y) {
         discard;
     }
