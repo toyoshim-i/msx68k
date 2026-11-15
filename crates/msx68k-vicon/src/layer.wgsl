@@ -51,8 +51,6 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let size = max(layer.size, vec2<u32>(1u, 1u));
     let dest_size = max(layer.dest_size, vec2<u32>(1u, 1u));
-    let px = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(size.x)), size.x - 1u);
-    let py = min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(size.y)), size.y - 1u);
     let mx = layer.origin.x + i32(min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(dest_size.x)), dest_size.x - 1u));
     let my = layer.origin.y + i32(min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(dest_size.y)), dest_size.y - 1u));
     if (mx < 0 || my < 0 || u32(mx) >= layer.primary.x || u32(my) >= layer.primary.y) {
@@ -61,5 +59,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if ((primary_rgba[u32(my) * layer.primary.x + u32(mx)] >> 24u) != 0u) {
         discard;
     }
-    return vec4<f32>(textureLoad(frame, vec2<u32>(px, py), 0).rgb, 1.0);
+    if (all(size == dest_size)) {
+        let px = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(size.x)), size.x - 1u);
+        let py = min(u32(clamp(in.uv.y, 0.0, 0.999999) * f32(size.y)), size.y - 1u);
+        return vec4<f32>(textureLoad(frame, vec2<u32>(px, py), 0).rgb, 1.0);
+    }
+    let max_coord = vec2<u32>(size.x - 1u, size.y - 1u);
+    let pos = clamp(
+        in.uv * vec2<f32>(size) - vec2<f32>(0.5, 0.5),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(max_coord),
+    );
+    let p0 = vec2<u32>(floor(pos));
+    let p1 = min(p0 + vec2<u32>(1u, 1u), max_coord);
+    let f = fract(pos);
+    let c00 = textureLoad(frame, vec2<u32>(p0.x, p0.y), 0).rgb;
+    let c10 = textureLoad(frame, vec2<u32>(p1.x, p0.y), 0).rgb;
+    let c01 = textureLoad(frame, vec2<u32>(p0.x, p1.y), 0).rgb;
+    let c11 = textureLoad(frame, vec2<u32>(p1.x, p1.y), 0).rgb;
+    let rgb = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    return vec4<f32>(rgb, 1.0);
 }
