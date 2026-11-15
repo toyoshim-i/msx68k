@@ -1774,6 +1774,9 @@ impl X68kBus {
         if update_region.is_some() && !exposed.is_empty() {
             self.fill_with(state, text_base, exposed, FillShape::Rect, Some((background, active_pages)))?;
         }
+        // The guest `GMScroll` ends with `MOVEA.L update,A0`, and callers such as `コンソール`
+        // (`シャーペン.X`) reuse `A0` as the update region handle afterwards.
+        state.a[0] = update;
         self.finish_scroll(state, update_region, exposed, result)
     }
 
@@ -2569,6 +2572,7 @@ mod tests {
         assert_eq!(pixel(&bus, 8, 3), 0);
         assert_eq!(bus.peek_rect(UPDATE + 4), Some(Rect { left: 0, top: 3, right: 8, bottom: 4 }));
         assert_eq!(state.d[0], 0);
+        assert_eq!(state.a[0], UPDATE_HANDLE);
     }
 
     #[test]
