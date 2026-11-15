@@ -154,6 +154,8 @@ bar_line_rect:	.ds.w	4
 screen_rect:	.ds.w	4
 lamp_rects:	.ds.w	12
 config_icon_rect: .ds.w	4
+interrupt_icon_rect: .ds.w 4
+reset_icon_rect: .ds.w	4
 win_active:	.ds.b	1
 library_open:	.ds.b	1
 lamp_lit:	.ds.b	1		; the access lamp as drawn
@@ -486,7 +488,7 @@ track_window:
 	addq.l	#4, sp
 	move.l	d0, d4
 	move.l	d4, -(sp)
-	pea	interrupt_icon_rect(pc)
+	pea	interrupt_icon_rect(a5)
 	SXCALL	GMPtInRect		; $A156
 	addq.l	#8, sp
 	tst.b	d0
@@ -497,7 +499,7 @@ track_window:
 	bra	event_loop
 track_check_reset:
 	move.l	d4, -(sp)
-	pea	reset_icon_rect(pc)
+	pea	reset_icon_rect(a5)
 	SXCALL	GMPtInRect		; $A156
 	addq.l	#8, sp
 	tst.b	d0
@@ -673,10 +675,10 @@ draw_bar:
 	tst.b	library_open(a5)
 	beq.s	draw_bar_done
 	move.w	#INTERRUPT_ICON_ID, d0
-	lea	interrupt_icon_rect(pc), a1
+	lea	interrupt_icon_rect(a5), a1
 	bsr.s	draw_plot_icon
 	move.w	#RESET_ICON_ID, d0
-	lea	reset_icon_rect(pc), a1
+	lea	reset_icon_rect(a5), a1
 	bsr.s	draw_plot_icon
 	move.w	#JOYPAD_OFF_ICON_ID, d0
 	tst.b	joypad_enabled(a5)
@@ -1164,10 +1166,22 @@ resize_crt_done:
 	move.w	d0, 12(a1)
 	subq.w	#1, d0
 	move.w	d0, 20(a1)
-	* The Configuration icon, 55 dots in from the right (left of the access lamp)
+	* RESET (20x20), INTERRUPT (20x20), and Configuration (30x20) left of the access lamp
+	lea	reset_icon_rect(a5), a1
+	move.w	d1, d0
+	subi.w	#45, d0
+	move.w	d0, 0(a1)
+	addi.w	#20, d0
+	move.w	d0, 4(a1)
+	lea	interrupt_icon_rect(a5), a1
+	move.w	d1, d0
+	subi.w	#71, d0
+	move.w	d0, 0(a1)
+	addi.w	#20, d0
+	move.w	d0, 4(a1)
 	lea	config_icon_rect(a5), a1
 	move.w	d1, d0
-	subi.w	#55, d0
+	subi.w	#107, d0
 	move.w	d0, 0(a1)
 	addi.w	#30, d0
 	move.w	d0, 4(a1)
@@ -3368,7 +3382,7 @@ serve_done:
 fd_rectangle:
 	move.w	d4,d0
 	mulu	#36,d0
-	addi.w	#148,d0
+	addi.w	#76,d0
 	lea	fd_rect(a5),a0
 	move.w	d0,(a0)+
 	move.w	#2,(a0)+
@@ -3433,8 +3447,8 @@ draw_fd_resource:
 	pea	8(a0)
 	SXCALL	GMPlotImg
 	lea	10(sp),sp
-	addi.w	#21,fd_rect(a5)
-	subi.w	#3,fd_rect+4(a5)
+	addi.w	#16,fd_rect(a5)
+	subi.w	#9,fd_rect+4(a5)
 	move.w	#16,fd_rect+2(a5)
 	move.w	#19,fd_rect+6(a5)
 	moveq.l	#G_DGRAY,d0
@@ -4452,16 +4466,14 @@ rects_init:
 	.dc.w	749, 8, 763, 16
 	.dc.w	750, 9, 763, 16
 	.dc.w	750, 9, 762, 15
-	.dc.w	713, 2, 743, 22		; Configuration icon, 30 x 20 left of the lamp
-RECTS_SIZE	.equ	7*8
-interrupt_icon_rect:
-	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
-reset_icon_rect:
-	.dc.w	40, 2, 70, 22
+	.dc.w	661, 2, 691, 22		; Configuration icon, 30 x 20
+	.dc.w	697, 2, 717, 22		; INTERRUPT button, 20 x 20
+	.dc.w	723, 2, 743, 22		; RESET button, 20 x 20
+RECTS_SIZE	.equ	9*8
 joypad_icon_rect:
-	.dc.w	76, 2, 106, 22
+	.dc.w	4, 2, 34, 22		; 30 x 20, the 3:2 of SX-Window's icons
 crt_icon_rect:
-	.dc.w	112, 2, 142, 22
+	.dc.w	40, 2, 70, 22
 
 * -----------------------------------------------------------------------------
 * Joypad helpers: init_joypad, send_joypad, joypad_menu, joypad_dialog

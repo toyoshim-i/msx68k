@@ -115,174 +115,174 @@ const SPEEDS: [&[u8]; 4] = [b"10MHz", b"16MHz", b"24MHz", b"\x8D\xC5\x8D\x82\x91
 
 /// The Configuration icon (see [`plot_image`]), in the style of SX-Window's icons: a picture
 /// in a rectangular recess, 3:2 as the Filer's and the desktop panel's icons are, black at its
-/// top and left and white at its bottom and right, over dark gray; here a white gear with its
+/// top and left and white at its bottom and right, over light gray; here a white gear with its
 /// shadow to the bottom right.
 const CONFIGURATION_ICON: [&str; 20] = [
     "##############################",
-    "#++++++++++++++++++++++++++++o",
-    "#++++++++++++++++++++++++++++o",
-    "#++++++++++++ooo+++++++++++++o",
-    "#++++++++oo++ooo#+oo+++++++++o",
-    "#++++++++ooooooooooo#++++++++o",
-    "#+++++++++ooooooooo##++++++++o",
-    "#+++++++++ooo###ooo#+++++++++o",
-    "#+++++++oooo##+++oooo++++++++o",
-    "#+++++++oooo#++++oooo#+++++++o",
-    "#+++++++oooo#++++oooo#+++++++o",
-    "#++++++++#ooo+++ooo###+++++++o",
-    "#+++++++++ooooooooo#+++++++++o",
-    "#++++++++ooooooooooo+++++++++o",
-    "#++++++++oo##ooo##oo#++++++++o",
-    "#+++++++++##+ooo#++##++++++++o",
-    "#+++++++++++++###++++++++++++o",
-    "#++++++++++++++++++++++++++++o",
-    "#++++++++++++++++++++++++++++o",
+    "#............................o",
+    "#............................o",
+    "#............ooo.............o",
+    "#........oo..ooo#.oo.........o",
+    "#........ooooooooooo#........o",
+    "#.........ooooooooo##........o",
+    "#.........ooo###ooo#.........o",
+    "#.......oooo##...oooo........o",
+    "#.......oooo#....oooo#.......o",
+    "#.......oooo#....oooo#.......o",
+    "#........#ooo...ooo###.......o",
+    "#.........ooooooooo#.........o",
+    "#........ooooooooooo.........o",
+    "#........oo##ooo##oo#........o",
+    "#.........##.ooo.##.#........o",
+    "#.............###............o",
+    "#............................o",
+    "#............................o",
     "#ooooooooooooooooooooooooooooo",
 ];
 
-/// The INTERRUPT (NMI) icon (see [`plot_image`]), a raised pushbutton labeled `INT` inside the
-/// same 30x20 rectangular recess as [`CONFIGURATION_ICON`].
+/// The INTERRUPT (NMI) icon (see [`plot_image`]), a 20x20 black circular pushbutton labeled
+/// `INT` in a circular recess without a square frame, matching the X68000 front-panel switch.
 const INTERRUPT_ICON: [&str; 20] = [
-    "##############################",
-    "#++++++++++++++++++++++++++++o",
-    "#+ooooooooooooooooooooooooo#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o...###..#...#..#####...o#+o",
-    "#+o....#...##..#....#.....o#+o",
-    "#+o....#...#.#.#....#.....o#+o",
-    "#+o....#...#.#.#....#.....o#+o",
-    "#+o....#...#..##....#.....o#+o",
-    "#+o....#...#...#....#.....o#+o",
-    "#+o...###..#...#....#.....o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o#######################o#+o",
-    "#+#########################++o",
-    "#++++++++++++++++++++++++++++o",
-    "#ooooooooooooooooooooooooooooo",
+    "                    ",
+    "      ++++++++      ",
+    "    ++########++    ",
+    "   +############o   ",
+    "  +###+++++######o  ",
+    "  +##############o  ",
+    " +################o ",
+    " +##ooo#o##o#ooo##o ",
+    " +###o##oo#o##o###o ",
+    " +###o##o#oo##o###o ",
+    " +###o##o##o##o###o ",
+    " +##ooo#o##o##o###o ",
+    " +################o ",
+    " +################o ",
+    "  +##############o  ",
+    "  +##############o  ",
+    "   +############o   ",
+    "    oo########oo    ",
+    "      oooooooo      ",
+    "                    ",
 ];
 
-/// The RESET icon (see [`plot_image`]), a raised pushbutton labeled `RESET` inside the same 30x20
-/// rectangular recess as [`CONFIGURATION_ICON`].
+/// The RESET icon (see [`plot_image`]), a 20x20 black circular pushbutton labeled `RST` in a
+/// circular recess without a square frame, matching the X68000 front-panel switch.
 const RESET_ICON: [&str; 20] = [
-    "##############################",
-    "#++++++++++++++++++++++++++++o",
-    "#+ooooooooooooooooooooooooo#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o..##..###..##.###.###..o#+o",
-    "#+o..#.#.#...#...#....#...o#+o",
-    "#+o..#.#.#...#...#....#...o#+o",
-    "#+o..##..##...#..##...#...o#+o",
-    "#+o..#.#.#.....#.#....#...o#+o",
-    "#+o..#.#.#.....#.#....#...o#+o",
-    "#+o..#.#.###.##..###..#...o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o.......................o#+o",
-    "#+o#######################o#+o",
-    "#+#########################++o",
-    "#++++++++++++++++++++++++++++o",
-    "#ooooooooooooooooooooooooooooo",
+    "                    ",
+    "      ++++++++      ",
+    "    ++########++    ",
+    "   +############o   ",
+    "  +###+++++######o  ",
+    "  +##############o  ",
+    " +################o ",
+    " +##oo###oo#ooo###o ",
+    " +##o#o#o####o####o ",
+    " +##oo###o###o####o ",
+    " +##o#o###o##o####o ",
+    " +##o#o#oo###o####o ",
+    " +################o ",
+    " +################o ",
+    "  +##############o  ",
+    "  +##############o  ",
+    "   +############o   ",
+    "    oo########oo    ",
+    "      oooooooo      ",
+    "                    ",
 ];
 
-/// Joypad icon (disabled): Atari DE-9 connector recess with `JOY` inside.
+/// Joypad icon (disabled): Atari DE-9 connector recess with `JOY` inside, over light gray.
 const JOYPAD_OFF_ICON: [&str; 20] = [
     "##############################",
-    "#++++++++++++++++++++++++++++o",
-    "#++oooooooooooooooooooooooo++o",
-    "#++o......................o++o",
-    "#++o..##################..o++o",
-    "#++o..#++++++++++++++++#..o++o",
-    "#++o..#+..#++..#++.#.#+#..o++o",
-    "#++o...#++#+#.#+#.#.#.#...o++o",
-    "#++o...#++#+#.#+#++#++#...o++o",
-    "#++o...#.#+#+#.#+++#++#...o++o",
-    "#++o....#.#+++..+++#.#....o++o",
-    "#++o....#++++++++++#......o++o",
-    "#++o.....##########.......o++o",
-    "#++o......................o++o",
-    "#++o......................o++o",
-    "#++o......................o++o",
-    "#++o######################o++o",
-    "#++++++++++++++++++++++++++++o",
-    "#++++++++++++++++++++++++++++o",
+    "#............................o",
+    "#..oooooooooooooooooooooooo..o",
+    "#..o......................o..o",
+    "#..o..##################..o..o",
+    "#..o..#++++++++++++++++#..o..o",
+    "#..o..#+..#++..#++.#.#+#..o..o",
+    "#..o...#++#+#.#+#.#.#.#...o..o",
+    "#..o...#++#+#.#+#++#++#...o..o",
+    "#..o...#.#+#+#.#+++#++#...o..o",
+    "#..o....#.#+++..+++#.#....o..o",
+    "#..o....#++++++++++#......o..o",
+    "#..o.....##########.......o..o",
+    "#..o......................o..o",
+    "#..o......................o..o",
+    "#..o......................o..o",
+    "#..o######################o..o",
+    "#............................o",
+    "#............................o",
     "#ooooooooooooooooooooooooooooo",
 ];
 
 /// Joypad icon (enabled): highlighted Atari DE-9 connector with bright `o` shell and `#` `JOY`.
 const JOYPAD_ON_ICON: [&str; 20] = [
     "##############################",
-    "#ooooooooooooooooooooooooooooo",
-    "#o++++++++++++++++++++++++++oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+o..##################..o+oo",
-    "#o+o..#oooooooooooooooo#..o+oo",
-    "#o+o..#o###oo###oo#o#oo#..o+oo",
-    "#o+o...#oo#o#ooo#o#o#o#...o+oo",
-    "#o+o...#oo#o#ooo#oo#oo#...o+oo",
-    "#o+o...##o#o#ooo#oo#oo#...o+oo",
-    "#o+o....###oo###ooo#o#....o+oo",
-    "#o+o....#oooooooooo#......o+oo",
-    "#o+o.....##########.......o+oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+o######################o+oo",
-    "#o++++++++++++++++++++++++++oo",
-    "#ooooooooooooooooooooooooooooo",
+    "#............................o",
+    "#..oooooooooooooooooooooooo..o",
+    "#..o......................o..o",
+    "#..o..##################..o..o",
+    "#..o..#oooooooooooooooo#..o..o",
+    "#..o..#o###oo###oo#o#oo#..o..o",
+    "#..o...#oo#o#ooo#o#o#o#...o..o",
+    "#..o...#oo#o#ooo#oo#oo#...o..o",
+    "#..o...##o#o#ooo#oo#oo#...o..o",
+    "#..o....###oo###ooo#o#....o..o",
+    "#..o....#oooooooooo#......o..o",
+    "#..o.....##########.......o..o",
+    "#..o......................o..o",
+    "#..o......................o..o",
+    "#..o......................o..o",
+    "#..o######################o..o",
+    "#............................o",
+    "#............................o",
     "#ooooooooooooooooooooooooooooo",
 ];
 
-/// Monitor settings icon (disabled): CRT bezel with adjustment sliders inside.
+/// Monitor settings icon (disabled): wide curved CRT monitor with dark glass and specular highlight.
 const CRT_OFF_ICON: [&str; 20] = [
     "##############################",
-    "#++++++++++++++++++++++++++++o",
-    "#++oooooooooooooooooooooooo++o",
-    "#++o......................o++o",
-    "#++o..##################..o++o",
-    "#++o..#++++###+++++++++#..o++o",
-    "#++o..#++###o#########+#..o++o",
-    "#++o..#++++###+++++++++#..o++o",
-    "#++o..#++++++++++++++++#..o++o",
-    "#++o..#+++++++++###++++#..o++o",
-    "#++o..#++#########o###+#..o++o",
-    "#++o..#+++++++++###++++#..o++o",
-    "#++o..##################..o++o",
-    "#++o.....############.....o++o",
-    "#++o......................o++o",
-    "#++o......................o++o",
-    "#++o######################o++o",
-    "#++++++++++++++++++++++++++++o",
-    "#++++++++++++++++++++++++++++o",
+    "#............................o",
+    "#...oooooooooooooooooooo.....o",
+    "#..o....................#....o",
+    "#..o..################..#....o",
+    "#..o.#+oo#############+.#....o",
+    "#..o.#o###############+.#....o",
+    "#..o.#.###############+.#....o",
+    "#..o.#################+.#....o",
+    "#..o.#################+.#....o",
+    "#..o.++###############+.#....o",
+    "#..o..oooooooooooooooo..#....o",
+    "#..o.................#..#....o",
+    "#..######################....o",
+    "#..........o......#..........o",
+    "#......oooooooooooooo#.......o",
+    "#......o............##.......o",
+    "#......###############.......o",
+    "#............................o",
     "#ooooooooooooooooooooooooooooo",
 ];
 
-/// Monitor settings icon (enabled): highlighted CRT bezel with bright `o` face and sliders.
+/// Monitor settings icon (enabled): highlighted wide curved CRT monitor with glowing `o` screen.
 const CRT_ON_ICON: [&str; 20] = [
     "##############################",
-    "#ooooooooooooooooooooooooooooo",
-    "#o++++++++++++++++++++++++++oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+o..##################..o+oo",
-    "#o+o..#oooo###ooooooooo#..o+oo",
-    "#o+o..#oo###+#########o#..o+oo",
-    "#o+o..#oooo###ooooooooo#..o+oo",
-    "#o+o..#oooooooooooooooo#..o+oo",
-    "#o+o..#ooooooooo###oooo#..o+oo",
-    "#o+o..#oo#########+###o#..o+oo",
-    "#o+o..#ooooooooo###oooo#..o+oo",
-    "#o+o..##################..o+oo",
-    "#o+o.....############.....o+oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+oooooooooooooooooooooooo+oo",
-    "#o+o######################o+oo",
-    "#o++++++++++++++++++++++++++oo",
-    "#ooooooooooooooooooooooooooooo",
+    "#............................o",
+    "#...oooooooooooooooooooo.....o",
+    "#..o....................#....o",
+    "#..o..################..#....o",
+    "#..o.#.ooooooooooooooo+.#....o",
+    "#..o.#oooooooooooooooo+.#....o",
+    "#..o.#oooooooooooooooo+.#....o",
+    "#..o.#oooooooooooooooo+.#....o",
+    "#..o.#oooooooooooooooo+.#....o",
+    "#..o.#oooooooooooooooo+.#....o",
+    "#..o..++++++++++++++++..#....o",
+    "#..o.................o..#....o",
+    "#..######################....o",
+    "#..........o......#..........o",
+    "#......oooooooooooooo#.......o",
+    "#......o............##.......o",
+    "#......###############.......o",
+    "#............................o",
     "#ooooooooooooooooooooooooooooo",
 ];
 
@@ -574,12 +574,23 @@ fn drive_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
 
 /// Builds `VMX68K.LB`.
 
-/// Diskette silhouettes use the same two-plane PLOT palette as the gear.
+/// Square 16x16 diskette silhouettes centered inside the standard 30x20 `#`/`o` light-gray recess.
 fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
-    let mut pixels = vec![vec![b'o'; 30]; 20];
-    for (y, row) in pixels.iter_mut().enumerate().take(19).skip(1) {
-        for (x, dot) in row.iter_mut().enumerate().take(28).skip(2) {
-            *dot = if x == 2 || x == 27 || y == 1 || y == 18 {
+    let mut pixels = vec![vec![b'.'; 30]; 20];
+    for x in 0..30 {
+        pixels[0][x] = b'#';
+        pixels[19][x] = b'o';
+    }
+    for y in 1..19 {
+        pixels[y][0] = b'#';
+        pixels[y][29] = b'o';
+    }
+    for (y, row) in pixels.iter_mut().enumerate().take(18).skip(2) {
+        for (x, dot) in row.iter_mut().enumerate().take(23).skip(7) {
+            if x == 22 && y == 2 {
+                continue;
+            }
+            *dot = if x == 7 || x == 22 || y == 2 || y == 17 {
                 b'#'
             } else if inserted {
                 b'+'
@@ -588,12 +599,12 @@ fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
             };
         }
     }
-    for row in pixels.iter_mut().take(8).skip(2) {
-        row[7..23].fill(b'o');
-        row[19..22].fill(b'#');
+    for row in pixels.iter_mut().take(8).skip(3) {
+        row[10..20].fill(b'o');
+        row[16..18].fill(b'#');
     }
     for row in pixels.iter_mut().take(17).skip(10) {
-        row[6..24].fill(b'o');
+        row[9..21].fill(b'o');
     }
     let digits = [
         [7, 5, 5, 5, 7],
@@ -604,7 +615,7 @@ fn floppy_icon(unit: usize, inserted: bool) -> Vec<u8> {
     for (y, bits) in digits[unit].iter().enumerate() {
         for x in 0..3 {
             if bits & (4 >> x) != 0 {
-                pixels[y + 11][x + 9] = b'#';
+                pixels[y + 11][x + 11] = b'#';
             }
         }
     }
@@ -762,9 +773,12 @@ mod tests {
         let icon = library.get(b"PLOT", CONFIGURATION_ICON_ID).unwrap();
         assert_eq!(&icon.data[..8], &[0, 0, 0, 0, 0, 30, 0, 20]);
         assert_eq!(icon.data.len(), 8 + 3 * 20 * 4, "two planes and the mask");
+        for id in [INTERRUPT_ICON_ID, RESET_ICON_ID] {
+            let btn = library.get(b"PLOT", id).unwrap();
+            assert_eq!(&btn.data[..8], &[0, 0, 0, 0, 0, 20, 0, 20]);
+            assert_eq!(btn.data.len(), 8 + 3 * 20 * 4);
+        }
         for id in [
-            INTERRUPT_ICON_ID,
-            RESET_ICON_ID,
             JOYPAD_OFF_ICON_ID,
             JOYPAD_ON_ICON_ID,
             CRT_OFF_ICON_ID,
