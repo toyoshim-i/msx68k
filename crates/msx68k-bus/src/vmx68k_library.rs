@@ -238,20 +238,20 @@ const JOYPAD_ON_ICON: [&str; 20] = [
     "#ooooooooooooooooooooooooooooo",
 ];
 
-/// 4:3 CRT aspect ratio icon (disabled): CRT bezel with `4:3` inside.
+/// Monitor settings icon (disabled): CRT bezel with adjustment sliders inside.
 const CRT_OFF_ICON: [&str; 20] = [
     "##############################",
     "#++++++++++++++++++++++++++++o",
     "#++oooooooooooooooooooooooo++o",
     "#++o......................o++o",
     "#++o..##################..o++o",
+    "#++o..#++++###+++++++++#..o++o",
+    "#++o..#++###o#########+#..o++o",
+    "#++o..#++++###+++++++++#..o++o",
     "#++o..#++++++++++++++++#..o++o",
-    "#++o..#+..#+++#++++##++#..o++o",
-    "#++o..#++##+++#.#++++#+#..o++o",
-    "#++o..#+#.#+++++++++#++#..o++o",
-    "#++o..#+#.#+++#.#++++#+#..o++o",
-    "#++o..#+####++#++++##++#..o++o",
-    "#++o..#+++#++++++++++++#..o++o",
+    "#++o..#+++++++++###++++#..o++o",
+    "#++o..#++#########o###+#..o++o",
+    "#++o..#+++++++++###++++#..o++o",
     "#++o..##################..o++o",
     "#++o.....############.....o++o",
     "#++o......................o++o",
@@ -262,20 +262,20 @@ const CRT_OFF_ICON: [&str; 20] = [
     "#ooooooooooooooooooooooooooooo",
 ];
 
-/// 4:3 CRT aspect ratio icon (enabled): highlighted CRT bezel with bright `o` face and `#` `4:3`.
+/// Monitor settings icon (enabled): highlighted CRT bezel with bright `o` face and sliders.
 const CRT_ON_ICON: [&str; 20] = [
     "##############################",
     "#ooooooooooooooooooooooooooooo",
     "#o++++++++++++++++++++++++++oo",
     "#o+oooooooooooooooooooooooo+oo",
     "#o+o..##################..o+oo",
+    "#o+o..#oooo###ooooooooo#..o+oo",
+    "#o+o..#oo###+#########o#..o+oo",
+    "#o+o..#oooo###ooooooooo#..o+oo",
     "#o+o..#oooooooooooooooo#..o+oo",
-    "#o+o..#oo#o#oo#o#oo##oo#..o+oo",
-    "#o+o..#o##oooo#.#oooo#o#..o+oo",
-    "#o+o..##oo#ooooooooo#oo#..o+oo",
-    "#o+o..#o####oo#.#oooo#o#..o+oo",
-    "#o+o..#ooo#ooo#oooo##oo#..o+oo",
-    "#o+o..#ooo#oooooooooooo#..o+oo",
+    "#o+o..#ooooooooo###oooo#..o+oo",
+    "#o+o..#oo#########+###o#..o+oo",
+    "#o+o..#ooooooooo###oooo#..o+oo",
     "#o+o..##################..o+oo",
     "#o+o.....############.....o+oo",
     "#o+oooooooooooooooooooooooo+oo",
@@ -470,7 +470,7 @@ const D_DISABL: u8 = 0x80;
 const SLIDER_PROC: u16 = 0x13 << 4;
 
 /// Configuration dialog bounds within the standard 768 by 512 screen.
-const CONFIG_DIALOG_BOUNDS: [i16; 4] = [194, 81, 574, 487];
+const CONFIG_DIALOG_BOUNDS: [i16; 4] = [194, 81, 574, 505];
 /// Where the ドライブの詳細 dialog shows, centered on a 768×512 screen.
 const DRIVE_DIALOG_BOUNDS: [i16; 4] = [149, 118, 619, 393];
 /// Editable text items' type (`DIALOG.H`).
@@ -491,12 +491,12 @@ const MEMORY_SLIDER_BOUNDS: [i16; 4] = [90, 122, 254, 140];
 fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
     vec![
         (
-            [193, 362, 223, 381],
+            [193, 392, 223, 411],
             D_CHRBTN,
             pascal_even(b"\x90\xDD\x92\xE8"),
         ),
         (
-            [295, 362, 325, 381],
+            [295, 392, 325, 411],
             D_CHRBTN,
             pascal_even(b"\x8E\xE6\x8F\xC1"),
         ),
@@ -533,8 +533,12 @@ fn config_dialog_items() -> Vec<([i16; 4], u8, Vec<u8>)> {
         ([0, 0, 0, 0], D_STCTXT | D_DISABL, static_text()),
         ([28, 294, 41, 307], D_CHKBOX, vec![0, 0]),
         ([54, 294, 360, 312], D_STCTXT | D_DISABL, static_text()),
-        ([28, 322, 41, 335], D_CHKBOX, vec![0, 0]),
-        ([54, 322, 360, 340], D_STCTXT | D_DISABL, static_text()),
+        ([28, 318, 41, 331], D_CHKBOX, vec![0, 0]),
+        ([54, 318, 360, 336], D_STCTXT | D_DISABL, static_text()),
+        ([28, 342, 41, 355], D_CHKBOX, vec![0, 0]),
+        ([54, 342, 360, 360], D_STCTXT | D_DISABL, static_text()),
+        ([28, 366, 41, 379], D_CHKBOX, vec![0, 0]),
+        ([54, 366, 360, 384], D_STCTXT | D_DISABL, static_text()),
     ]
 }
 
@@ -819,7 +823,7 @@ mod tests {
         );
         let library = ResourceLibrary::parse(&vmx68k_library()).unwrap();
         let ditl = &library.get(b"DITL", CONFIG_DIALOG_ID).unwrap().data;
-        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 28, "twenty-nine shared form items");
+        assert_eq!(u16::from_be_bytes([ditl[0], ditl[1]]), 32, "thirty-three shared form items");
         let ditl = &library.get(b"DITL", DRIVE_DIALOG_ID).unwrap().data;
         let items = u16::from_be_bytes([ditl[0], ditl[1]]) + 1;
         assert_eq!(items, ITEM_ROWS - 1 + DRIVE_ROWS * ROW_ITEMS);

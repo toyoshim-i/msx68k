@@ -622,7 +622,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     // These graphics settings apply without entering the hardware restart flow.
     click(&mut vm, (228, 381), 1, 350_000);
     click(&mut vm, (228, 409), 1, 350_000);
-    click(&mut vm, (402, 453), 1, 750_000);
+    click(&mut vm, (402, 482), 1, 750_000);
     assert_eq!(
         case_events(&mut vm),
         [VmEvent::SpriteOptions {
@@ -654,7 +654,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     point(&mut vm, (802, 102), 1_000_000);
     click(&mut vm, (228, 381), 1, 350_000);
     click(&mut vm, (228, 409), 1, 350_000);
-    click(&mut vm, (402, 453), 1, 750_000);
+    click(&mut vm, (402, 482), 1, 750_000);
     assert_eq!(
         case_events(&mut vm),
         [VmEvent::SpriteOptions {
@@ -710,7 +710,7 @@ pub fn the_configuration_dialog_sets_the_cpu_and_memory_and_restarts_the_vm() {
     );
 
     // 設定 saves the setup and asks whether to restart the VM now: はい restarts it.
-    click(&mut vm, (402, 453), 1, 1_000_000);
+    click(&mut vm, (402, 482), 1, 1_000_000);
     screenshot(&vm, "dialog_restart");
     assert_eq!(case_events(&mut vm), [], "not before the answer");
     assert_eq!(
@@ -794,7 +794,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
                 };
                 (125..137).any(|y| (290..400).any(|x| text_index(vm, (x, y)) == 10))
                     && ink(346, 305, 398, 317)
-                    && ink(380, 446, 420, 458)
+                    && ink(380, 475, 420, 487)
             },
             "new form fully drawn",
         );
@@ -818,7 +818,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     click(&mut vm, (420, 174), 1, 500_000);
     click(&mut vm, (228, 381), 1, 350_000);
     click(&mut vm, (228, 409), 1, 350_000);
-    click(&mut vm, (504, 453), 1, 750_000);
+    click(&mut vm, (504, 482), 1, 750_000);
     assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
     assert_eq!(saved_drives(&vm, "DEFAULT"), original);
     assert!(saved_setup(&vm, "NEW").is_none());
@@ -880,9 +880,11 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     );
     vm.run_steps(2_000_000); // Finish native redraw before the review screenshot.
     screenshot(&vm, "new_setup");
-    click(&mut vm, (228, 381), 1, 350_000);
-    click(&mut vm, (228, 409), 1, 350_000);
-    click(&mut vm, (402, 453), 1, 2_500_000);
+    click(&mut vm, (228, 381), 1, 600_000);
+    click(&mut vm, (228, 409), 1, 600_000);
+    click(&mut vm, (228, 430), 1, 600_000);
+    click(&mut vm, (228, 454), 1, 600_000);
+    click(&mut vm, (402, 482), 1, 2_500_000);
     screenshot(&vm, "new_setup_started");
     assert_eq!(saved_setup(&vm, "DEFAULT"), original_setup);
     assert_eq!(saved_drives(&vm, "DEFAULT"), original);
@@ -938,7 +940,7 @@ pub fn new_setup_uses_the_common_form_without_changing_its_creator() {
     let original_new = bytes(&vm);
     open_new(&mut vm);
     set_path(&mut vm);
-    click(&mut vm, (402, 453), 1, 1_000_000);
+    click(&mut vm, (402, 482), 1, 1_000_000);
     assert_eq!(
         bytes(&vm),
         original_new,
@@ -1259,7 +1261,8 @@ fn case_events(vm: &mut X68kVm) -> Vec<VmEvent> {
             | VmEvent::SpriteOptions { id, .. }
             | VmEvent::Reset { id }
             | VmEvent::Interrupt { id }
-            | VmEvent::Joypad { id, .. } => id,
+            | VmEvent::Joypad { id, .. }
+            | VmEvent::VSync { id, .. } => id,
         };
         *id = *id - base + 1;
     }
@@ -1372,7 +1375,7 @@ pub fn settings_allow_filer_drops_and_restore_the_parent() {
         saved_drives(&vm, "DEFAULT").map(|(custom, _)| custom),
         Some(false)
     );
-    click(&mut vm, (402, 453), 1, 1_000_000);
+    click(&mut vm, (402, 482), 1, 1_000_000);
     assert_eq!(
         saved_drives(&vm, "DEFAULT"),
         Some((true, vec![(0, "old.xdf".into()), (0, "A:\\X68\\ZZZ.XDF".into())]))

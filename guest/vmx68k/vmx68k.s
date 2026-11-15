@@ -45,6 +45,8 @@ ITEM_FREQUENCY	.equ	20
 ITEM_BOOT	.equ	21
 ITEM_UNLIMITED	.equ	26
 ITEM_FULL_PATTERN .equ	28
+ITEM_CRT_4_3	.equ	30
+ITEM_VSYNC	.equ	32
 ITEM_DETAILS	.equ	14
 DRIVE_DIALOG_ID	.equ	2		; The ドライブの詳細 dialog
 ITEM_FEWER	.equ	3		; Its - and + buttons and the number of drives
@@ -161,7 +163,9 @@ setup_is_default:	.ds.b	1	; the setup is DEFAULT.V68
 start_config:	.ds.b	1
 joypad_capturing: .ds.b	1		; 0 = idle, 1..6 = capturing button index
 joypad_shift_prev: .ds.b 1
+crt_enabled:	.ds.b	1		; 0 = monitor settings off, 1 = on
 crt_aspect:	.ds.b	1		; 0 = 1:1 pixel, 1 = 4:3 CRT aspect ratio
+vsync_enabled:	.ds.b	1		; 0 = free-running guest clock, 1 = sync to host VSync
 	.even
 joypad_rec:
 joypad_enabled:	.ds.b	1
@@ -371,6 +375,12 @@ vm_open_sram:
 	beq.s	vm_graphics_opened
 	bsr	apply_graphics
 vm_graphics_opened:
+	tst.b	crt_enabled(a5)
+	beq.s	vm_vsync_opened
+	tst.b	vsync_enabled(a5)
+	beq.s	vm_vsync_opened
+	bsr	send_vsync
+vm_vsync_opened:
 	tst.b	joypad_enabled(a5)
 	bne.s	vm_joypad_sync
 	tst.b	joypad_loaded(a5)
@@ -515,9 +525,19 @@ track_check_crt:
 	addq.l	#8, sp
 	tst.b	d0
 	beq.s	track_check_fd
-	eori.b	#1, crt_aspect(a5)
+	eori.b	#1, crt_enabled(a5)
+	eori.w	#16, vm_graphics(a5)
+	bsr	draw_bar
+	tst.b	crt_aspect(a5)
+	beq.s	track_crt_no_resize
 	move.l	vm_native_size(a5), d1
 	bsr	resize_window
+track_crt_no_resize:
+	tst.b	vsync_enabled(a5)
+	beq.s	track_crt_no_vsync
+	bsr	send_vsync
+track_crt_no_vsync:
+	bsr	save_setup
 	bra	event_loop
 track_check_fd:
 	bsr	fd_hit
@@ -563,8 +583,17 @@ right_check_joypad:
 	SXCALL	GMPtInRect		; $A156
 	addq.l	#8, sp
 	tst.b	d0
-	beq	event_loop
+	beq.s	right_check_crt
 	bsr	joypad_menu
+	bra	event_loop
+right_check_crt:
+	move.l	d4, -(sp)
+	pea	crt_icon_rect(pc)
+	SXCALL	GMPtInRect		; $A156
+	addq.l	#8, sp
+	tst.b	d0
+	beq	event_loop
+	bsr	crt_menu
 	bra	event_loop
 
 quit_app:
@@ -657,7 +686,7 @@ draw_joypad_icon:
 	lea	joypad_icon_rect(pc), a1
 	bsr.s	draw_plot_icon
 	move.w	#CRT_OFF_ICON_ID, d0
-	tst.b	crt_aspect(a5)
+	tst.b	crt_enabled(a5)
 	beq.s	draw_crt_icon
 	move.w	#CRT_ON_ICON_ID, d0
 draw_crt_icon:
@@ -910,8 +939,17 @@ load_setup_graphics:
 	beq.s	load_setup_joypad
 	movea.l	(a0),a0
 	move.w	(a0),d0
-	andi.w	#3,d0
+	andi.w	#31,d0
 	move.w	d0,vm_graphics(a5)
+	btst	#2,d0
+	sne	crt_aspect(a5)
+	andi.b	#1,crt_aspect(a5)
+	btst	#3,d0
+	sne	vsync_enabled(a5)
+	andi.b	#1,vsync_enabled(a5)
+	btst	#4,d0
+	sne	crt_enabled(a5)
+	andi.b	#1,crt_enabled(a5)
 load_setup_joypad:
 	clr.w	-(sp)
 	move.l	#'V68J',-(sp)
@@ -1078,6 +1116,8 @@ resize_window:
 	move.l	d1, (a1)
 	move.w	d1, d2			; height
 	swap	d1			; width
+	tst.b	crt_enabled(a5)
+	beq.s	resize_crt_done
 	tst.b	crt_aspect(a5)
 	beq.s	resize_crt_done
 	move.w	d1, d0
@@ -1458,6 +1498,10 @@ config_dialog_loop:
 	beq	config_unlimited
 	cmpi.w	#ITEM_FULL_PATTERN,d0
 	beq	config_full_pattern
+	cmpi.w	#ITEM_CRT_4_3,d0
+	beq	config_crt_4_3
+	cmpi.w	#ITEM_VSYNC,d0
+	beq	config_vsync
 	cmpi.w	#ITEM_MEMORY, d0
 	bne	config_dialog_loop
 	moveq.l	#ITEM_MEMORY, d0
@@ -1485,6 +1529,12 @@ config_unlimited:
 	bra.s	config_graphics_changed
 config_full_pattern:
 	eori.w	#2,cfg_graphics(a5)
+	bra.s	config_graphics_changed
+config_crt_4_3:
+	eori.w	#4,cfg_graphics(a5)
+	bra.s	config_graphics_changed
+config_vsync:
+	eori.w	#8,cfg_graphics(a5)
 config_graphics_changed:
 	bsr	config_graphics_draw
 	bra	config_dialog_loop
@@ -1507,6 +1557,24 @@ config_graphics_draw:
 	move.l	dlg_hdl(a5),-(sp)
 	SXCALL	CMValueSet
 	addq.l	#6,sp
+	moveq.l	#ITEM_CRT_4_3,d0
+	bsr	dlg_item
+	move.w	cfg_graphics(a5),d1
+	lsr.w	#2,d1
+	andi.w	#1,d1
+	move.w	d1,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
+	moveq.l	#ITEM_VSYNC,d0
+	bsr	dlg_item
+	move.w	cfg_graphics(a5),d1
+	lsr.w	#3,d1
+	andi.w	#1,d1
+	move.w	d1,-(sp)
+	move.l	dlg_hdl(a5),-(sp)
+	SXCALL	CMValueSet
+	addq.l	#6,sp
 	movem.l	(sp)+,d0-d2/a0-a1
 	rts
 apply_graphics:
@@ -1515,7 +1583,25 @@ apply_graphics:
 	move.l	vm_id(a5),d1
 	moveq.l	#0,d2
 	move.w	vm_graphics(a5),d2
+	andi.w	#3,d2
 	bsr	msx68k_call
+	move.w	vm_graphics(a5),d0
+	btst	#4,d0
+	sne	crt_enabled(a5)
+	andi.b	#1,crt_enabled(a5)
+	btst	#2,d0
+	sne	crt_aspect(a5)
+	andi.b	#1,crt_aspect(a5)
+	move.b	vsync_enabled(a5),d1
+	btst	#3,d0
+	sne	vsync_enabled(a5)
+	andi.b	#1,vsync_enabled(a5)
+	cmp.b	vsync_enabled(a5),d1
+	beq.s	apply_graphics_done
+	tst.b	crt_enabled(a5)
+	beq.s	apply_graphics_done
+	bsr	send_vsync
+apply_graphics_done:
 	movem.l	(sp)+,d0-d2/a0-a1
 	rts
 config_dialog_shared:
@@ -1585,7 +1671,15 @@ config_commit:
 	move.w	dlg_ram(a5),vm_ram(a5)
 	move.w	cfg_speed(a5),vm_speed(a5)
 	move.w	cfg_graphics(a5),vm_graphics(a5)
+	move.b	crt_aspect(a5),d3
 	bsr	apply_graphics
+	cmp.b	crt_aspect(a5),d3
+	beq.s	config_no_resize
+	tst.b	crt_enabled(a5)
+	beq.s	config_no_resize
+	move.l	vm_native_size(a5),d1
+	bsr	resize_window
+config_no_resize:
 	bsr	config_commit_boot
 	bsr	save_setup
 	move.w	vm_cpu(a5),d0
@@ -4325,6 +4419,8 @@ config_labels:
 	.dc.b	23,8,$8B,$4E,$93,$AE,$91,$95,$92,$75
 	.dc.b	27,24,$83,$58,$83,$76,$83,$89,$83,$43,$83,$67,$82,$CC,$8D,$73,$90,$A7,$8C,$C0,$82,$F0,$89,$F0,$8F,$9C
 	.dc.b	29,22,$83,$70,$83,$5E,$81,$5B,$83,$93,$52,$41,$4D,$82,$F0,$32,$94,$7B,$82,$C9,$8A,$67,$92,$A3
+	.dc.b	31,9,$34,$3A,$33,$82,$F0,$88,$DB,$8E,$9D
+	.dc.b	33,9,'V','S','Y','N','C',$93,$AF,$8A,$FA
 	.dc.b	0
 new_common_labels:
 	.dc.b	7,4,$90,$56,$8B,$4B
@@ -4419,13 +4515,103 @@ joypad_menu:
 	addq.l	#4, sp
 	cmpi.l	#1, d1
 	bne.s	joypad_menu_done
-	bsr.s	joypad_dialog
+	bsr	joypad_dialog
 joypad_menu_done:
 	movem.l	(sp)+, d0-d1/a0/a2
 	rts
 
 joypad_menu_str:
 	.dc.b	$8A, $84, $93, $96, $2E, $2E, $2E, 0
+	.even
+
+send_vsync:
+	movem.l	d0-d2, -(sp)
+	moveq.l	#MSX68K_FN_VM_VSYNC, d0
+	move.l	vm_id(a5), d1
+	moveq.l	#0, d2
+	tst.b	crt_enabled(a5)
+	beq.s	send_vsync_call
+	move.b	vsync_enabled(a5), d2
+send_vsync_call:
+	bsr	msx68k_call
+	movem.l	(sp)+, d0-d2
+	rts
+
+crt_menu:
+	movem.l	d0-d1/a0-a2, -(sp)
+	tst.b	library_open(a5)
+	beq	crt_menu_done
+	lea	menu_string(a5), a1
+	tst.b	crt_enabled(a5)
+	bne.s	crt_menu_43_en
+	move.b	#'~', (a1)+
+crt_menu_43_en:
+	tst.b	crt_aspect(a5)
+	beq.s	crt_menu_copy_43
+	move.b	#'!', (a1)+
+crt_menu_copy_43:
+	lea	crt_menu_43_str(pc), a0
+crt_menu_loop_43:
+	move.b	(a0)+, d0
+	beq.s	crt_menu_sep
+	move.b	d0, (a1)+
+	bra.s	crt_menu_loop_43
+crt_menu_sep:
+	move.b	#',', (a1)+
+	tst.b	crt_enabled(a5)
+	bne.s	crt_menu_vsync_en
+	move.b	#'~', (a1)+
+crt_menu_vsync_en:
+	tst.b	vsync_enabled(a5)
+	beq.s	crt_menu_copy_vsync
+	move.b	#'!', (a1)+
+crt_menu_copy_vsync:
+	lea	crt_menu_vsync_str(pc), a0
+crt_menu_loop_vsync:
+	move.b	(a0)+, (a1)+
+	bne.s	crt_menu_loop_vsync
+
+	clr.w	-(sp)			; MI_PLN
+	pea	menu_string(a5)
+	clr.l	-(sp)			; a new record
+	SXCALL	MNConvert2		; $A26B
+	lea	10(sp), sp
+	move.l	a0, d0
+	beq.s	crt_menu_done
+	movea.l	a0, a2
+	move.l	event_where(a5), -(sp)
+	move.l	a2, -(sp)
+	SXCALL	MNSelect		; $A268
+	addq.l	#8, sp
+	move.l	d0, d1
+	move.l	a2, -(sp)
+	SXCALL	MMHdlDispose		; $A038
+	addq.l	#4, sp
+	tst.b	crt_enabled(a5)
+	beq.s	crt_menu_done
+	cmpi.l	#1, d1
+	bne.s	crt_menu_check_vsync
+	eori.b	#1, crt_aspect(a5)
+	eori.w	#4, vm_graphics(a5)
+	move.l	vm_native_size(a5), d1
+	bsr	resize_window
+	bsr	save_setup
+	bra.s	crt_menu_done
+crt_menu_check_vsync:
+	cmpi.l	#2, d1
+	bne.s	crt_menu_done
+	eori.b	#1, vsync_enabled(a5)
+	eori.w	#8, vm_graphics(a5)
+	bsr	send_vsync
+	bsr	save_setup
+crt_menu_done:
+	movem.l	(sp)+, d0-d1/a0-a2
+	rts
+
+crt_menu_43_str:
+	.dc.b	'4:3', $82, $F0, $88, $DB, $8E, $9D, 0	; 4:3を維持
+crt_menu_vsync_str:
+	.dc.b	'VSYNC', $93, $AF, $8A, $FA, 0		; VSYNC同期
 	.even
 
 joypad_dialog:
