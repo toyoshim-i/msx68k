@@ -254,6 +254,7 @@ struct AppArgs {
     scale: u32,
     resolution: Option<(u32, u32)>,
     fullscreen: bool,
+    vsync: bool,
     gdb_port: Option<u16>,
     /// Host directories mounted as file-level remote drives via `--remote-drive`.
     remote_drives: Vec<PathBuf>,
@@ -292,6 +293,7 @@ impl Default for AppArgs {
             scale: 1,
             resolution: None,
             fullscreen: false,
+            vsync: false,
             gdb_port: None,
             remote_drives: Vec::new(),
         }
@@ -371,6 +373,9 @@ impl AppArgs {
                 }
                 "--fullscreen" | "-f" => {
                     cfg.fullscreen = true;
+                }
+                "--vsync" => {
+                    cfg.vsync = true;
                 }
                 "--gdb" => match args.next().and_then(|s| s.parse::<u16>().ok()) {
                     Some(port) => cfg.gdb_port = Some(port),
@@ -479,6 +484,7 @@ struct GuestVm {
     joypad_latched_frame: u64,
     joypad_sent: u8,
     joypad_frames: Arc<AtomicU64>,
+    vsync: bool,
 }
 
 /// The machine a VM of VMX68K.X is set up as.
@@ -511,6 +517,7 @@ struct Msx68kApp {
     gdb: Option<GdbServer>,
     gpu: Option<GpuWindowState>,
     last_title_update: Instant,
+    last_title: String,
     next_frame_deadline: Instant,
     rendered_frames: u64,
     last_cursor_pos: Option<(f64, f64)>,
@@ -523,6 +530,7 @@ struct Msx68kApp {
     wheel_remainder: (f64, f64),
     last_resolution: (u32, u32),
     last_fullscreen: bool,
+    vsync: bool,
 }
 
 impl Msx68kApp {
@@ -720,6 +728,7 @@ impl Msx68kApp {
         let now = Instant::now();
         // VMs opened by VMX68K.X have the CPU of their setup whatever the primary VM's is.
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
+        let vsync = args.vsync;
         Self {
             args,
             vm,
@@ -732,6 +741,7 @@ impl Msx68kApp {
             gdb,
             gpu: None,
             last_title_update: now,
+            last_title: String::new(),
             next_frame_deadline: now,
             rendered_frames: 0,
             last_cursor_pos: None,
@@ -742,6 +752,7 @@ impl Msx68kApp {
             wheel_remainder: (0.0, 0.0),
             last_resolution: initial_res,
             last_fullscreen: initial_fs,
+            vsync,
         }
     }
 
@@ -902,10 +913,14 @@ impl Msx68kApp {
                     CpuModel::Mc68000 => "68000",
                     CpuModel::Mc68030 => "68030",
                 };
-                gpu.window.set_title(&format!(
-                    "msx68k — X68000 [{cpu_label} {speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led} | PC=${:06X}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F12:Reset)",
-                    self.vm.cpu_state.pc
-                ));
+                let vsync_label = if self.vsync { " | VSync" } else { "" };
+                let title = format!(
+                    "msx68k — X68000 [{cpu_label} {speed_label} | {res_w}x{res_h} | {fdd_led}{scsi_led}{vsync_label}] (F1:10M F2:16M F3:24M F4:Burst F5:Res F6:VSync F12:Reset)"
+                );
+                if title != self.last_title {
+                    gpu.window.set_title(&title);
+                    self.last_title = title;
+                }
                 self.flush_persistent_storage(false);
             }
         }
@@ -923,7 +938,14 @@ impl Msx68kApp {
             }
             mode => {
                 let cpu_mhz = mode.timing_config().cpu_mhz.max(10);
-                FrameBudget::Cycles((cpu_mhz * 1_000_000) / 60)
+                let frame_cycles = (cpu_mhz * 1_000_000) / 60;
+                if self.vsync {
+                    FrameBudget::VSync {
+                        max_cycles: frame_cycles * 2,
+                    }
+                } else {
+                    FrameBudget::Cycles(frame_cycles)
+                }
             }
         }
     }
@@ -1018,18 +1040,21 @@ impl Msx68kApp {
                     // Nothing may wait on the bridge while the old VM's thread stops.
                     self.vm.bus.detach_vm_bridge(id);
                     let old = self.guest_vms.remove(at);
-                    let (window, drives, sram, joypad_enabled, joypad_map) = (
+                    let (window, drives, sram, joypad_enabled, joypad_map, vsync) = (
                         old.window,
                         old.drives,
                         old.sram.clone(),
                         old.joypad_enabled,
                         old.joypad_map,
+                        old.vsync,
                     );
                     drop(old);
                     let machine = GuestMachine { cpu, ram_mb, speed };
                     if let Some(mut guest) = self.start_guest_vm(id, window, drives, machine, sram, custom) {
                         guest.joypad_enabled = joypad_enabled;
                         guest.joypad_map = joypad_map;
+                        guest.vsync = vsync;
+                        guest.thread.set_vsync(vsync || self.vsync);
                         self.guest_vms.push(guest);
                     } else {
                         self.vm.bus.detach_vm_bridge(id);
@@ -1114,6 +1139,12 @@ impl Msx68kApp {
                             guest.joypad_latched = 0;
                             Self::sync_joypad_port_a(guest);
                         }
+                    }
+                }
+                VmEvent::VSync { id, enabled } => {
+                    if let Some(guest) = self.guest_vms.iter_mut().find(|guest| guest.id == id) {
+                        guest.vsync = enabled;
+                        guest.thread.set_vsync(enabled || self.vsync);
                     }
                 }
                 VmEvent::Closed { id } => self.guest_vms.retain(|guest| guest.id != id),
@@ -1291,6 +1322,7 @@ impl Msx68kApp {
             ));
             screen.present(&mut vm.bus);
         });
+        thread.set_vsync(self.vsync);
         println!("Started VM {id} for window ${window:06X}");
         Some(GuestVm {
             id,
@@ -1319,6 +1351,7 @@ impl Msx68kApp {
             joypad_latched_frame: 0,
             joypad_sent: 0xFF,
             joypad_frames,
+            vsync: false,
         })
     }
 
@@ -1581,6 +1614,17 @@ impl ApplicationHandler for Msx68kApp {
                                 println!("F5: Requested resolution {}x{}", next_w, next_h);
                                 return;
                             }
+                            KeyCode::F6 => {
+                                self.vsync = !self.vsync;
+                                for guest in &self.guest_vms {
+                                    guest.thread.set_vsync(guest.vsync || self.vsync);
+                                }
+                                println!(
+                                    "F6: Host VSync lock {}",
+                                    if self.vsync { "ON" } else { "OFF" }
+                                );
+                                return;
+                            }
                             KeyCode::F12 => {
                                 self.flush_persistent_storage(true);
                                 let _ = self.vm.reset();
@@ -1611,7 +1655,10 @@ impl ApplicationHandler for Msx68kApp {
         let now = Instant::now();
         let frame_interval = Duration::from_micros(16_667); // ~60 Hz
         if now >= self.next_frame_deadline {
-            self.next_frame_deadline = now + frame_interval;
+            self.next_frame_deadline += frame_interval;
+            if now >= self.next_frame_deadline + frame_interval {
+                self.next_frame_deadline = now + frame_interval;
+            }
             // Run and present here rather than on redraw requests, which a compositor may withhold
             // indefinitely, for example while the window is covered.
             self.step_vm_one_frame();

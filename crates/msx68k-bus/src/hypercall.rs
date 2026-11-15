@@ -111,6 +111,8 @@ pub enum AppFunction {
     VmInterrupt = 18,
     /// Configures keyboard-to-joypad mapping (`D2.L` bit 0 = enabled, `A0.L` = 6 scancodes).
     VmJoypad = 19,
+    /// Configures host-VSync pacing (`D2.L` bit 0 = enabled) for VM `D1.L`.
+    VmVsync = 20,
 }
 
 impl AppFunction {
@@ -136,6 +138,7 @@ impl AppFunction {
             17 => Some(Self::VmReset),
             18 => Some(Self::VmInterrupt),
             19 => Some(Self::VmJoypad),
+            20 => Some(Self::VmVsync),
             _ => None,
         }
     }
@@ -233,6 +236,7 @@ impl X68kBus {
                 Some(AppFunction::VmReset) => self.hypercall_vm_reset(state),
                 Some(AppFunction::VmInterrupt) => self.hypercall_vm_interrupt(state),
                 Some(AppFunction::VmJoypad) => self.hypercall_vm_joypad(state),
+                Some(AppFunction::VmVsync) => self.hypercall_vm_vsync(state),
                 None => TrapResult::Unhandled,
             },
         }

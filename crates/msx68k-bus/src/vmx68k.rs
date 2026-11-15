@@ -422,6 +422,8 @@ pub enum VmEvent {
         /// Scancodes for `[Up, Down, Left, Right, A, B]`.
         map: [u8; 6],
     },
+    /// VMX68K.SX toggled host-VSync pacing for VM `id`.
+    VSync { id: u32, enabled: bool },
     /// The VM was closed.
     Closed { id: u32 },
 }
@@ -1625,6 +1627,19 @@ impl X68kBus {
         }
         state.d[0] = if self.vm_windows.open.iter().any(|open| open.id == id) {
             self.vm_windows.events.push(VmEvent::Joypad { id, enabled, map });
+            0
+        } else {
+            u32::MAX
+        };
+        TrapResult::Handled { extra_cycles: 0 }
+    }
+
+    /// `VmVsync`: sets host-VSync pacing (`D2.L` bit 0) for VM `D1.L`. Returns 0 or -1.
+    pub(crate) fn hypercall_vm_vsync(&mut self, state: &mut CpuState) -> TrapResult {
+        let id = state.d[1];
+        let enabled = (state.d[2] & 1) != 0;
+        state.d[0] = if self.vm_windows.open.iter().any(|open| open.id == id) {
+            self.vm_windows.events.push(VmEvent::VSync { id, enabled });
             0
         } else {
             u32::MAX

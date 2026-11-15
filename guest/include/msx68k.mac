@@ -38,6 +38,7 @@ MSX68K_FN_VM_VIRUS	.equ	16	; D1 action (0 detect, 1 repair forceboot, 2 repair c
 MSX68K_FN_VM_RESET	.equ	17	; D1.L = VM ID; resets the VM
 MSX68K_FN_VM_INTERRUPT	.equ	18	; D1.L = VM ID; triggers a level-7 NMI on the VM
 MSX68K_FN_VM_JOYPAD	.equ	19	; D1.L = VM ID, D2.L = enabled (0/1), A0.L = 6 scancodes
+MSX68K_FN_VM_VSYNC	.equ	20	; D1.L = VM ID, D2.L = enabled (0/1)
 
 * Expands msx68k_call (needs doscall.mac): calls function D0.L of the msx68k entry with D1-D3
 * in supervisor mode, through DOS _SUPER_JSR, and returns its D0-D3, or D0.L = -1 when the

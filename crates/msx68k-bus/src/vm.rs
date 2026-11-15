@@ -280,6 +280,8 @@ pub enum FrameBudget {
     RealTime { deadline: Instant },
     /// A CPU clock cycle target ([`X68kVm::run_cycles`]).
     Cycles(u32),
+    /// Run until the guest CRTC completes one vertical blank, bounded by `max_cycles`.
+    VSync { max_cycles: u32 },
 }
 
 /// An X68000 Virtual Machine instance supporting seamless switching between
@@ -551,17 +553,21 @@ impl X68kVm {
             );
             return 0;
         }
-        with_policy!(self, run_cycles_with::<_>(target_cycles, trap_handler))
+        with_policy!(self, run_cycles_until_with::<_>(target_cycles, false, trap_handler))
     }
 
-    fn run_cycles_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
+    fn run_cycles_until_with<P: CpuPolicy, T: TrapHandler<X68kBus>>(
         &mut self,
         target_cycles: u32,
+        stop_on_vblank: bool,
         trap_handler: &mut T,
     ) -> u32 {
         let mut core = CpuCore::<P>::from_state(std::mem::take(&mut self.cpu_state));
+        let start_frame = self.bus.crtc.frame_count();
         let mut elapsed = 0u32;
-        while elapsed < target_cycles {
+        while elapsed < target_cycles
+            && (!stop_on_vblank || self.bus.crtc.frame_count() == start_frame)
+        {
             core.state.set_ipl(self.bus.highest_pending_ipl());
             let out = core.step(&mut self.bus, trap_handler);
             let ticks = self.peripheral_ticks::<P>(out);
@@ -576,6 +582,22 @@ impl X68kVm {
         core.state.set_ipl(self.bus.highest_pending_ipl());
         self.cpu_state = core.into_state();
         elapsed
+    }
+
+    /// Executes until the guest CRTC completes one vertical blank or `max_cycles` CPU clock cycles elapse.
+    pub fn run_until_vblank(&mut self, max_cycles: u32) -> u32 {
+        let mut handler = BusTrapHandler;
+        if self.is_running_burst() {
+            with_policy!(
+                self,
+                run_steps_with::<_>(max_cycles as usize, &mut handler)
+            );
+            return 0;
+        }
+        with_policy!(
+            self,
+            run_cycles_until_with::<_>(max_cycles, true, &mut handler)
+        )
     }
 
     /// Executes until at least `target_cycles` CPU clock cycles have elapsed with the default [`BusTrapHandler`].
@@ -701,6 +723,9 @@ impl X68kVm {
             FrameBudget::Cycles(cycles) => {
                 self.run_cycles(cycles);
             }
+            FrameBudget::VSync { max_cycles } => {
+                self.run_until_vblank(max_cycles);
+            }
         }
     }
 }
@@ -785,5 +810,22 @@ mod tests {
             paid += clock.ticks_due(later) as u64;
         }
         assert_eq!(paid, BURST_MAX_BACKLOG_TICKS);
+    }
+
+    #[test]
+    fn vsync_budget_stops_at_next_vblank() {
+        use msx68k_cpu::Bus;
+        let mut vm = X68kVm::new(VmConfig::app_vm().with_speed_mode(CpuSpeedMode::Mhz10));
+        vm.cpu_state.pc = 0x2000;
+        vm.cpu_state.sr = 0x2700;
+        vm.bus.write_u16(0x2000, 0x60fe, true).unwrap(); // BRA.S self
+
+        let start_frame = vm.bus.crtc.frame_count();
+        vm.run_frame(FrameBudget::VSync {
+            max_cycles: 400_000,
+        });
+        assert_eq!(vm.bus.crtc.frame_count(), start_frame + 1);
+        // 55.46 Hz at 10 MHz is ~180,300 cycles, well under the 400,000-cycle cap.
+        assert!(vm.cpu_state.total_cycles < 250_000);
     }
 }

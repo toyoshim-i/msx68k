@@ -123,6 +123,7 @@ impl Registers for M68000Registers {
 struct FrameProgress {
     instructions: usize,
     elapsed_cycles: u32,
+    start_frame: Option<u64>,
 }
 
 /// Debugger state owned by the VM.
@@ -212,7 +213,9 @@ impl X68kVm {
                     now >= deadline
                 }
             }
-            FrameBudget::Cycles(target) if running_burst => {
+            FrameBudget::Cycles(target) | FrameBudget::VSync { max_cycles: target }
+                if running_burst =>
+            {
                 self.bus.advance_peripherals(if stopped { 64 } else { 8 });
                 frame.instructions >= target as usize
             }
@@ -223,6 +226,14 @@ impl X68kVm {
                 self.bus
                     .advance_peripherals((cycles.saturating_mul(10) / cpu_mhz).max(1));
                 done
+            }
+            FrameBudget::VSync { max_cycles } => {
+                let start_frame = *frame.start_frame.get_or_insert(self.bus.crtc.frame_count());
+                frame.elapsed_cycles = frame.elapsed_cycles.saturating_add(cycles);
+                let cpu_mhz = self.bus.timing_config().cpu_mhz.max(10);
+                self.bus
+                    .advance_peripherals((cycles.saturating_mul(10) / cpu_mhz).max(1));
+                self.bus.crtc.frame_count() != start_frame || frame.elapsed_cycles >= max_cycles
             }
         };
         if done {

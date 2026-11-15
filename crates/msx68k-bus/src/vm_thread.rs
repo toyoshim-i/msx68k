@@ -5,7 +5,9 @@
 //! carries out requests from other threads, which get at the VM only that way, and hands the VM
 //! to a vertical blank hook after each frame in which the VM's CRTC entered a vertical blank.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -33,6 +35,7 @@ type VblankHook = Box<dyn FnMut(&mut X68kVm) + Send>;
 pub struct VmThread {
     requests: Option<Sender<Request>>,
     thread: Option<JoinHandle<X68kVm>>,
+    vsync: Arc<AtomicBool>,
 }
 
 impl VmThread {
@@ -50,14 +53,22 @@ impl VmThread {
     ) -> Self {
         let (requests, queue) = mpsc::channel();
         let on_vblank: VblankHook = Box::new(on_vblank);
+        let vsync = Arc::new(AtomicBool::new(false));
+        let run_vsync = Arc::clone(&vsync);
         let thread = thread::Builder::new()
             .name("msx68k-vm".into())
-            .spawn(move || run(vm, pace, queue, on_vblank))
+            .spawn(move || run(vm, pace, queue, run_vsync, on_vblank))
             .expect("the VM thread must start");
         Self {
             requests: Some(requests),
             thread: Some(thread),
+            vsync,
         }
+    }
+
+    /// Enables or disables locking each host frame to one guest V-Blank.
+    pub fn set_vsync(&self, enabled: bool) {
+        self.vsync.store(enabled, Ordering::Relaxed);
     }
 
     /// Runs `f` on the VM between two frames and returns its result.
@@ -106,7 +117,13 @@ impl Drop for VmThread {
 }
 
 /// Runs `vm` frame by frame until every sender of `queue` is gone, then returns it.
-fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: VblankHook) -> X68kVm {
+fn run(
+    mut vm: X68kVm,
+    pace: Pace,
+    queue: Receiver<Request>,
+    vsync: Arc<AtomicBool>,
+    mut on_vblank: VblankHook,
+) -> X68kVm {
     let start = Instant::now();
     let mut frames = 0u32;
     loop {
@@ -128,6 +145,11 @@ fn run(mut vm: X68kVm, pace: Pace, queue: Receiver<Request>, mut on_vblank: Vbla
                 Pace::Unthrottled => Instant::now() + FRAME,
             };
             vm.run_frame(FrameBudget::RealTime { deadline });
+        } else if vsync.load(Ordering::Relaxed) {
+            let mhz = vm.timing_config().cpu_mhz.max(1);
+            vm.run_frame(FrameBudget::VSync {
+                max_cycles: (mhz * 1_000_000 / 60) * 2,
+            });
         } else {
             let mhz = vm.timing_config().cpu_mhz.max(1);
             vm.run_cycles(mhz * 1_000_000 / 60);
