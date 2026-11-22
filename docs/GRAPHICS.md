@@ -1,8 +1,13 @@
 # Graphics Design and Plan
 
-The CPU manages VRAM, registers and emulated time. The GPU composes pixels through
-one shared WGSL implementation for the primary VM and VMX screens. The CPU
-compositor is a validation reference. See [VMX68K](VMX68K.md) for screen ownership
+The CPU manages VRAM, registers, emulated time and compact scanline/span
+metadata. Pixel rasterization and composition run on the GPU through two
+shader-generation backends selected via `RendererConfig` (`ShaderGeneration`
+and `PixelFormat`): a single-pass `16×16` tile Compute pipeline (`wgpu-backend`,
+shared across primary and VMX screens) and a headless `EGL + GLES 2.0` fallback
+(`gles2-backend`) for environments without Compute shaders. The CPU compositor
+(`render_bus_frame_cpu` / `ShaderGeneration::Cpu`) serves as a validation
+reference and software fallback. See [VMX68K](VMX68K.md) for screen ownership
 and threading, and [TESTING](TESTING.md) for the test workflow.
 
 ## Current capabilities and remaining work
@@ -13,8 +18,9 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
    control changes. Line-start address fetch is separate from horizontal display
    sampling. Mode-specific fetch timing still needs validation, and mid-frame
    text/graphics VRAM writes need a separate history.
-3. Implemented BG/PCG and sprite palette-code line buffering: 8-dot BG0/BG1,
-   16-dot BG0, 128 sprite attributes, and a 32-sprite scanline limit.
+3. Implemented GPU-evaluated BG/PCG and sprite composition via active-span
+   coalescing (`CynthiaFrame`): 8-dot BG0/BG1, 16-dot BG0, 128 sprite
+   attributes, a 32-sprite scanline limit, and 128-byte PCG/map block versioning.
 4. Special priority, half transparency, interlace and precise boundary timing.
 
 ## Physical GVRAM and CPU views
@@ -82,10 +88,13 @@ When all display planes are off, capture records only the transition to blank
 and skips output register and palette snapshots. Address fetch continues while
 blanked. Re-enabling display uses the fetched scroll and latest display controls. A fully blank frame needs no palette upload.
 
-The GPU receives a row-to-state index and register/palette records at changes.
-Static frames retain the fixed-size palette upload path, while VM screens keep
-physical dirty-page VRAM uploads. Native extended TVRAM does not use hardware
-scanout timing and retains its existing composition path.
+The GPU receives a row-to-state index, deduplicated register records, and
+independent 16-bit palette snapshots (`RasterFrame.palettes`) rather than a
+palette table per raster line. Primary rendering (`render_bus_frame_dirty` /
+`render_bus_to_surface_view_dirty`), headless `Gles2Compositor`, and `VmScreen`
+all consume physical `DirtyVramPages` for incremental VRAM page uploads while
+restoring software cursor overlay changes cleanly. Native extended TVRAM does not
+use hardware scanout timing and retains its existing layout.
 
 Peripheral advancement visits horizontal-sync edges, line boundaries and vertical
 display transitions even in a large time batch. Passing over the raster-IRQ line
@@ -107,25 +116,29 @@ its coordinates with the CRTC display origin. The visible BG line is limited to
 512 pixels. Mixed-resolution scaling, interlace and reserved modes are not yet
 validated.
 
-At horizontal display start, scanout fetches the next physical raster's BG
-patterns into two independent palette-code line buffers. The last blanking
-raster prepares the first active row. This is an explicit scheduling
-approximation; mode-specific hardware fetch cycles remain to be validated.
-Both buffers progress with output disabled. BG enable bits and the controller's
-master display gate are evaluated for the displayed row, independently of fetch.
-A zero pattern nibble is transparent regardless of the palette block.
+At horizontal display start, scanout captures the next physical raster's BG
+control, scroll, origin, and 128-byte PCG/tilemap block references into an
+immutable per-row `BgRowState` rather than expanding a CPU pixel buffer. The
+last blanking raster prepares the first active row. This is an explicit
+scheduling approximation; mode-specific hardware fetch cycles remain to be
+validated. Tracking continues while output is disabled; BG enable bits and the
+controller's master display gate are evaluated at composition time. A zero
+pattern nibble is transparent regardless of the palette block.
 
-The completed frame retains fetched codes, so subsequent PCG/map writes cannot
-replace already fetched pixels. Color conversion uses that output row's shared
-text/sprite palette. BG0 appears above BG1; their combined output participates
-in VICON text/sprite priority and graphics insertion. Special palette-zero
-interactions remain future work.
+The completed frame versions modified 128-byte PCG and tilemap blocks (`pcg_blocks`
+and `pcg_tables`), so subsequent PCG or map writes never alter already-fetched
+rows. Color conversion uses that output row's shared text/sprite palette. BG0
+appears above BG1; their combined output participates in VICON text/sprite
+priority and graphics insertion. Special palette-zero interactions remain future
+work.
 
-GPU input packs four BG codes per word with a fixed 512-pixel row stride and
-bounded lookup. Blank BG frames add no code upload. The main display and VM
-textures share composition, including BG opacity for VM-layer visibility.
-Before a complete scanout history exists, rendering samples current BG memory;
-native extended TVRAM retains its existing path.
+Both GPU generations evaluate BG0/BG1 directly on the GPU without an
+intermediate 512-pixel code buffer: the Compute backend samples `pcg_blocks`
+within a single `16×16` tile workgroup pass, while the GLES 2.0 backend draws
+full-screen BG0/BG1 quads at depth keys `258` and `129` into the offscreen
+CYNTHIA pass. Blank BG frames add no CYNTHIA upload. Before a complete scanout
+history exists, capture helpers synthesize current BG/sprite state; native
+extended TVRAM retains its existing path.
 
 ## Sprite scanout
 
@@ -147,14 +160,38 @@ ordering is sprite priority 3, BG0, sprite priority 2, BG1, sprite priority 1.
 BG enable bits are applied at this final step. The controller master gate and
 VICON sprite/BG gate suppress output without stopping internal fetch.
 
-Sprite attribute selection and pattern expansion prepare two physical rasters
-ahead at horizontal display start; BG expansion prepares one raster ahead.
-These are separate scheduling stages within the current timing approximation,
-not verified per-mode hardware cycle counts. Startup needs the preceding
-blanking rasters to fill the stages. Reset clears pending buffers. Fetched
-sprite codes and attributes cannot be replaced by subsequent RAM writes, while
-the displayed row still uses its own palette snapshot. Sprite/BG codes share the
-existing packed GPU input and completed-frame history.
+Sprite attribute selection and PCG block latching prepare two physical rasters
+ahead at horizontal display start; BG state prepares one raster ahead. Using an
+incremental 128-bit scanline membership index (`CynthiaTracker`) and block
+versioning, vertically adjacent rows with identical visibility, 32-sprite
+admission, coordinates, attributes, and PCG blocks coalesce into `16×h`
+`SpriteSpan` records (`CynthiaFrame.spans`). Startup needs the preceding
+blanking rasters to fill the stages, and reset clears pending rings. Latched
+sprite attributes and versioned 128-byte PCG blocks cannot be replaced by later
+RAM writes, while each displayed row uses its own palette snapshot.
+
+## Shader generations and embedder configuration
+
+`msx68k-vicon` exposes `ViconCompositor` configured by `RendererConfig`
+(`ShaderGeneration::{Auto, Compute, Gles2, Cpu}`, `max_width`, `max_height`,
+and `PixelFormat::{Rgba8, Rgb565}`) behind optional cargo features
+(`wgpu-backend`, `gles2-backend`) with hardware/environment detection isolated
+from core emulation:
+
+- **Compute generation (`wgpu-backend`)**: Sorts `SpriteSpan`s into `16×16` tile
+  bins (`O(S)` bucket sort) and runs a single-pass `16×16` workgroup Compute
+  shader evaluating CYNTHIA (`SP3 → BG0 → SP2 → BG1 → SP1`), TVRAM, GVRAM,
+  palettes, and contrast in one pass with zero intermediate fullscreen code
+  textures.
+- **GLES 2.0 generation (`gles2-backend`)**: Dynamically loads `libEGL.so.1` and
+  `libGLESv2.so.2` for headless `EGL + GLES 2.0` two-pass composition: Pass 1
+  rasterizes coalesced `16×h` sprite span quads and BG0/BG1 depth-tested planes
+  into a depth-buffered offscreen FBO, and Pass 2 composites TVRAM, GVRAM,
+  CYNTHIA, and palettes within an 8-sampler budget and `mediump`-safe standard
+  coordinates.
+- **CPU reference (`ShaderGeneration::Cpu`)**: Evaluates row-cached CYNTHIA
+  scanlines (`CynthiaFrame::rasterize_row`) and VICON priority rules for testing
+  and fallback.
 
 ## Dynamic sprite options
 
@@ -233,5 +270,5 @@ interlace and special effects remain outside the current scope.
 
 ```sh
 cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test sprite --test raster -- --test-threads=1
-cargo test --release -p msx68k-vicon --test graphics_modes --test raster -- --test-threads=1
+cargo test --release -p msx68k-vicon --test graphics_modes --test raster --test shader_generations -- --test-threads=1
 ```

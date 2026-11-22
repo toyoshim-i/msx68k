@@ -7,11 +7,13 @@ authors.workspace = true
 description = "X68000 VICON GPU compositor and TVRAM/GVRAM/Palette renderer"
 
 [features]
-default = ["wgpu-backend"]
+default = ["wgpu-backend", "gles2-backend"]
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
+gles2-backend = ["dep:libloading"]
 
 [dependencies]
 msx68k-bus = { path = "../msx68k-bus" }
 bytemuck = { version = "1.18", features = ["derive"] }
 wgpu = { version = "24", optional = true }
 pollster = { version = "0.4", optional = true }
+libloading = { version = "0.8", optional = true }

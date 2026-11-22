@@ -11,6 +11,8 @@
 //! - [`decode_tvram_ank_lines`]: X68000 CGROM (`$F3A800`, 8×16 ANK) glyph recognizer.
 
 pub mod config;
+#[cfg(feature = "gles2-backend")]
+pub mod gles2;
 mod raster;
 #[cfg(feature = "wgpu-backend")]
 mod vm_screen;
@@ -88,24 +90,64 @@ pub struct ViconCompositor {
     generation: ShaderGeneration,
     #[cfg(feature = "wgpu-backend")]
     wgpu: Option<ViconGpuCompositor>,
+    #[cfg(feature = "gles2-backend")]
+    gles2: Option<gles2::Gles2Compositor>,
 }
 
 impl ViconCompositor {
     /// Creates a compositor configured by `config`.
     pub fn new(config: RendererConfig) -> Self {
         match config.generation {
-            ShaderGeneration::Auto | ShaderGeneration::Compute => {
+            ShaderGeneration::Auto => {
                 #[cfg(feature = "wgpu-backend")]
                 if let Some(gpu) = ViconGpuCompositor::new_with_config(config) {
                     return Self {
                         config,
                         generation: ShaderGeneration::Compute,
                         wgpu: Some(gpu),
+                        #[cfg(feature = "gles2-backend")]
+                        gles2: None,
+                    };
+                }
+                #[cfg(feature = "gles2-backend")]
+                if let Some(es2) = gles2::Gles2Compositor::new_with_config(config) {
+                    return Self {
+                        config,
+                        generation: ShaderGeneration::Gles2,
+                        #[cfg(feature = "wgpu-backend")]
+                        wgpu: None,
+                        gles2: Some(es2),
                     };
                 }
                 Self::cpu(config)
             }
-            ShaderGeneration::Gles2 | ShaderGeneration::Cpu => Self::cpu(config),
+            ShaderGeneration::Compute => {
+                #[cfg(feature = "wgpu-backend")]
+                if let Some(gpu) = ViconGpuCompositor::new_with_config(config) {
+                    return Self {
+                        config,
+                        generation: ShaderGeneration::Compute,
+                        wgpu: Some(gpu),
+                        #[cfg(feature = "gles2-backend")]
+                        gles2: None,
+                    };
+                }
+                Self::cpu(config)
+            }
+            ShaderGeneration::Gles2 => {
+                #[cfg(feature = "gles2-backend")]
+                if let Some(es2) = gles2::Gles2Compositor::new_with_config(config) {
+                    return Self {
+                        config,
+                        generation: ShaderGeneration::Gles2,
+                        #[cfg(feature = "wgpu-backend")]
+                        wgpu: None,
+                        gles2: Some(es2),
+                    };
+                }
+                Self::cpu(config)
+            }
+            ShaderGeneration::Cpu => Self::cpu(config),
         }
     }
 
@@ -115,6 +157,8 @@ impl ViconCompositor {
             generation: ShaderGeneration::Cpu,
             #[cfg(feature = "wgpu-backend")]
             wgpu: None,
+            #[cfg(feature = "gles2-backend")]
+            gles2: None,
         }
     }
 
@@ -136,6 +180,10 @@ impl ViconCompositor {
         if let Some(gpu) = self.wgpu.as_mut() {
             return gpu.render_bus_frame_dirty(bus);
         }
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.render_bus_frame_dirty(bus);
+        }
         render_bus_frame_cpu(bus)
     }
 
@@ -144,6 +192,10 @@ impl ViconCompositor {
         #[cfg(feature = "wgpu-backend")]
         if let Some(gpu) = self.wgpu.as_mut() {
             return gpu.render_bus_frame(bus);
+        }
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.render_bus_frame(bus);
         }
         render_bus_frame_cpu(bus)
     }
