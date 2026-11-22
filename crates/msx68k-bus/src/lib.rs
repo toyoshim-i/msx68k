@@ -15,6 +15,7 @@ pub mod human_fs;
 pub mod hypercall;
 pub mod mfp;
 pub mod native_gm;
+pub mod opm;
 pub mod peripherals;
 pub mod raster;
 pub mod remote_fs;
