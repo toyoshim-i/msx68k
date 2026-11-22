@@ -232,8 +232,8 @@ fn background_prefetch_preserves_codes_but_uses_the_display_rows_palette() {
     write(&mut vm, 0xe82202, 0);
     verify(&mut vm, &[(0, 0, GREEN), (0, 1, BLUE), (0, 2, RED)]);
     let frame = vm.bus.raster_frame().unwrap();
-    assert_eq!(frame.background[0], 1);
-    assert_eq!(frame.background[512], 2);
+    assert_eq!(frame.sample_cynthia_code(0, 0), 1);
+    assert_eq!(frame.sample_cynthia_code(0, 1), 2);
 }
 
 #[test]
@@ -300,9 +300,9 @@ fn sprite_prefetch_freezes_attributes_and_codes_before_background_fetch() {
     vm.bus.advance_peripherals(128 * LINE);
     verify(&mut vm, &[(0, 0, GREEN), (0, 1, BLACK), (16, 1, BLUE)]);
     let frame = vm.bus.raster_frame().unwrap();
-    assert_eq!(frame.background[0], 2);
-    assert_eq!(frame.background[512], 0);
-    assert_eq!(frame.background[512 + 16], 2);
+    assert_eq!(frame.sample_cynthia_code(0, 0), 2);
+    assert_eq!(frame.sample_cynthia_code(0, 1), 0);
+    assert_eq!(frame.sample_cynthia_code(16, 1), 2);
 }
 
 #[test]

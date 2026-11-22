@@ -3,6 +3,7 @@
 pub mod bg;
 pub mod bus;
 pub mod crtc;
+pub mod cynthia;
 pub mod dmac;
 mod dma_bus;
 pub mod fdc;

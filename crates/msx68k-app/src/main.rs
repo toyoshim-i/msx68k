@@ -877,8 +877,8 @@ impl Msx68kApp {
                     visible,
                 })
                 .collect();
-            gpu.compositor.render_bus_to_surface_view(
-                &self.vm.bus,
+            gpu.compositor.render_bus_to_surface_view_dirty(
+                &mut self.vm.bus,
                 &gpu.presenter,
                 &view,
                 gpu.surface_config.width,

@@ -1,34 +1,45 @@
-//! X68000 VICON GPU compositor and TVRAM/GVRAM/Palette renderer powered by `wgpu`.
+//! X68000 VICON GPU compositor and TVRAM/GVRAM/Palette renderer.
 //!
 //! Provides:
-//! - [`ViconGpuCompositor`]: Hardware-accelerated `wgpu` compute pipeline that composites the
-//!   4-plane TVRAM (`$E00000`–`$E7FFFF`), GVRAM (`$C00000`–`$DFFFFF`), and 16-bit `GGGGGRRRRRBBBBBI`
-//!   Text/Graphics Palettes (`$E82000`–`$E823FF`) according to CRTC scroll and VICON priority rules.
-//! - [`VmScreen`]: The same compositing for a VM on a thread of its own, uploading only the VRAM
-//!   pages written since the previous frame into one of two output textures.
-//! - [`render_bus_frame_cpu`]: Cycle/bit-identical CPU fallback compositor.
-//! - [`decode_tvram_ank_lines`]: X68000 CGROM (`$F3A800`, 8×16 ANK) glyph recognizer that reads
-//!   the rendered text rows back from the 4-plane TVRAM bitmap (matching X68000 `TextCopy`).
+//! - [`ViconCompositor`]: Unified embedder-facing compositor selecting between Compute (`wgpu`),
+//!   GLES 2.0 (`EGL` + `GLES 2.0`), and CPU fallback according to [`RendererConfig`].
+//! - [`ViconGpuCompositor`]: Hardware-accelerated `wgpu` single-pass 16×16 tile Compute pipeline
+//!   that composites 4-plane TVRAM, GVRAM, 16-bit Text/Graphics Palettes, and CYNTHIA sprite
+//!   spans + BG0/BG1 + 128B PCG/map block histories.
+//! - [`VmScreen`]: Per-VM GPU compositor uploading dirty VRAM pages into double-buffered textures.
+//! - [`render_bus_frame_cpu`]: Cycle/bit-identical CPU reference compositor.
+//! - [`decode_tvram_ank_lines`]: X68000 CGROM (`$F3A800`, 8×16 ANK) glyph recognizer.
 
-use bytemuck::{Pod, Zeroable};
-use msx68k_bus::{X68kBus, GVRAM_BYTES, TVRAM_BYTES, TVRAM_PLANE_BYTES};
-
+pub mod config;
 mod raster;
+#[cfg(feature = "wgpu-backend")]
 mod vm_screen;
+
+pub use config::{
+    PixelFormat, RenderedFrame, RenderedFrame565, RendererConfig, ShaderGeneration, MAX_FB_HEIGHT,
+    MAX_FB_WIDTH,
+};
+#[cfg(feature = "wgpu-backend")]
 pub use vm_screen::{
     read_back_texture, CompletedFrame, ScreenRect, VmLayer, VmScreen, VmScreenOutput, VM_SCREEN_MAX,
 };
-use vm_screen::{LayerPipeline, Placement};
 
-/// Maximum framebuffer dimension (`3840 × 2160`).
-pub const MAX_FB_WIDTH: u32 = 3840;
-pub const MAX_FB_HEIGHT: u32 = 2160;
+use bytemuck::{Pod, Zeroable};
+#[cfg(feature = "wgpu-backend")]
+use msx68k_bus::{DirtyVramPages, GVRAM_BYTES, TVRAM_BYTES};
+use msx68k_bus::{X68kBus, TVRAM_PLANE_BYTES};
+
+#[cfg(feature = "wgpu-backend")]
+use vm_screen::{LayerPipeline, Placement};
 
 /// Maximum TVRAM buffer bytes (4 bitplanes for 3840×2160 = 4,147,200 bytes).
 pub const MAX_TVRAM_BUF_BYTES: usize =
     4 * ((MAX_FB_WIDTH as usize / 8) * (MAX_FB_HEIGHT as usize));
 
-/// Uniform parameters uploaded to the WGSL VICON compositor shader.
+#[cfg(feature = "wgpu-backend")]
+const INITIAL_DYNAMIC_BYTES: u64 = 64 * 1024;
+
+/// Uniform parameters uploaded to the VICON compositor shaders.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct ViconUniforms {
@@ -44,7 +55,7 @@ pub struct ViconUniforms {
     pub contrast: u32,
     pub tvram_row_bytes: u32,
     pub tvram_plane_bytes: u32,
-    /// Raster row-map height (zero for a uniform frame), then sprite/BG code buffer offset.
+    /// `[0]`: raster row-map height (`0` for uniform frame), `[1]`: bit flags (`FLAG_CYNTHIA_ENABLED`).
     pub reserved: [u32; 2],
 }
 
@@ -71,55 +82,131 @@ impl ViconUniforms {
     }
 }
 
-/// A rendered RGBA8 frame produced by the VICON compositor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedFrame {
-    pub width: u32,
-    pub height: u32,
-    /// Row-major `RGBA8` pixels (`width * height * 4` bytes).
-    pub rgba8: Vec<u8>,
+/// Unified embedder-facing VICON compositor supporting Compute (`wgpu`), GLES 2.0, and CPU fallback.
+pub struct ViconCompositor {
+    config: RendererConfig,
+    generation: ShaderGeneration,
+    #[cfg(feature = "wgpu-backend")]
+    wgpu: Option<ViconGpuCompositor>,
 }
 
-impl RenderedFrame {
-    /// Returns the number of pixels whose RGB values are non-black (`R != 0 || G != 0 || B != 0`).
-    pub fn count_lit_pixels(&self) -> usize {
-        self.rgba8
-            .chunks_exact(4)
-            .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
-            .count()
+impl ViconCompositor {
+    /// Creates a compositor configured by `config`.
+    pub fn new(config: RendererConfig) -> Self {
+        match config.generation {
+            ShaderGeneration::Auto | ShaderGeneration::Compute => {
+                #[cfg(feature = "wgpu-backend")]
+                if let Some(gpu) = ViconGpuCompositor::new_with_config(config) {
+                    return Self {
+                        config,
+                        generation: ShaderGeneration::Compute,
+                        wgpu: Some(gpu),
+                    };
+                }
+                Self::cpu(config)
+            }
+            ShaderGeneration::Gles2 | ShaderGeneration::Cpu => Self::cpu(config),
+        }
+    }
+
+    fn cpu(config: RendererConfig) -> Self {
+        Self {
+            config,
+            generation: ShaderGeneration::Cpu,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu: None,
+        }
+    }
+
+    /// Returns the active shader generation selected for this compositor instance.
+    #[inline]
+    pub const fn active_generation(&self) -> ShaderGeneration {
+        self.generation
+    }
+
+    /// Returns the embedder configuration.
+    #[inline]
+    pub const fn config(&self) -> &RendererConfig {
+        &self.config
+    }
+
+    /// Renders a frame, consuming dirty VRAM page tracking on `bus` for incremental uploads.
+    pub fn render_frame(&mut self, bus: &mut X68kBus) -> RenderedFrame {
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(gpu) = self.wgpu.as_mut() {
+            return gpu.render_bus_frame_dirty(bus);
+        }
+        render_bus_frame_cpu(bus)
+    }
+
+    /// Renders a frame from an immutable `&X68kBus` (full VRAM upload on GPU backends).
+    pub fn render_frame_readonly(&mut self, bus: &X68kBus) -> RenderedFrame {
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(gpu) = self.wgpu.as_mut() {
+            return gpu.render_bus_frame(bus);
+        }
+        render_bus_frame_cpu(bus)
+    }
+
+    /// Renders a frame into packed `RGB565` pixels.
+    pub fn render_frame_rgb565(&mut self, bus: &mut X68kBus) -> RenderedFrame565 {
+        self.render_frame(bus).to_rgb565()
     }
 }
 
 /// GPU render pipeline that presents the composited VICON framebuffer onto a window `wgpu::Surface`.
+#[cfg(feature = "wgpu-backend")]
 pub struct ViconSurfacePresenter {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    layout: wgpu::BindGroupLayout,
     layers: LayerPipeline,
 }
 
 /// Hardware-accelerated `wgpu` VICON compositor.
+#[cfg(feature = "wgpu-backend")]
 pub struct ViconGpuCompositor {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
     tvram_buf: wgpu::Buffer,
     gvram_buf: wgpu::Buffer,
     palette_buf: wgpu::Buffer,
+    cynthia_meta_buf: wgpu::Buffer,
+    cynthia_pcg_buf: wgpu::Buffer,
     output_buf: wgpu::Buffer,
     staging_buf: wgpu::Buffer,
     adapter_info: wgpu::AdapterInfo,
+    max_width: u32,
+    max_height: u32,
+    max_tvram_bytes: usize,
+    vram_dirty_seeded: bool,
+    prev_cursor_pages: u128,
+    ext_tvram_was_active: bool,
 }
 
+#[cfg(feature = "wgpu-backend")]
 impl ViconGpuCompositor {
     /// Initializes a new `wgpu` VICON compositor, selecting a hardware GPU or software fallback adapter.
     pub fn new() -> Option<Self> {
-        pollster::block_on(Self::new_async())
+        Self::new_with_config(RendererConfig::default())
+    }
+
+    /// Initializes a new `wgpu` VICON compositor using `config`.
+    pub fn new_with_config(config: RendererConfig) -> Option<Self> {
+        pollster::block_on(Self::new_with_config_async(config))
     }
 
     /// Asynchronously initializes the `wgpu` device, buffers, and WGSL compute pipeline.
     pub async fn new_async() -> Option<Self> {
+        Self::new_with_config_async(RendererConfig::default()).await
+    }
+
+    /// Asynchronously initializes the `wgpu` device, buffers, and WGSL compute pipeline using `config`.
+    pub async fn new_with_config_async(config: RendererConfig) -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -151,7 +238,7 @@ impl ViconGpuCompositor {
             .await
             .ok()?;
 
-        Some(Self::from_device(device, queue, adapter_info))
+        Some(Self::with_config(device, queue, adapter_info, config))
     }
 
     /// Creates a [`ViconGpuCompositor`] using an existing `wgpu::Device` and `wgpu::Queue`
@@ -161,6 +248,23 @@ impl ViconGpuCompositor {
         queue: wgpu::Queue,
         adapter_info: wgpu::AdapterInfo,
     ) -> Self {
+        Self::with_config(device, queue, adapter_info, RendererConfig::default())
+    }
+
+    /// Creates a [`ViconGpuCompositor`] using an existing `wgpu::Device`, `wgpu::Queue`, and `config`.
+    pub fn with_config(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter_info: wgpu::AdapterInfo,
+        config: RendererConfig,
+    ) -> Self {
+        let max_width = config.max_width.clamp(256, MAX_FB_WIDTH);
+        let max_height = config.max_height.clamp(128, MAX_FB_HEIGHT);
+        let max_tvram_bytes = (4 * ((max_width as usize).div_ceil(8) * max_height as usize))
+            .max(TVRAM_BYTES)
+            .min(MAX_TVRAM_BUF_BYTES);
+        let max_fb_bytes = (max_width * max_height * 4) as u64;
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("msx68k_vicon_shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -177,7 +281,7 @@ impl ViconGpuCompositor {
 
         let tvram_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vicon_tvram_buf"),
-            size: MAX_TVRAM_BUF_BYTES as u64,
+            size: max_tvram_bytes as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -191,12 +295,25 @@ impl ViconGpuCompositor {
 
         let palette_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vicon_palette_buf"),
-            size: raster::VIDEO_BYTES,
+            size: INITIAL_DYNAMIC_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let max_fb_bytes = (MAX_FB_WIDTH * MAX_FB_HEIGHT * 4) as u64;
+        let cynthia_meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vicon_cynthia_meta_buf"),
+            size: INITIAL_DYNAMIC_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let cynthia_pcg_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vicon_cynthia_pcg_buf"),
+            size: INITIAL_DYNAMIC_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vicon_output_buf"),
             size: max_fb_bytes,
@@ -210,6 +327,17 @@ impl ViconGpuCompositor {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let ro_storage = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
 
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -225,36 +353,9 @@ impl ViconGpuCompositor {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
+                    ro_storage(1),
+                    ro_storage(2),
+                    ro_storage(3),
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -265,6 +366,8 @@ impl ViconGpuCompositor {
                         },
                         count: None,
                     },
+                    ro_storage(5),
+                    ro_storage(6),
                 ],
             });
 
@@ -283,9 +386,57 @@ impl ViconGpuCompositor {
             cache: None,
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = Self::build_bind_group(
+            &device,
+            &bind_group_layout,
+            &uniform_buf,
+            &tvram_buf,
+            &gvram_buf,
+            &palette_buf,
+            &output_buf,
+            &cynthia_meta_buf,
+            &cynthia_pcg_buf,
+        );
+
+        Self {
+            device,
+            queue,
+            pipeline,
+            bind_group_layout,
+            bind_group,
+            uniform_buf,
+            tvram_buf,
+            gvram_buf,
+            palette_buf,
+            cynthia_meta_buf,
+            cynthia_pcg_buf,
+            output_buf,
+            staging_buf,
+            adapter_info,
+            max_width,
+            max_height,
+            max_tvram_bytes,
+            vram_dirty_seeded: false,
+            prev_cursor_pages: 0,
+            ext_tvram_was_active: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buf: &wgpu::Buffer,
+        tvram_buf: &wgpu::Buffer,
+        gvram_buf: &wgpu::Buffer,
+        palette_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        cynthia_meta_buf: &wgpu::Buffer,
+        cynthia_pcg_buf: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vicon_bind_group"),
-            layout: &bind_group_layout,
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -307,21 +458,46 @@ impl ViconGpuCompositor {
                     binding: 4,
                     resource: output_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: cynthia_meta_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: cynthia_pcg_buf.as_entire_binding(),
+                },
             ],
-        });
+        })
+    }
 
-        Self {
-            device,
-            queue,
-            pipeline,
-            bind_group,
-            uniform_buf,
-            tvram_buf,
-            gvram_buf,
-            palette_buf,
-            output_buf,
-            staging_buf,
-            adapter_info,
+    fn ensure_dynamic_capacities(&mut self, palette_bytes: u64, meta_bytes: u64, pcg_bytes: u64) {
+        let mut rebuilt = false;
+        let grow = |buf: &mut wgpu::Buffer, label: &str, needed: u64, rebuilt: &mut bool| {
+            if needed > buf.size() {
+                *buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: needed.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                *rebuilt = true;
+            }
+        };
+        grow(&mut self.palette_buf, "vicon_palette_buf", palette_bytes, &mut rebuilt);
+        grow(&mut self.cynthia_meta_buf, "vicon_cynthia_meta_buf", meta_bytes, &mut rebuilt);
+        grow(&mut self.cynthia_pcg_buf, "vicon_cynthia_pcg_buf", pcg_bytes, &mut rebuilt);
+        if rebuilt {
+            self.bind_group = Self::build_bind_group(
+                &self.device,
+                &self.bind_group_layout,
+                &self.uniform_buf,
+                &self.tvram_buf,
+                &self.gvram_buf,
+                &self.palette_buf,
+                &self.output_buf,
+                &self.cynthia_meta_buf,
+                &self.cynthia_pcg_buf,
+            );
         }
     }
 
@@ -435,57 +611,141 @@ impl ViconGpuCompositor {
         ViconSurfacePresenter {
             pipeline,
             bind_group,
+            layout,
             layers: LayerPipeline::new(&self.device, surface_format),
         }
     }
 
-    /// Draws the host mouse cursor over the uploaded TVRAM copy.
-    fn upload_cursor_overlay(&self, bus: &X68kBus, tvram_len: usize) {
+    /// Draws the host mouse cursor over the uploaded TVRAM copy and returns the touched page mask.
+    fn upload_cursor_overlay(&self, bus: &X68kBus, tvram_len: usize) -> u128 {
+        let mut touched = DirtyVramPages::default();
         for (offset, bytes) in bus.cursor_overlay() {
             if offset + bytes.len() <= tvram_len {
                 self.queue
                     .write_buffer(&self.tvram_buf, offset as u64, &bytes);
+                touched.mark_tvram_range(offset..offset + bytes.len());
             }
         }
+        touched.tvram
     }
 
-    fn upload_bus_buffers(&mut self, bus: &X68kBus) -> ViconUniforms {
+    fn upload_raster_and_cynthia(&mut self, bus: &X68kBus) -> ViconUniforms {
         let mut uniforms = ViconUniforms::from_bus(bus);
-        let palettes = raster::video_input(bus, &mut uniforms);
+        uniforms.width = uniforms.width.min(self.max_width);
+        uniforms.height = uniforms.height.min(self.max_height);
+        let raster_words = raster::pack_raster_input(bus, &mut uniforms);
+        let (cynthia_meta, cynthia_pcg) = {
+            let cynthia = raster::cynthia_input(bus, &uniforms);
+            if cynthia.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                uniforms.reserved[1] |= raster::FLAG_CYNTHIA_ENABLED;
+                raster::pack_cynthia_gpu_input(&cynthia)
+            }
+        };
+        self.ensure_dynamic_capacities(
+            (raster_words.len() * 4) as u64,
+            (cynthia_meta.len() * 4) as u64,
+            (cynthia_pcg.len() * 4) as u64,
+        );
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        if !raster_words.is_empty() {
+            self.queue
+                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&raster_words));
+        }
+        if !cynthia_meta.is_empty() {
+            self.queue
+                .write_buffer(&self.cynthia_meta_buf, 0, bytemuck::cast_slice(&cynthia_meta));
+        }
+        if !cynthia_pcg.is_empty() {
+            self.queue
+                .write_buffer(&self.cynthia_pcg_buf, 0, bytemuck::cast_slice(&cynthia_pcg));
+        }
+        uniforms
+    }
+
+    fn upload_bus_buffers_full(&mut self, bus: &X68kBus, zero_if_none: bool) -> ViconUniforms {
+        let uniforms = self.upload_raster_and_cynthia(bus);
 
         if let Some(tvram) = bus.active_tvram() {
-            let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
+            let len = tvram.len().min(self.max_tvram_bytes);
             self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
-            self.upload_cursor_overlay(bus, len);
+            self.prev_cursor_pages = self.upload_cursor_overlay(bus, len);
+        } else if zero_if_none {
+            let zero = vec![0u8; TVRAM_BYTES];
+            self.queue.write_buffer(&self.tvram_buf, 0, &zero);
+            self.prev_cursor_pages = 0;
         }
 
         if let Some(gvram) = bus.gvram() {
             self.queue.write_buffer(&self.gvram_buf, 0, gvram);
+        } else if zero_if_none {
+            let zero = vec![0u8; GVRAM_BYTES];
+            self.queue.write_buffer(&self.gvram_buf, 0, &zero);
+        }
+        self.vram_dirty_seeded = false;
+
+        uniforms
+    }
+
+    fn upload_bus_buffers_dirty(&mut self, bus: &mut X68kBus) -> ViconUniforms {
+        let uniforms = self.upload_raster_and_cynthia(bus);
+
+        let mut written = bus.take_written_vram_pages();
+        if !self.vram_dirty_seeded {
+            written = DirtyVramPages::ALL;
+            self.vram_dirty_seeded = true;
         }
 
-        if !palettes.is_empty() {
-            self.queue
-                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
+        if bus.is_ext_tvram_active() {
+            if let Some(tvram) = bus.active_tvram() {
+                let len = tvram.len().min(self.max_tvram_bytes);
+                self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
+                let _ = self.upload_cursor_overlay(bus, len);
+            }
+            self.ext_tvram_was_active = true;
+            self.prev_cursor_pages = 0;
+        } else {
+            if self.ext_tvram_was_active {
+                written.tvram = u128::MAX;
+                self.ext_tvram_was_active = false;
+            }
+            let tvram_pages = DirtyVramPages {
+                tvram: written.tvram | self.prev_cursor_pages,
+                gvram: 0,
+            };
+            if let Some(tvram) = bus.tvram() {
+                for range in tvram_pages.tvram_ranges() {
+                    let end = range.end.min(self.max_tvram_bytes).min(tvram.len());
+                    if range.start < end {
+                        self.queue
+                            .write_buffer(&self.tvram_buf, range.start as u64, &tvram[range.start..end]);
+                    }
+                }
+            }
+            self.prev_cursor_pages = self.upload_cursor_overlay(bus, self.max_tvram_bytes);
+        }
+
+        if let Some(gvram) = bus.gvram() {
+            for range in written.gvram_ranges() {
+                self.queue
+                    .write_buffer(&self.gvram_buf, range.start as u64, &gvram[range.clone()]);
+            }
         }
 
         uniforms
     }
 
-    /// Composites `bus` video memory on the GPU and blits the result directly into `target_view`
-    /// (with aspect-ratio-preserving letterboxing for window dimensions `surface_width × surface_height`),
-    /// then draws the `layers` of VMs over it in order, each clipped to its visible region.
-    pub fn render_bus_to_surface_view(
-        &mut self,
-        bus: &X68kBus,
+    fn dispatch_and_present(
+        &self,
+        uniforms: ViconUniforms,
         presenter: &ViconSurfacePresenter,
         target_view: &wgpu::TextureView,
         surface_width: u32,
         surface_height: u32,
         layers: &[VmLayer<'_>],
     ) {
-        let uniforms = self.upload_bus_buffers(bus);
         let viewport = letterbox(uniforms.width, uniforms.height, surface_width, surface_height);
         let layers = presenter.layers.prepare(
             &self.device,
@@ -497,6 +757,7 @@ impl ViconGpuCompositor {
                 target: (surface_width, surface_height),
             },
         );
+        let _ = &presenter.layout;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -547,41 +808,55 @@ impl ViconGpuCompositor {
         self.queue.submit(Some(encoder.finish()));
     }
 
+    /// Composites `bus` video memory on the GPU (full VRAM upload) and blits into `target_view`.
+    pub fn render_bus_to_surface_view(
+        &mut self,
+        bus: &X68kBus,
+        presenter: &ViconSurfacePresenter,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+        layers: &[VmLayer<'_>],
+    ) {
+        let uniforms = self.upload_bus_buffers_full(bus, false);
+        self.dispatch_and_present(
+            uniforms,
+            presenter,
+            target_view,
+            surface_width,
+            surface_height,
+            layers,
+        );
+    }
+
+    /// Composites `bus` video memory on the GPU using dirty 4 KB VRAM page uploads and blits into `target_view`.
+    pub fn render_bus_to_surface_view_dirty(
+        &mut self,
+        bus: &mut X68kBus,
+        presenter: &ViconSurfacePresenter,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+        layers: &[VmLayer<'_>],
+    ) {
+        let uniforms = self.upload_bus_buffers_dirty(bus);
+        self.dispatch_and_present(
+            uniforms,
+            presenter,
+            target_view,
+            surface_width,
+            surface_height,
+            layers,
+        );
+    }
+
     /// Returns information about the active `wgpu` adapter.
     #[inline]
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter_info
     }
 
-    /// Uploads the current `X68kBus` video state (TVRAM, GVRAM, Palettes, CRTC/VICON registers)
-    /// to the GPU, executes the WGSL compositor shader, and reads back the rendered `RGBA8` frame.
-    pub fn render_bus_frame(&mut self, bus: &X68kBus) -> RenderedFrame {
-        let mut uniforms = ViconUniforms::from_bus(bus);
-        let palettes = raster::video_input(bus, &mut uniforms);
-        self.queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-
-        if let Some(tvram) = bus.active_tvram() {
-            let len = tvram.len().min(MAX_TVRAM_BUF_BYTES);
-            self.queue.write_buffer(&self.tvram_buf, 0, &tvram[..len]);
-            self.upload_cursor_overlay(bus, len);
-        } else {
-            let zero = vec![0u8; TVRAM_BYTES];
-            self.queue.write_buffer(&self.tvram_buf, 0, &zero);
-        }
-
-        if let Some(gvram) = bus.gvram() {
-            self.queue.write_buffer(&self.gvram_buf, 0, gvram);
-        } else {
-            let zero = vec![0u8; GVRAM_BYTES];
-            self.queue.write_buffer(&self.gvram_buf, 0, &zero);
-        }
-
-        if !palettes.is_empty() {
-            self.queue
-                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
-        }
-
+    fn execute_and_readback(&self, uniforms: ViconUniforms) -> RenderedFrame {
         let byte_len = (uniforms.width * uniforms.height * 4) as u64;
         let mut encoder = self
             .device
@@ -629,10 +904,25 @@ impl ViconGpuCompositor {
             rgba8,
         }
     }
+
+    /// Uploads the current `X68kBus` video state to the GPU, executes the WGSL compositor shader,
+    /// and reads back the rendered `RGBA8` frame.
+    pub fn render_bus_frame(&mut self, bus: &X68kBus) -> RenderedFrame {
+        let uniforms = self.upload_bus_buffers_full(bus, true);
+        self.execute_and_readback(uniforms)
+    }
+
+    /// Uploads only dirty 4 KB VRAM pages (plus cursor overlay restoration), executes the WGSL
+    /// compositor shader, and reads back the rendered `RGBA8` frame.
+    pub fn render_bus_frame_dirty(&mut self, bus: &mut X68kBus) -> RenderedFrame {
+        let uniforms = self.upload_bus_buffers_dirty(bus);
+        self.execute_and_readback(uniforms)
+    }
 }
 
 /// Aspect-ratio-preserving letterbox/pillarbox viewport `x, y, width, height` of a
 /// `width × height` screen on a `surface_width × surface_height` target.
+#[cfg(feature = "wgpu-backend")]
 fn letterbox(width: u32, height: u32, surface_width: u32, surface_height: u32) -> [f32; 4] {
     let sw = surface_width.max(1) as f32;
     let sh = surface_height.max(1) as f32;
@@ -743,11 +1033,11 @@ fn sample_graphics_cpu(
     }
 }
 
-/// CPU reference compositor for the shared VICON shader.
+/// CPU reference compositor evaluating the shared CYNTHIA and VICON specifications.
 pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let mut params = ViconUniforms::from_bus(bus);
     let frame = raster::completed_frame(bus, &params);
-    let background = raster::background_input(bus, &params);
+    let cynthia = raster::cynthia_input(bus, &params);
     let mut next_line = 0;
     let width = params.width;
     let height = params.height;
@@ -760,13 +1050,15 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let gvram = bus.gvram();
     let mut tx_pal = bus.vicon.text_palette();
     let mut gr_pal = bus.vicon.graphic_palette();
+    let mut cynthia_row = [0u8; msx68k_bus::bg::BG_WIDTH];
 
     for y in 0..height {
         if let Some(frame) = frame {
             while let Some(line) = frame.lines.get(next_line).filter(|line| line.y <= y) {
                 params.apply_raster(&line.state);
-                tx_pal = line.state.palettes[..256].try_into().unwrap();
-                gr_pal = line.state.palettes[256..].try_into().unwrap();
+                let pal = frame.palette(line.state.palette_id);
+                tx_pal = pal[..256].try_into().unwrap();
+                gr_pal = pal[256..].try_into().unwrap();
                 next_line += 1;
             }
         }
@@ -775,6 +1067,10 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
         let tx_rank = (params.r1_priority >> 10) & 3;
         let sp_rank = (params.r1_priority >> 12) & 3;
         let gr_rank = (params.r1_priority >> 8) & 3;
+        let cynthia_on = (params.r2_display & 0x40 != 0) && gr_rank != 3;
+        if cynthia_on {
+            cynthia.rasterize_row(y, &mut cynthia_row);
+        }
 
         let grbi_to_rgba = |grbi: u16| -> [u8; 4] {
             let i_bit = (grbi & 1) as u32;
@@ -818,11 +1114,8 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             } else {
                 0
             };
-            let bg_code = if params.r2_display & 0x40 != 0 && x < msx68k_bus::bg::BG_WIDTH as u32 {
-                background
-                    .get(y as usize * msx68k_bus::bg::BG_WIDTH + x as usize)
-                    .copied()
-                    .unwrap_or(0)
+            let bg_code = if cynthia_on && (x as usize) < cynthia_row.len() {
+                cynthia_row[x as usize]
             } else {
                 0
             };

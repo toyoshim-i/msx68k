@@ -16,6 +16,7 @@ use crate::{RenderedFrame, ViconUniforms};
 pub const VM_SCREEN_MAX: u32 = 1024;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const INITIAL_DYNAMIC_BYTES: u64 = 64 * 1024;
 
 /// A VM screen's two output textures, shared between its VM thread and the main thread.
 pub struct VmScreenOutput {
@@ -119,12 +120,15 @@ pub struct VmScreen {
     queue: wgpu::Queue,
     device: wgpu::Device,
     pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
     /// One per output texture.
     bind_groups: [wgpu::BindGroup; 2],
     uniform_buf: wgpu::Buffer,
     tvram_buf: wgpu::Buffer,
     gvram_buf: wgpu::Buffer,
     palette_buf: wgpu::Buffer,
+    cynthia_meta_buf: wgpu::Buffer,
+    cynthia_pcg_buf: wgpu::Buffer,
     output: Arc<VmScreenOutput>,
 }
 
@@ -152,7 +156,9 @@ impl VmScreen {
         );
         let tvram_buf = buffer("vm_screen_tvram", TVRAM_BYTES as u64, wgpu::BufferUsages::STORAGE);
         let gvram_buf = buffer("vm_screen_gvram", GVRAM_BYTES as u64, wgpu::BufferUsages::STORAGE);
-        let palette_buf = buffer("vm_screen_palettes", crate::raster::VIDEO_BYTES, wgpu::BufferUsages::STORAGE);
+        let palette_buf = buffer("vm_screen_palettes", INITIAL_DYNAMIC_BYTES, wgpu::BufferUsages::STORAGE);
+        let cynthia_meta_buf = buffer("vm_screen_cynthia_meta", INITIAL_DYNAMIC_BYTES, wgpu::BufferUsages::STORAGE);
+        let cynthia_pcg_buf = buffer("vm_screen_cynthia_pcg", INITIAL_DYNAMIC_BYTES, wgpu::BufferUsages::STORAGE);
 
         let textures = [0, 1].map(|_| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -184,7 +190,7 @@ impl VmScreen {
             },
             count: None,
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vm_screen_bind_group_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -210,12 +216,72 @@ impl VmScreen {
                     },
                     count: None,
                 },
+                storage(5),
+                storage(6),
             ],
         });
-        let bind_groups = [0, 1].map(|i| {
+        let bind_groups = Self::build_bind_groups(
+            device,
+            &bind_group_layout,
+            &uniform_buf,
+            &tvram_buf,
+            &gvram_buf,
+            &palette_buf,
+            &views,
+            &cynthia_meta_buf,
+            &cynthia_pcg_buf,
+        );
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vm_screen_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("vm_screen_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        Self {
+            queue: queue.clone(),
+            device: device.clone(),
+            pipeline,
+            bind_group_layout,
+            bind_groups,
+            uniform_buf,
+            tvram_buf,
+            gvram_buf,
+            palette_buf,
+            cynthia_meta_buf,
+            cynthia_pcg_buf,
+            output: Arc::new(VmScreenOutput {
+                textures,
+                views,
+                sizes: [AtomicU32::new(0), AtomicU32::new(0)],
+                completed: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_bind_groups(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buf: &wgpu::Buffer,
+        tvram_buf: &wgpu::Buffer,
+        gvram_buf: &wgpu::Buffer,
+        palette_buf: &wgpu::Buffer,
+        views: &[wgpu::TextureView; 2],
+        cynthia_meta_buf: &wgpu::Buffer,
+        cynthia_pcg_buf: &wgpu::Buffer,
+    ) -> [wgpu::BindGroup; 2] {
+        [0, 1].map(|i| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vm_screen_bind_group"),
-                layout: &layout,
+                layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -237,38 +303,52 @@ impl VmScreen {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&views[i]),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: cynthia_meta_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: cynthia_pcg_buf.as_entire_binding(),
+                    },
                 ],
             })
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vm_screen_pipeline_layout"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("vm_screen_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        })
+    }
 
-        Self {
-            queue: queue.clone(),
-            device: device.clone(),
-            pipeline,
-            bind_groups,
-            uniform_buf,
-            tvram_buf,
-            gvram_buf,
-            palette_buf,
-            output: Arc::new(VmScreenOutput {
-                textures,
-                views,
-                sizes: [AtomicU32::new(0), AtomicU32::new(0)],
-                completed: AtomicU64::new(0),
-            }),
+    fn ensure_dynamic_capacities(
+        &mut self,
+        palette_bytes: u64,
+        meta_bytes: u64,
+        pcg_bytes: u64,
+    ) {
+        let mut rebuilt = false;
+        let grow = |buf: &mut wgpu::Buffer, label: &str, needed: u64, rebuilt: &mut bool| {
+            if needed > buf.size() {
+                *buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: needed.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                *rebuilt = true;
+            }
+        };
+        grow(&mut self.palette_buf, "vm_screen_palettes", palette_bytes, &mut rebuilt);
+        grow(&mut self.cynthia_meta_buf, "vm_screen_cynthia_meta", meta_bytes, &mut rebuilt);
+        grow(&mut self.cynthia_pcg_buf, "vm_screen_cynthia_pcg", pcg_bytes, &mut rebuilt);
+        if rebuilt {
+            self.bind_groups = Self::build_bind_groups(
+                &self.device,
+                &self.bind_group_layout,
+                &self.uniform_buf,
+                &self.tvram_buf,
+                &self.gvram_buf,
+                &self.palette_buf,
+                &self.output.views,
+                &self.cynthia_meta_buf,
+                &self.cynthia_pcg_buf,
+            );
         }
     }
 
@@ -280,23 +360,51 @@ impl VmScreen {
     /// Uploads what changed in `bus` since the previous frame, composites a new frame, and
     /// returns the bytes uploaded. The first frame uploads all of VRAM.
     pub fn present(&mut self, bus: &mut X68kBus) -> usize {
+        let mut uniforms = ViconUniforms::from_bus(bus);
+        uniforms.width = uniforms.width.min(VM_SCREEN_MAX);
+        uniforms.height = uniforms.height.min(VM_SCREEN_MAX);
+        let raster_words = crate::raster::pack_raster_input(bus, &mut uniforms);
+        let (cynthia_meta, cynthia_pcg) = {
+            let cynthia = crate::raster::cynthia_input(bus, &uniforms);
+            if cynthia.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                uniforms.reserved[1] |= crate::raster::FLAG_CYNTHIA_ENABLED;
+                crate::raster::pack_cynthia_gpu_input(&cynthia)
+            }
+        };
+
         let mut written = bus.take_written_vram_pages();
         let number = self.output.completed.load(Ordering::Relaxed);
         if number == 0 {
             written = DirtyVramPages::ALL;
         }
 
-        let mut uniforms = ViconUniforms::from_bus(bus);
-        uniforms.width = uniforms.width.min(VM_SCREEN_MAX);
-        uniforms.height = uniforms.height.min(VM_SCREEN_MAX);
-        let palettes = crate::raster::video_input(bus, &mut uniforms);
+        self.ensure_dynamic_capacities(
+            (raster_words.len() * 4) as u64,
+            (cynthia_meta.len() * 4) as u64,
+            (cynthia_pcg.len() * 4) as u64,
+        );
+
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-        if !palettes.is_empty() {
+        let mut uploaded = std::mem::size_of_val(&uniforms);
+
+        if !raster_words.is_empty() {
             self.queue
-                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&palettes));
+                .write_buffer(&self.palette_buf, 0, bytemuck::cast_slice(&raster_words));
+            uploaded += raster_words.len() * 4;
         }
-        let mut uploaded = std::mem::size_of_val(&uniforms) + palettes.len() * 4;
+        if !cynthia_meta.is_empty() {
+            self.queue
+                .write_buffer(&self.cynthia_meta_buf, 0, bytemuck::cast_slice(&cynthia_meta));
+            uploaded += cynthia_meta.len() * 4;
+        }
+        if !cynthia_pcg.is_empty() {
+            self.queue
+                .write_buffer(&self.cynthia_pcg_buf, 0, bytemuck::cast_slice(&cynthia_pcg));
+            uploaded += cynthia_pcg.len() * 4;
+        }
 
         for (memory, buf, ranges) in [
             (bus.tvram(), &self.tvram_buf, written.tvram_ranges()),

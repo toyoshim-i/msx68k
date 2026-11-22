@@ -1183,14 +1183,20 @@ impl Bus for X68kBus {
                     if self.sprite_options.full_pattern_memory {
                         let buf = self.sprite_bg_extra
                             .get_or_insert_with(|| vec![0; 0x8000].into_boxed_slice());
-                        buf[offset - 0x8000] = val;
+                        if buf[offset - 0x8000] != val {
+                            buf[offset - 0x8000] = val;
+                            self.raster.mark_sprite_bg_write(offset, true);
+                        }
                     }
                     return Ok(());
                 }
                 let buf = self
                     .sprite_bg
                     .get_or_insert_with(|| vec![0u8; SPRITE_WINDOW_BYTES].into_boxed_slice());
-                buf[offset] = val;
+                if buf[offset] != val {
+                    buf[offset] = val;
+                    self.raster.mark_sprite_bg_write(offset, false);
+                }
                 Ok(())
             }
             MemoryRegion::Sram => {
