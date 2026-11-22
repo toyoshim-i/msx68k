@@ -46,17 +46,21 @@ pub const GL_LESS: GLenum = 0x0201;
 pub const GL_UNSIGNED_BYTE: GLenum = 0x1401;
 pub const GL_UNSIGNED_SHORT: GLenum = 0x1403;
 pub const GL_FLOAT: GLenum = 0x1406;
+pub const GL_UNSIGNED_SHORT_5_6_5: GLenum = 0x8363;
+pub const GL_RGB: GLenum = 0x1907;
 pub const GL_RGBA: GLenum = 0x1908;
 pub const GL_LUMINANCE: GLenum = 0x1909;
 pub const GL_LUMINANCE_ALPHA: GLenum = 0x190A;
 pub const GL_TEXTURE_2D: GLenum = 0x0DE1;
 pub const GL_NEAREST: GLint = 0x2600;
+pub const GL_LINEAR: GLint = 0x2601;
 pub const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
 pub const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
 pub const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
 pub const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
 pub const GL_CLAMP_TO_EDGE: GLint = 0x812F;
 pub const GL_DEPTH_TEST: GLenum = 0x0B71;
+pub const GL_SCISSOR_TEST: GLenum = 0x0C11;
 pub const GL_BLEND: GLenum = 0x0BE2;
 pub const GL_DITHER: GLenum = 0x0BD0;
 pub const GL_CULL_FACE: GLenum = 0x0B44;
@@ -66,6 +70,8 @@ pub const GL_UNPACK_ALIGNMENT: GLenum = 0x0CF5;
 pub const GL_PACK_ALIGNMENT: GLenum = 0x0D05;
 pub const GL_MAX_TEXTURE_SIZE: GLenum = 0x0D33;
 pub const GL_MAX_TEXTURE_IMAGE_UNITS: GLenum = 0x8872;
+pub const GL_IMPLEMENTATION_COLOR_READ_TYPE: GLenum = 0x8B9A;
+pub const GL_IMPLEMENTATION_COLOR_READ_FORMAT: GLenum = 0x8B9B;
 pub const GL_TEXTURE0: GLenum = 0x84C0;
 pub const GL_ARRAY_BUFFER: GLenum = 0x8892;
 pub const GL_ELEMENT_ARRAY_BUFFER: GLenum = 0x8893;
@@ -78,6 +84,7 @@ pub const GL_LINK_STATUS: GLenum = 0x8B82;
 pub const GL_FRAMEBUFFER: GLenum = 0x8D40;
 pub const GL_RENDERBUFFER: GLenum = 0x8D41;
 pub const GL_DEPTH_COMPONENT16: GLenum = 0x81A5;
+pub const GL_RGB565: GLenum = 0x8D62;
 pub const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
 pub const GL_DEPTH_ATTACHMENT: GLenum = 0x8D00;
 pub const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
@@ -142,6 +149,7 @@ pub struct Gles2Procs {
     pub glEnable: unsafe extern "C" fn(GLenum),
     pub glEnableVertexAttribArray: unsafe extern "C" fn(GLuint),
     pub glFinish: unsafe extern "C" fn(),
+    pub glFlush: unsafe extern "C" fn(),
     pub glFramebufferRenderbuffer: unsafe extern "C" fn(GLenum, GLenum, GLenum, GLuint),
     pub glFramebufferTexture2D: unsafe extern "C" fn(GLenum, GLenum, GLenum, GLuint, GLint),
     pub glGenBuffers: unsafe extern "C" fn(GLsizei, *mut GLuint),
@@ -161,6 +169,7 @@ pub struct Gles2Procs {
     pub glReadPixels:
         unsafe extern "C" fn(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, *mut c_void),
     pub glRenderbufferStorage: unsafe extern "C" fn(GLenum, GLenum, GLsizei, GLsizei),
+    pub glScissor: unsafe extern "C" fn(GLint, GLint, GLsizei, GLsizei),
     pub glShaderSource:
         unsafe extern "C" fn(GLuint, GLsizei, *const *const c_char, *const GLint),
     pub glTexImage2D: unsafe extern "C" fn(
@@ -253,6 +262,7 @@ impl Gles2Procs {
             glEnable: load_sym(lib, b"glEnable\0")?,
             glEnableVertexAttribArray: load_sym(lib, b"glEnableVertexAttribArray\0")?,
             glFinish: load_sym(lib, b"glFinish\0")?,
+            glFlush: load_sym(lib, b"glFlush\0")?,
             glFramebufferRenderbuffer: load_sym(lib, b"glFramebufferRenderbuffer\0")?,
             glFramebufferTexture2D: load_sym(lib, b"glFramebufferTexture2D\0")?,
             glGenBuffers: load_sym(lib, b"glGenBuffers\0")?,
@@ -271,6 +281,7 @@ impl Gles2Procs {
             glPixelStorei: load_sym(lib, b"glPixelStorei\0")?,
             glReadPixels: load_sym(lib, b"glReadPixels\0")?,
             glRenderbufferStorage: load_sym(lib, b"glRenderbufferStorage\0")?,
+            glScissor: load_sym(lib, b"glScissor\0")?,
             glShaderSource: load_sym(lib, b"glShaderSource\0")?,
             glTexImage2D: load_sym(lib, b"glTexImage2D\0")?,
             glTexParameteri: load_sym(lib, b"glTexParameteri\0")?,

@@ -1,7 +1,8 @@
-//! GLSL ES 1.00 shaders for Pass 1 (CYNTHIA sprite spans + BG0/BG1) and Pass 2 (VICON).
+//! GLSL ES 1.00 shaders for Pass 1 (CYNTHIA sprite spans + BG0/BG1), Pass 2 (VICON),
+//! and Pass 3 (optional GPU downsample blit).
 //!
 //! All standard X68000 paths are strictly bounded to `mediump`-exact integer ranges (`<= 1535`),
-//! avoiding bitwise operations and large texture coordinates.
+//! avoiding bitwise operations, SFU `exp2` precision hazards, and redundant LUT texture fetches.
 
 pub const SPRITE_VS: &str = r#"
 attribute vec2 a_pos;
@@ -25,7 +26,6 @@ pub const SPRITE_FS: &str = r#"
 precision mediump float;
 
 uniform sampler2D u_pcg;
-uniform sampler2D u_lut;
 uniform float u_pcg_inv_h;
 
 varying vec2 v_pat;
@@ -46,8 +46,9 @@ void main() {
         float tex_x = v_meta.z * 128.0 + in_blk;
         float tex_y = v_meta.w;
         float b = texture2D(u_pcg, vec2((tex_x + 0.5) / 1024.0, (tex_y + 0.5) * u_pcg_inv_h)).r;
-        vec4 nib = texture2D(u_lut, vec2((b * 255.0 + 0.5) / 256.0, (8.0 + 0.5) / 32.0));
-        nibble = floor(mix(nib.r, nib.g, px_odd) * 255.0 + 0.5);
+        float b_int = floor(b * 255.0 + 0.5);
+        float hi = floor(b_int * 0.0625);
+        nibble = mix(hi, b_int - hi * 16.0, px_odd);
     }
     if (nibble < 0.5) {
         discard;
@@ -71,7 +72,6 @@ precision mediump float;
 uniform sampler2D u_pcg;
 uniform sampler2D u_pcg_table;
 uniform sampler2D u_row_state;
-uniform sampler2D u_lut;
 
 uniform float u_plane;
 uniform float u_row_inv_h;
@@ -125,7 +125,7 @@ void main() {
         float logical_blk = bank * 256.0 + (128.0 + map_sel * 64.0) + tile_y;
         vec4 map_ref = texture2D(u_pcg_table, vec2((logical_blk + 0.5) / 512.0, tbl_v));
         float mv0 = floor(map_ref.r * 255.0 + 0.5);
-        float m_row_hi = floor(mv0 / 8.0 + 0.001);
+        float m_row_hi = floor(mv0 * 0.125 + 0.001);
         float m_col = mv0 - m_row_hi * 8.0;
         float m_row = m_row_hi * 256.0 + floor(map_ref.a * 255.0 + 0.5);
         float in_blk = tile_x * 2.0;
@@ -133,10 +133,11 @@ void main() {
         tile_lo_norm = pcg_byte(m_col, m_row, in_blk + 1.0);
     }
 
-    vec4 hi_info = texture2D(u_lut, vec2((tile_hi_norm * 255.0 + 0.5) / 256.0, (9.0 + 0.5) / 32.0));
-    float pal_block = floor(hi_info.r * 255.0 + 0.5);
-    float hflip = hi_info.g;
-    float vflip = hi_info.b;
+    float th = floor(tile_hi_norm * 255.0 + 0.5);
+    float vflip = step(128.0, th);
+    float th_rem = th - vflip * 128.0;
+    float hflip = step(64.0, th_rem);
+    float pal_block = th - floor(th * 0.0625) * 16.0;
     float pattern = floor(tile_lo_norm * 255.0 + 0.5);
 
     float px = sx - tile_x * tile_size;
@@ -158,12 +159,13 @@ void main() {
 
     vec4 pat_ref = texture2D(u_pcg_table, vec2((pat_blk + 0.5) / 512.0, tbl_v));
     float pv0 = floor(pat_ref.r * 255.0 + 0.5);
-    float p_row_hi = floor(pv0 / 8.0 + 0.001);
+    float p_row_hi = floor(pv0 * 0.125 + 0.001);
     float p_col = pv0 - p_row_hi * 8.0;
     float p_row = p_row_hi * 256.0 + floor(pat_ref.a * 255.0 + 0.5);
     float pb = pcg_byte(p_col, p_row, pat_in_blk);
-    vec4 nib = texture2D(u_lut, vec2((pb * 255.0 + 0.5) / 256.0, (8.0 + 0.5) / 32.0));
-    float nibble = floor(mix(nib.r, nib.g, px_odd) * 255.0 + 0.5);
+    float pb_int = floor(pb * 255.0 + 0.5);
+    float pb_hi = floor(pb_int * 0.0625);
+    float nibble = mix(pb_hi, pb_int - pb_hi * 16.0, px_odd);
     if (nibble < 0.5) {
         discard;
     }
@@ -179,7 +181,463 @@ void main() {
 }
 "#;
 
-pub const VICON_FS: &str = r#"
+/// Pass 2 fast uniform VICON shader:
+/// - Used when no row uses 65536-color mode, VICON state is uniform across rows, and TVRAM is standard.
+/// - Zero `u_row_state` fetches, zero `u_lut` fetches, 1-fetch RGBA TVRAM, pre-baked RGBA palette,
+///   disabled GVRAM page skipping, and front-to-back layer priority early-out.
+pub const VICON_FAST_UNIFORM_FS: &str = r#"
+precision mediump float;
+
+uniform sampler2D u_tvram;
+uniform sampler2D u_gvram;
+uniform sampler2D u_cynthia;
+uniform sampler2D u_palette;
+
+uniform float u_cynthia_inv_h;
+uniform float u_pal_v;
+uniform float u_r0_mode;
+uniform float u_r2_display;
+uniform vec4 u_ranks;       // x: gr_rank, y: tx_rank, z: sp_rank, w: cynthia_active
+uniform vec4 u_slots;       // p0, p1, p2, p3
+uniform vec2 u_tx_scroll;   // tx_sx, tx_sy
+uniform vec4 u_gr_scroll01; // gs0x, gs0y, gs1x, gs1y
+uniform vec4 u_gr_scroll23; // gs2x, gs2y, gs3x, gs3y
+
+float bit_scale(float bit_pos) {
+    float s = 1.0;
+    float bp = bit_pos;
+    if (bp < 4.0) { s *= 0.0625; } else { bp -= 4.0; }
+    if (bp < 2.0) { s *= 0.25; } else { bp -= 2.0; }
+    if (bp < 1.0) { s *= 0.5; }
+    return s;
+}
+
+vec4 pal_rgba(float col) {
+    return texture2D(u_palette, vec2((col + 0.5) / 512.0, u_pal_v));
+}
+
+vec4 sample_text(float x, float y) {
+    if (mod(floor(u_r2_display / 32.0), 2.0) < 0.5) {
+        return vec4(0.0);
+    }
+    float tx = mod(x + u_tx_scroll.x, 1024.0);
+    float ty = y + u_tx_scroll.y;
+    if (ty >= 1024.0) {
+        ty -= 1024.0;
+    }
+    float byte_x = floor(tx * 0.125);
+    float bit_pos = tx - byte_x * 8.0;
+    float half_sel = step(512.0, ty);
+    float tex_y = (ty - half_sel * 512.0 + 0.5) / 512.0;
+    float tex_x = (half_sel * 128.0 + byte_x + 0.5) / 256.0;
+    vec4 tb = floor(texture2D(u_tvram, vec2(tex_x, tex_y)) * 255.0 + 0.5);
+    vec4 shifted = floor(tb * bit_scale(bit_pos));
+    vec4 bits = shifted - floor(shifted * 0.5) * 2.0;
+    float tx_idx = dot(bits, vec4(1.0, 2.0, 4.0, 8.0));
+    return pal_rgba(tx_idx);
+}
+
+vec4 sample_cynthia(float x, float y) {
+    if (u_ranks.w < 0.5 || x >= 512.0) {
+        return vec4(0.0);
+    }
+    float code = floor(texture2D(u_cynthia, vec2((x + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
+    if (code < 0.5) {
+        return vec4(0.0);
+    }
+    return pal_rgba(code);
+}
+
+vec2 gr_scroll_for(float page) {
+    if (page < 0.5) { return u_gr_scroll01.xy; }
+    if (page < 1.5) { return u_gr_scroll01.zw; }
+    if (page < 2.5) { return u_gr_scroll23.xy; }
+    return u_gr_scroll23.zw;
+}
+
+float gv_nibble(float page, float x, float y, float do_scroll) {
+    float gx = x;
+    if (gx >= 512.0) { gx = mod(gx, 512.0); }
+    float gy = y;
+    if (gy >= 512.0) { gy = mod(gy, 512.0); }
+    if (do_scroll > 0.5) {
+        vec2 sc = gr_scroll_for(page);
+        gx += sc.x;
+        if (gx >= 512.0) { gx -= 512.0; }
+        gy += sc.y;
+        if (gy >= 512.0) { gy -= 512.0; }
+    }
+    vec4 gtex = texture2D(u_gvram, vec2((gx + 0.5) / 512.0, (gy + 0.5) / 512.0));
+    float byte_val = mix(gtex.a, gtex.r, step(1.5, page));
+    float b_int = floor(byte_val * 255.0 + 0.5);
+    float hi = floor(b_int * 0.0625);
+    float lo = b_int - hi * 16.0;
+    float take_hi = step(0.5, page) * (1.0 - step(1.5, page)) + step(2.5, page);
+    return mix(lo, hi, take_hi);
+}
+
+vec4 sample_graphics(float x, float y) {
+    if (u_r0_mode >= 3.5) {
+        if (mod(floor(u_r2_display / 16.0), 2.0) < 0.5) {
+            return vec4(0.0);
+        }
+        float gx = mod(x + u_gr_scroll01.x, 1024.0);
+        float gy = mod(y + u_gr_scroll01.y, 1024.0);
+        float qx = step(512.0, gx);
+        float qy = step(512.0, gy);
+        float slot = qy * 2.0 + qx;
+        float page = u_slots.x;
+        if (slot > 0.5 && slot < 1.5) { page = u_slots.y; }
+        else if (slot >= 1.5 && slot < 2.5) { page = u_slots.z; }
+        else if (slot >= 2.5) { page = u_slots.w; }
+        float idx = gv_nibble(page, gx - qx * 512.0, gy - qy * 512.0, 0.0);
+        if (idx < 0.5) {
+            return vec4(0.0);
+        }
+        return pal_rgba(256.0 + idx);
+    }
+
+    float en0 = mod(u_r2_display, 2.0);
+    float en1 = mod(floor(u_r2_display * 0.5), 2.0);
+    float en2 = mod(floor(u_r2_display * 0.25), 2.0);
+    float en3 = mod(floor(u_r2_display * 0.125), 2.0);
+    if (en0 + en1 + en2 + en3 < 0.5) {
+        return vec4(0.0);
+    }
+
+    if (u_r0_mode < 0.5) {
+        if (en0 > 0.5) {
+            float n0 = gv_nibble(u_slots.x, x, y, 1.0);
+            if (n0 > 0.5) { return pal_rgba(256.0 + n0); }
+        }
+        if (en1 > 0.5) {
+            float n1 = gv_nibble(u_slots.y, x, y, 1.0);
+            if (n1 > 0.5) { return pal_rgba(256.0 + n1); }
+        }
+        if (en2 > 0.5) {
+            float n2 = gv_nibble(u_slots.z, x, y, 1.0);
+            if (n2 > 0.5) { return pal_rgba(256.0 + n2); }
+        }
+        if (en3 > 0.5) {
+            float n3 = gv_nibble(u_slots.w, x, y, 1.0);
+            if (n3 > 0.5) { return pal_rgba(256.0 + n3); }
+        }
+        return vec4(0.0);
+    }
+
+    // 256-color mode
+    if (en0 + en1 > 0.5) {
+        float c01 = gv_nibble(u_slots.x, x, y, 1.0) + gv_nibble(u_slots.y, x, y, 1.0) * 16.0;
+        if (c01 > 0.5) { return pal_rgba(256.0 + c01); }
+    }
+    if (en2 + en3 > 0.5) {
+        float c23 = gv_nibble(u_slots.z, x, y, 1.0) + gv_nibble(u_slots.w, x, y, 1.0) * 16.0;
+        if (c23 > 0.5) { return pal_rgba(256.0 + c23); }
+    }
+    return vec4(0.0);
+}
+
+vec4 eval_ts(float is_text, float x, float y) {
+    if (is_text > 0.5) {
+        return sample_text(x, y);
+    }
+    return sample_cynthia(x, y);
+}
+
+void main() {
+    float x = floor(gl_FragCoord.x);
+    float y = floor(gl_FragCoord.y);
+
+    float gr_rank = u_ranks.x;
+    if (gr_rank >= 2.5) {
+        vec4 gc = sample_graphics(x, y);
+        gl_FragColor = vec4(gc.rgb * step(0.5, gc.a), 1.0);
+        return;
+    }
+
+    float tx_first = step(u_ranks.y, u_ranks.z);
+    vec4 col = vec4(0.0);
+
+    if (gr_rank < 0.5) {
+        col = sample_graphics(x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    } else if (gr_rank < 1.5) {
+        col = eval_ts(tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = sample_graphics(x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    } else {
+        col = eval_ts(tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = sample_graphics(x, y);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    }
+
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Pass 2 fast per-row VICON shader:
+/// - Used when no row uses 65536-color mode, but VICON/palette/contrast varies per row or extended TVRAM is active.
+/// - Zero `u_lut` fetches, pre-baked RGBA palette, 1-fetch packed RGBA standard TVRAM,
+///   lazy GVRAM scroll row fetches, disabled-page skipping, and front-to-back early-out.
+pub const VICON_FAST_RASTER_FS: &str = r#"
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+uniform sampler2D u_tvram;
+uniform sampler2D u_gvram;
+uniform sampler2D u_cynthia;
+uniform sampler2D u_row_state;
+uniform sampler2D u_palette;
+
+uniform float u_row_inv_h;
+uniform float u_pal_inv_h;
+uniform float u_cynthia_inv_h;
+uniform float u_has_row_map;
+uniform float u_cynthia_enabled;
+uniform float u_is_ext_tvram;
+uniform vec4 u_ext_tvram; // x: row_bytes, y: plane_bytes, z: tex_w, w: tex_inv_h
+
+vec4 row_texel(float col, float y) {
+    float ry = mix(0.0, y, u_has_row_map);
+    return texture2D(u_row_state, vec2((col + 0.5) / 16.0, (ry + 0.5) * u_row_inv_h));
+}
+
+float bit_scale(float bit_pos) {
+    float s = 1.0;
+    float bp = bit_pos;
+    if (bp < 4.0) { s *= 0.0625; } else { bp -= 4.0; }
+    if (bp < 2.0) { s *= 0.25; } else { bp -= 2.0; }
+    if (bp < 1.0) { s *= 0.5; }
+    return s;
+}
+
+vec4 pal_rgba(float col, float pal_v) {
+    return texture2D(u_palette, vec2((col + 0.5) / 512.0, pal_v));
+}
+
+vec4 sample_text(float x, float y, float r2, float pal_v) {
+    if (mod(floor(r2 / 32.0), 2.0) < 0.5) {
+        return vec4(0.0);
+    }
+    if (u_is_ext_tvram < 0.5) {
+        vec4 r0 = row_texel(0.0, y);
+        float tx_sx = floor(r0.r * 255.0 + 0.5) * 256.0 + floor(r0.g * 255.0 + 0.5);
+        float tx_sy = floor(r0.b * 255.0 + 0.5) * 256.0 + floor(r0.a * 255.0 + 0.5);
+        float tx = mod(x + tx_sx, 1024.0);
+        float ty = y + tx_sy;
+        if (ty >= 1024.0) {
+            ty -= 1024.0;
+        }
+        float byte_x = floor(tx * 0.125);
+        float bit_pos = tx - byte_x * 8.0;
+        float half_sel = step(512.0, ty);
+        float tex_y = (ty - half_sel * 512.0 + 0.5) / 512.0;
+        float tex_x = (half_sel * 128.0 + byte_x + 0.5) / 256.0;
+        vec4 tb = floor(texture2D(u_tvram, vec2(tex_x, tex_y)) * 255.0 + 0.5);
+        vec4 shifted = floor(tb * bit_scale(bit_pos));
+        vec4 bits = shifted - floor(shifted * 0.5) * 2.0;
+        float tx_idx = dot(bits, vec4(1.0, 2.0, 4.0, 8.0));
+        return pal_rgba(tx_idx, pal_v);
+    }
+
+    float byte_x = floor(x * 0.125);
+    float bit_pos = x - byte_x * 8.0;
+    float s = bit_scale(bit_pos);
+    float in_plane = y * u_ext_tvram.x + byte_x;
+    float acc = 0.0;
+    float wt = 1.0;
+    for (int p = 0; p < 4; p++) {
+        float addr = float(p) * u_ext_tvram.y + in_plane;
+        float ey = floor(addr / u_ext_tvram.z);
+        float ex = addr - ey * u_ext_tvram.z;
+        float b = floor(texture2D(u_tvram, vec2((ex + 0.5) / u_ext_tvram.z, (ey + 0.5) * u_ext_tvram.w)).r * 255.0 + 0.5);
+        float sh = floor(b * s);
+        float bit = sh - floor(sh * 0.5) * 2.0;
+        acc += bit * wt;
+        wt *= 2.0;
+    }
+    return pal_rgba(acc, pal_v);
+}
+
+vec4 sample_cynthia(float x, float y, float r2, float cynthia_active, float pal_v) {
+    if (u_cynthia_enabled < 0.5 || cynthia_active < 0.5 || x >= 512.0 || mod(floor(r2 / 64.0), 2.0) < 0.5) {
+        return vec4(0.0);
+    }
+    float code = floor(texture2D(u_cynthia, vec2((x + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
+    if (code < 0.5) {
+        return vec4(0.0);
+    }
+    return pal_rgba(code, pal_v);
+}
+
+float gv_nibble_row(float page, float x, float y, float do_scroll) {
+    float gx = x;
+    if (gx >= 512.0) { gx = mod(gx, 512.0); }
+    float gy = y;
+    if (gy >= 512.0) { gy = mod(gy, 512.0); }
+    if (do_scroll > 0.5) {
+        vec4 gs = row_texel(1.0 + page, y);
+        float gsx = floor(gs.r * 255.0 + 0.5) * 256.0 + floor(gs.g * 255.0 + 0.5);
+        float gsy = floor(gs.b * 255.0 + 0.5) * 256.0 + floor(gs.a * 255.0 + 0.5);
+        gx += gsx;
+        if (gx >= 512.0) { gx -= 512.0; }
+        gy += gsy;
+        if (gy >= 512.0) { gy -= 512.0; }
+    }
+    vec4 gtex = texture2D(u_gvram, vec2((gx + 0.5) / 512.0, (gy + 0.5) / 512.0));
+    float byte_val = mix(gtex.a, gtex.r, step(1.5, page));
+    float b_int = floor(byte_val * 255.0 + 0.5);
+    float hi = floor(b_int * 0.0625);
+    float lo = b_int - hi * 16.0;
+    float take_hi = step(0.5, page) * (1.0 - step(1.5, page)) + step(2.5, page);
+    return mix(lo, hi, take_hi);
+}
+
+vec4 sample_graphics(float x, float y, float mode, float r2, float pal_v) {
+    if (mode >= 3.5) {
+        if (mod(floor(r2 / 16.0), 2.0) < 0.5) {
+            return vec4(0.0);
+        }
+        vec4 slots = floor(row_texel(7.0, y) * 255.0 + vec4(0.5));
+        vec4 gs0 = row_texel(1.0, y);
+        float gs0x = floor(gs0.r * 255.0 + 0.5) * 256.0 + floor(gs0.g * 255.0 + 0.5);
+        float gs0y = floor(gs0.b * 255.0 + 0.5) * 256.0 + floor(gs0.a * 255.0 + 0.5);
+        float gx = mod(x + gs0x, 1024.0);
+        float gy = mod(y + gs0y, 1024.0);
+        float qx = step(512.0, gx);
+        float qy = step(512.0, gy);
+        float slot = qy * 2.0 + qx;
+        float page = slots.x;
+        if (slot > 0.5 && slot < 1.5) { page = slots.y; }
+        else if (slot >= 1.5 && slot < 2.5) { page = slots.z; }
+        else if (slot >= 2.5) { page = slots.w; }
+        float idx = gv_nibble_row(page, gx - qx * 512.0, gy - qy * 512.0, 0.0);
+        if (idx < 0.5) {
+            return vec4(0.0);
+        }
+        return pal_rgba(256.0 + idx, pal_v);
+    }
+
+    float en0 = mod(r2, 2.0);
+    float en1 = mod(floor(r2 * 0.5), 2.0);
+    float en2 = mod(floor(r2 * 0.25), 2.0);
+    float en3 = mod(floor(r2 * 0.125), 2.0);
+    if (en0 + en1 + en2 + en3 < 0.5) {
+        return vec4(0.0);
+    }
+
+    vec4 slots = floor(row_texel(7.0, y) * 255.0 + vec4(0.5));
+    if (mode < 0.5) {
+        if (en0 > 0.5) {
+            float n0 = gv_nibble_row(slots.x, x, y, 1.0);
+            if (n0 > 0.5) { return pal_rgba(256.0 + n0, pal_v); }
+        }
+        if (en1 > 0.5) {
+            float n1 = gv_nibble_row(slots.y, x, y, 1.0);
+            if (n1 > 0.5) { return pal_rgba(256.0 + n1, pal_v); }
+        }
+        if (en2 > 0.5) {
+            float n2 = gv_nibble_row(slots.z, x, y, 1.0);
+            if (n2 > 0.5) { return pal_rgba(256.0 + n2, pal_v); }
+        }
+        if (en3 > 0.5) {
+            float n3 = gv_nibble_row(slots.w, x, y, 1.0);
+            if (n3 > 0.5) { return pal_rgba(256.0 + n3, pal_v); }
+        }
+        return vec4(0.0);
+    }
+
+    if (en0 + en1 > 0.5) {
+        float c01 = gv_nibble_row(slots.x, x, y, 1.0) + gv_nibble_row(slots.y, x, y, 1.0) * 16.0;
+        if (c01 > 0.5) { return pal_rgba(256.0 + c01, pal_v); }
+    }
+    if (en2 + en3 > 0.5) {
+        float c23 = gv_nibble_row(slots.z, x, y, 1.0) + gv_nibble_row(slots.w, x, y, 1.0) * 16.0;
+        if (c23 > 0.5) { return pal_rgba(256.0 + c23, pal_v); }
+    }
+    return vec4(0.0);
+}
+
+vec4 eval_ts(float is_text, float x, float y, float r2, float cyn_act, float pal_v) {
+    if (is_text > 0.5) {
+        return sample_text(x, y, r2, pal_v);
+    }
+    return sample_cynthia(x, y, r2, cyn_act, pal_v);
+}
+
+void main() {
+    float x = floor(gl_FragCoord.x);
+    float y = floor(gl_FragCoord.y);
+
+    vec4 r5 = row_texel(5.0, y);
+    float mode = floor(r5.r * 255.0 + 0.5);
+    float r2 = floor(r5.g * 255.0 + 0.5);
+    float cynthia_active = r5.a;
+
+    vec4 r8 = row_texel(8.0, y);
+    float pal_hi = floor(r8.g * 255.0 + 0.5);
+    if (r2 < 0.5 || pal_hi > 254.5) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    float pal_id = floor(r8.r * 255.0 + 0.5) + pal_hi * 256.0;
+    float pal_v = (pal_id + 0.5) * u_pal_inv_h;
+
+    vec4 r6 = row_texel(6.0, y);
+    float gr_rank = floor(r6.r * 255.0 + 0.5);
+    if (gr_rank >= 2.5) {
+        vec4 gc = sample_graphics(x, y, mode, r2, pal_v);
+        gl_FragColor = vec4(gc.rgb * step(0.5, gc.a), 1.0);
+        return;
+    }
+
+    float tx_rank = floor(r6.g * 255.0 + 0.5);
+    float sp_rank = floor(r6.b * 255.0 + 0.5);
+    float tx_first = step(tx_rank, sp_rank);
+    vec4 col = vec4(0.0);
+
+    if (gr_rank < 0.5) {
+        col = sample_graphics(x, y, mode, r2, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    } else if (gr_rank < 1.5) {
+        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = sample_graphics(x, y, mode, r2, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    } else {
+        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        col = sample_graphics(x, y, mode, r2, pal_v);
+        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    }
+
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Pass 2 raw GRBI16 VICON shader (used when any row uses 65536-color byte-split palette mode).
+pub const VICON_RAW_FS: &str = r#"
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 #else
@@ -206,73 +664,73 @@ vec4 row_texel(float col, float y) {
     return texture2D(u_row_state, vec2((col + 0.5) / 16.0, (ry + 0.5) * u_row_inv_h));
 }
 
-float lut_bit(float byte_norm, float bit_pos) {
-    return texture2D(u_lut, vec2((byte_norm * 255.0 + 0.5) / 256.0, (bit_pos + 0.5) / 32.0)).r;
+float bit_scale(float bit_pos) {
+    float s = 1.0;
+    float bp = bit_pos;
+    if (bp < 4.0) { s *= 0.0625; } else { bp -= 4.0; }
+    if (bp < 2.0) { s *= 0.25; } else { bp -= 2.0; }
+    if (bp < 1.0) { s *= 0.5; }
+    return s;
 }
 
 float sample_tvram_idx(float x, float y, float tx_sx, float tx_sy) {
-    float tx = x;
-    float ty = y;
-    float byte_x = 0.0;
-    float bit_pos = 0.0;
     if (u_is_ext_tvram < 0.5) {
-        tx = mod(x + tx_sx, 1024.0);
-        ty = y + tx_sy;
+        float tx = mod(x + tx_sx, 1024.0);
+        float ty = y + tx_sy;
         if (ty >= 1024.0) {
             ty -= 1024.0;
         }
-        byte_x = floor(tx / 8.0);
-        bit_pos = tx - byte_x * 8.0;
+        float byte_x = floor(tx * 0.125);
+        float bit_pos = tx - byte_x * 8.0;
         float half_sel = step(512.0, ty);
         float tex_y = (ty - half_sel * 512.0 + 0.5) / 512.0;
-        float u_base = half_sel * 128.0 + byte_x + 0.5;
-        float b0 = lut_bit(texture2D(u_tvram, vec2((0.0 + u_base) / 1024.0, tex_y)).r, bit_pos);
-        float b1 = lut_bit(texture2D(u_tvram, vec2((256.0 + u_base) / 1024.0, tex_y)).r, bit_pos);
-        float b2 = lut_bit(texture2D(u_tvram, vec2((512.0 + u_base) / 1024.0, tex_y)).r, bit_pos);
-        float b3 = lut_bit(texture2D(u_tvram, vec2((768.0 + u_base) / 1024.0, tex_y)).r, bit_pos);
-        return b0 + b1 * 2.0 + b2 * 4.0 + b3 * 8.0;
+        float tex_x = (half_sel * 128.0 + byte_x + 0.5) / 256.0;
+        vec4 tb = floor(texture2D(u_tvram, vec2(tex_x, tex_y)) * 255.0 + 0.5);
+        vec4 shifted = floor(tb * bit_scale(bit_pos));
+        vec4 bits = shifted - floor(shifted * 0.5) * 2.0;
+        return dot(bits, vec4(1.0, 2.0, 4.0, 8.0));
     }
 
-    byte_x = floor(tx / 8.0);
-    bit_pos = tx - byte_x * 8.0;
-    float in_plane = ty * u_ext_tvram.x + byte_x;
+    float byte_x = floor(x * 0.125);
+    float bit_pos = x - byte_x * 8.0;
+    float s = bit_scale(bit_pos);
+    float in_plane = y * u_ext_tvram.x + byte_x;
     float acc = 0.0;
     float wt = 1.0;
     for (int p = 0; p < 4; p++) {
         float addr = float(p) * u_ext_tvram.y + in_plane;
         float ey = floor(addr / u_ext_tvram.z);
         float ex = addr - ey * u_ext_tvram.z;
-        float b = texture2D(u_tvram, vec2((ex + 0.5) / u_ext_tvram.z, (ey + 0.5) * u_ext_tvram.w)).r;
-        acc += lut_bit(b, bit_pos) * wt;
+        float b = floor(texture2D(u_tvram, vec2((ex + 0.5) / u_ext_tvram.z, (ey + 0.5) * u_ext_tvram.w)).r * 255.0 + 0.5);
+        float sh = floor(b * s);
+        float bit = sh - floor(sh * 0.5) * 2.0;
+        acc += bit * wt;
         wt *= 2.0;
     }
     return acc;
 }
 
-float gv_nibble(float page, float x, float y, float gx_sc, float gy_sc, float do_scroll) {
+float gv_nibble(float page, float x, float y, float do_scroll) {
     float gx = x;
-    if (gx >= 512.0) {
-        gx = mod(gx, 512.0);
-    }
+    if (gx >= 512.0) { gx = mod(gx, 512.0); }
     float gy = y;
-    if (gy >= 512.0) {
-        gy = mod(gy, 512.0);
-    }
+    if (gy >= 512.0) { gy = mod(gy, 512.0); }
     if (do_scroll > 0.5) {
-        gx += gx_sc;
-        if (gx >= 512.0) {
-            gx -= 512.0;
-        }
-        gy += gy_sc;
-        if (gy >= 512.0) {
-            gy -= 512.0;
-        }
+        vec4 gs = row_texel(1.0 + page, y);
+        float gsx = floor(gs.r * 255.0 + 0.5) * 256.0 + floor(gs.g * 255.0 + 0.5);
+        float gsy = floor(gs.b * 255.0 + 0.5) * 256.0 + floor(gs.a * 255.0 + 0.5);
+        gx += gsx;
+        if (gx >= 512.0) { gx -= 512.0; }
+        gy += gsy;
+        if (gy >= 512.0) { gy -= 512.0; }
     }
     vec4 gtex = texture2D(u_gvram, vec2((gx + 0.5) / 512.0, (gy + 0.5) / 512.0));
     float byte_val = mix(gtex.a, gtex.r, step(1.5, page));
-    vec4 nib = texture2D(u_lut, vec2((byte_val * 255.0 + 0.5) / 256.0, (8.0 + 0.5) / 32.0));
+    float b_int = floor(byte_val * 255.0 + 0.5);
+    float hi = floor(b_int * 0.0625);
+    float lo = b_int - hi * 16.0;
     float take_hi = step(0.5, page) * (1.0 - step(1.5, page)) + step(2.5, page);
-    return floor(mix(nib.g, nib.r, take_hi) * 255.0 + 0.5);
+    return mix(lo, hi, take_hi);
 }
 
 vec4 pal_entry(float col, float pal_v) {
@@ -280,10 +738,6 @@ vec4 pal_entry(float col, float pal_v) {
 }
 
 vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, float pal_v) {
-    float idx_lo = 0.0;
-    float idx_hi = 0.0;
-    float got = 0.0;
-
     if (mode >= 3.5) {
         if (mod(floor(r2 / 16.0), 2.0) < 0.5) {
             return vec2(0.0);
@@ -300,87 +754,52 @@ vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, fl
         if (slot > 0.5 && slot < 1.5) { page = slots.y; }
         else if (slot >= 1.5 && slot < 2.5) { page = slots.z; }
         else if (slot >= 2.5) { page = slots.w; }
-        idx_lo = gv_nibble(page, gx - qx * 512.0, gy - qy * 512.0, 0.0, 0.0, 0.0);
-    } else {
-        float en0 = mod(r2, 2.0);
-        float en1 = mod(floor(r2 * 0.5), 2.0);
-        float en2 = mod(floor(r2 * 0.25), 2.0);
-        float en3 = mod(floor(r2 * 0.125), 2.0);
-        if (en0 + en1 + en2 + en3 < 0.5) {
-            return vec2(0.0);
-        }
-        vec4 gs0 = row_texel(1.0, y);
-        vec4 gs1 = row_texel(2.0, y);
-        vec4 gs2 = row_texel(3.0, y);
-        vec4 gs3 = row_texel(4.0, y);
-
-        float p0 = slots.x;
-        float p1 = slots.y;
-        float p2 = slots.z;
-        float p3 = slots.w;
-
-        float gsx[4];
-        float gsy[4];
-        gsx[0] = floor(gs0.r * 255.0 + 0.5) * 256.0 + floor(gs0.g * 255.0 + 0.5);
-        gsy[0] = floor(gs0.b * 255.0 + 0.5) * 256.0 + floor(gs0.a * 255.0 + 0.5);
-        gsx[1] = floor(gs1.r * 255.0 + 0.5) * 256.0 + floor(gs1.g * 255.0 + 0.5);
-        gsy[1] = floor(gs1.b * 255.0 + 0.5) * 256.0 + floor(gs1.a * 255.0 + 0.5);
-        gsx[2] = floor(gs2.r * 255.0 + 0.5) * 256.0 + floor(gs2.g * 255.0 + 0.5);
-        gsy[2] = floor(gs2.b * 255.0 + 0.5) * 256.0 + floor(gs2.a * 255.0 + 0.5);
-        gsx[3] = floor(gs3.r * 255.0 + 0.5) * 256.0 + floor(gs3.g * 255.0 + 0.5);
-        gsy[3] = floor(gs3.b * 255.0 + 0.5) * 256.0 + floor(gs3.a * 255.0 + 0.5);
-
-        float n0 = 0.0;
-        float n1 = 0.0;
-        float n2 = 0.0;
-        float n3 = 0.0;
-        if (p0 < 0.5) { n0 = gv_nibble(p0, x, y, gsx[0], gsy[0], 1.0); }
-        else if (p0 < 1.5) { n0 = gv_nibble(p0, x, y, gsx[1], gsy[1], 1.0); }
-        else if (p0 < 2.5) { n0 = gv_nibble(p0, x, y, gsx[2], gsy[2], 1.0); }
-        else { n0 = gv_nibble(p0, x, y, gsx[3], gsy[3], 1.0); }
-
-        if (p1 < 0.5) { n1 = gv_nibble(p1, x, y, gsx[0], gsy[0], 1.0); }
-        else if (p1 < 1.5) { n1 = gv_nibble(p1, x, y, gsx[1], gsy[1], 1.0); }
-        else if (p1 < 2.5) { n1 = gv_nibble(p1, x, y, gsx[2], gsy[2], 1.0); }
-        else { n1 = gv_nibble(p1, x, y, gsx[3], gsy[3], 1.0); }
-
-        if (p2 < 0.5) { n2 = gv_nibble(p2, x, y, gsx[0], gsy[0], 1.0); }
-        else if (p2 < 1.5) { n2 = gv_nibble(p2, x, y, gsx[1], gsy[1], 1.0); }
-        else if (p2 < 2.5) { n2 = gv_nibble(p2, x, y, gsx[2], gsy[2], 1.0); }
-        else { n2 = gv_nibble(p2, x, y, gsx[3], gsy[3], 1.0); }
-
-        if (p3 < 0.5) { n3 = gv_nibble(p3, x, y, gsx[0], gsy[0], 1.0); }
-        else if (p3 < 1.5) { n3 = gv_nibble(p3, x, y, gsx[1], gsy[1], 1.0); }
-        else if (p3 < 2.5) { n3 = gv_nibble(p3, x, y, gsx[2], gsy[2], 1.0); }
-        else { n3 = gv_nibble(p3, x, y, gsx[3], gsy[3], 1.0); }
-
-        if (mode < 0.5) {
-            if (en0 > 0.5 && n0 > 0.5) { idx_lo = n0; got = 1.0; }
-            else if (en1 > 0.5 && n1 > 0.5) { idx_lo = n1; got = 1.0; }
-            else if (en2 > 0.5 && n2 > 0.5) { idx_lo = n2; got = 1.0; }
-            else if (en3 > 0.5 && n3 > 0.5) { idx_lo = n3; got = 1.0; }
-            if (got < 0.5) { return vec2(0.0); }
-        } else if (mode < 1.5) {
-            float c01 = n0 + n1 * 16.0;
-            float c23 = n2 + n3 * 16.0;
-            if ((en0 + en1) > 0.5 && c01 > 0.5) { idx_lo = c01; got = 1.0; }
-            else if ((en2 + en3) > 0.5 && c23 > 0.5) { idx_lo = c23; got = 1.0; }
-            if (got < 0.5) { return vec2(0.0); }
-        } else {
-            idx_lo = n0 + n1 * 16.0;
-            idx_hi = n2 + n3 * 16.0;
-            float lo_odd = texture2D(u_lut, vec2((idx_lo + 0.5) / 256.0, (8.0 + 0.5) / 32.0)).b;
-            float hi_odd = texture2D(u_lut, vec2((idx_hi + 0.5) / 256.0, (8.0 + 0.5) / 32.0)).b;
-            vec4 lo_w = pal_entry(256.0 + idx_lo - lo_odd, pal_v);
-            vec4 hi_w = pal_entry(257.0 + idx_hi - hi_odd, pal_v);
-            float lo_b = mix(lo_w.r, lo_w.a, lo_odd);
-            float hi_b = mix(hi_w.r, hi_w.a, hi_odd);
-            return vec2(hi_b, lo_b);
-        }
+        float idx = gv_nibble(page, gx - qx * 512.0, gy - qy * 512.0, 0.0);
+        if (idx < 0.5) { return vec2(0.0); }
+        vec4 pe = pal_entry(256.0 + idx, pal_v);
+        return vec2(pe.r, pe.a);
     }
 
-    vec4 pe = pal_entry(256.0 + idx_lo, pal_v);
-    return vec2(pe.r, pe.a);
+    float en0 = mod(r2, 2.0);
+    float en1 = mod(floor(r2 * 0.5), 2.0);
+    float en2 = mod(floor(r2 * 0.25), 2.0);
+    float en3 = mod(floor(r2 * 0.125), 2.0);
+    if (en0 + en1 + en2 + en3 < 0.5) {
+        return vec2(0.0);
+    }
+
+    if (mode < 0.5) {
+        float idx = 0.0;
+        if (en0 > 0.5) { idx = gv_nibble(slots.x, x, y, 1.0); }
+        if (idx < 0.5 && en1 > 0.5) { idx = gv_nibble(slots.y, x, y, 1.0); }
+        if (idx < 0.5 && en2 > 0.5) { idx = gv_nibble(slots.z, x, y, 1.0); }
+        if (idx < 0.5 && en3 > 0.5) { idx = gv_nibble(slots.w, x, y, 1.0); }
+        if (idx < 0.5) { return vec2(0.0); }
+        vec4 pe = pal_entry(256.0 + idx, pal_v);
+        return vec2(pe.r, pe.a);
+    } else if (mode < 1.5) {
+        float idx = 0.0;
+        if (en0 + en1 > 0.5) {
+            idx = gv_nibble(slots.x, x, y, 1.0) + gv_nibble(slots.y, x, y, 1.0) * 16.0;
+        }
+        if (idx < 0.5 && en2 + en3 > 0.5) {
+            idx = gv_nibble(slots.z, x, y, 1.0) + gv_nibble(slots.w, x, y, 1.0) * 16.0;
+        }
+        if (idx < 0.5) { return vec2(0.0); }
+        vec4 pe = pal_entry(256.0 + idx, pal_v);
+        return vec2(pe.r, pe.a);
+    }
+
+    // 65536-color byte-split palette mode
+    float idx_lo = gv_nibble(slots.x, x, y, 1.0) + gv_nibble(slots.y, x, y, 1.0) * 16.0;
+    float idx_hi = gv_nibble(slots.z, x, y, 1.0) + gv_nibble(slots.w, x, y, 1.0) * 16.0;
+    float lo_odd = idx_lo - floor(idx_lo * 0.5) * 2.0;
+    float hi_odd = idx_hi - floor(idx_hi * 0.5) * 2.0;
+    vec4 lo_w = pal_entry(256.0 + idx_lo - lo_odd, pal_v);
+    vec4 hi_w = pal_entry(257.0 + idx_hi - hi_odd, pal_v);
+    float lo_b = mix(lo_w.r, lo_w.a, lo_odd);
+    float hi_b = mix(hi_w.r, hi_w.a, hi_odd);
+    return vec2(hi_b, lo_b);
 }
 
 void main() {
@@ -411,7 +830,6 @@ void main() {
 
     vec4 r7 = row_texel(7.0, y);
     vec4 slots = floor(r7 * 255.0 + vec4(0.5));
-
     float pal_v = (pal_id + 0.5) * u_pal_inv_h;
 
     vec2 tx_grbi = vec2(0.0);
@@ -484,5 +902,30 @@ void main() {
     float b8_out = texture2D(u_lut, vec2((c_col_base + b6_val + 0.5) / 256.0, lut_v)).r;
 
     gl_FragColor = vec4(r8_out, g8_out, b8_out, 1.0);
+}
+"#;
+
+/// Pass 3 GPU downsample blit vertex shader.
+pub const BLIT_VS: &str = r#"
+attribute vec2 a_pos;
+uniform vec2 u_uv_scale;
+varying vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = (a_pos * 0.5 + vec2(0.5)) * u_uv_scale;
+}
+"#;
+
+/// Pass 3 GPU downsample blit fragment shader.
+pub const BLIT_FS: &str = r#"
+precision mediump float;
+
+uniform sampler2D u_src;
+uniform vec2 u_uv_max;
+varying vec2 v_uv;
+
+void main() {
+    gl_FragColor = vec4(texture2D(u_src, min(v_uv, u_uv_max)).rgb, 1.0);
 }
 "#;

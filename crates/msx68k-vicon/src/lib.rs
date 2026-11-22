@@ -18,8 +18,8 @@ mod raster;
 mod vm_screen;
 
 pub use config::{
-    PixelFormat, RenderedFrame, RenderedFrame565, RendererConfig, ShaderGeneration, MAX_FB_HEIGHT,
-    MAX_FB_WIDTH,
+    FrameTimingStats, PixelFormat, RenderedFrame, RenderedFrame565, RendererConfig,
+    ShaderGeneration, MAX_FB_HEIGHT, MAX_FB_WIDTH,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use vm_screen::{
@@ -92,6 +92,7 @@ pub struct ViconCompositor {
     wgpu: Option<ViconGpuCompositor>,
     #[cfg(feature = "gles2-backend")]
     gles2: Option<gles2::Gles2Compositor>,
+    pending_fallback: Option<RenderedFrame>,
 }
 
 impl ViconCompositor {
@@ -107,6 +108,7 @@ impl ViconCompositor {
                         wgpu: Some(gpu),
                         #[cfg(feature = "gles2-backend")]
                         gles2: None,
+                        pending_fallback: None,
                     };
                 }
                 #[cfg(feature = "gles2-backend")]
@@ -117,6 +119,7 @@ impl ViconCompositor {
                         #[cfg(feature = "wgpu-backend")]
                         wgpu: None,
                         gles2: Some(es2),
+                        pending_fallback: None,
                     };
                 }
                 Self::cpu(config)
@@ -130,6 +133,7 @@ impl ViconCompositor {
                         wgpu: Some(gpu),
                         #[cfg(feature = "gles2-backend")]
                         gles2: None,
+                        pending_fallback: None,
                     };
                 }
                 Self::cpu(config)
@@ -143,6 +147,7 @@ impl ViconCompositor {
                         #[cfg(feature = "wgpu-backend")]
                         wgpu: None,
                         gles2: Some(es2),
+                        pending_fallback: None,
                     };
                 }
                 Self::cpu(config)
@@ -159,6 +164,7 @@ impl ViconCompositor {
             wgpu: None,
             #[cfg(feature = "gles2-backend")]
             gles2: None,
+            pending_fallback: None,
         }
     }
 
@@ -172,6 +178,38 @@ impl ViconCompositor {
     #[inline]
     pub const fn config(&self) -> &RendererConfig {
         &self.config
+    }
+
+    /// Returns the active GPU renderer / adapter name (`GL_RENDERER` on GLES 2.0, adapter name on
+    /// Compute), or `None` when running on the CPU backend.
+    pub fn renderer_name(&self) -> Option<&str> {
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(gpu) = self.wgpu.as_ref() {
+            return Some(&gpu.adapter_info().name);
+        }
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_ref() {
+            return Some(es2.renderer_name());
+        }
+        None
+    }
+
+    /// Enables or disables per-frame `upload / draw / readback` timing breakdown on GPU backends.
+    pub fn set_collect_timing(&mut self, enabled: bool) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.set_collect_timing(enabled);
+        }
+        let _ = enabled;
+    }
+
+    /// Returns the most recent per-frame timing breakdown when timing collection is enabled.
+    pub fn last_timing(&self) -> Option<FrameTimingStats> {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_ref() {
+            return es2.last_timing();
+        }
+        None
     }
 
     /// Renders a frame, consuming dirty VRAM page tracking on `bus` for incremental uploads.
@@ -200,9 +238,108 @@ impl ViconCompositor {
         render_bus_frame_cpu(bus)
     }
 
+    /// Renders a frame at native resolution and scales it to `dst_w × dst_h` (`RGBA8`).
+    ///
+    /// On the GLES 2.0 backend, downsampling runs on the GPU (Pass 3) prior to `glReadPixels`.
+    pub fn render_frame_scaled(
+        &mut self,
+        bus: &mut X68kBus,
+        dst_w: u32,
+        dst_h: u32,
+    ) -> RenderedFrame {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.render_bus_frame_scaled(bus, dst_w, dst_h);
+        }
+        self.render_frame(bus).resize_bilinear(dst_w, dst_h)
+    }
+
     /// Renders a frame into packed `RGB565` pixels.
     pub fn render_frame_rgb565(&mut self, bus: &mut X68kBus) -> RenderedFrame565 {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.render_bus_frame_rgb565(bus);
+        }
         self.render_frame(bus).to_rgb565()
+    }
+
+    /// Renders a frame at native resolution, scales it to `dst_w × dst_h`, and returns `RGB565`.
+    ///
+    /// On the GLES 2.0 backend, Pass 3 downsampling and (when supported by the driver) direct
+    /// 16-bit `RGB565` readback run on the GPU.
+    pub fn render_frame_scaled_rgb565(
+        &mut self,
+        bus: &mut X68kBus,
+        dst_w: u32,
+        dst_h: u32,
+    ) -> RenderedFrame565 {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.render_bus_frame_scaled_rgb565(bus, dst_w, dst_h);
+        }
+        self.render_frame(bus)
+            .resize_bilinear(dst_w, dst_h)
+            .to_rgb565()
+    }
+
+    /// Submits a native-resolution `RGBA8` frame to the GPU without blocking on readback.
+    ///
+    /// Pair with [`Self::finish_frame`] to overlap GPU rasterization with the next frame's CPU work.
+    pub fn submit_frame(&mut self, bus: &mut X68kBus) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.submit_frame(bus);
+            return;
+        }
+        self.pending_fallback = Some(self.render_frame(bus));
+    }
+
+    /// Submits a `dst_w × dst_h` scaled `RGBA8` frame without blocking on readback.
+    pub fn submit_frame_scaled(&mut self, bus: &mut X68kBus, dst_w: u32, dst_h: u32) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.submit_frame_scaled(bus, dst_w, dst_h);
+            return;
+        }
+        self.pending_fallback = Some(self.render_frame(bus).resize_bilinear(dst_w, dst_h));
+    }
+
+    /// Submits a native-resolution `RGB565` frame without blocking on readback.
+    pub fn submit_frame_rgb565(&mut self, bus: &mut X68kBus) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.submit_frame_rgb565(bus);
+            return;
+        }
+        self.pending_fallback = Some(self.render_frame(bus));
+    }
+
+    /// Submits a `dst_w × dst_h` scaled `RGB565` frame without blocking on readback.
+    pub fn submit_frame_scaled_rgb565(&mut self, bus: &mut X68kBus, dst_w: u32, dst_h: u32) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.submit_frame_scaled_rgb565(bus, dst_w, dst_h);
+            return;
+        }
+        self.pending_fallback = Some(self.render_frame(bus).resize_bilinear(dst_w, dst_h));
+    }
+
+    /// Completes readback for a previously submitted `RGBA8` frame.
+    pub fn finish_frame(&mut self) -> Option<RenderedFrame> {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.finish_frame();
+        }
+        self.pending_fallback.take()
+    }
+
+    /// Completes readback for a previously submitted `RGB565` frame.
+    pub fn finish_frame_rgb565(&mut self) -> Option<RenderedFrame565> {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            return es2.finish_frame_rgb565();
+        }
+        self.pending_fallback.take().map(|f| f.to_rgb565())
     }
 }
 

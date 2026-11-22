@@ -46,6 +46,17 @@ impl Default for RendererConfig {
     }
 }
 
+/// Per-frame timing breakdown (microseconds) optionally collected by GPU backends.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct FrameTimingStats {
+    /// CPU-side packing and texture/buffer upload time.
+    pub upload_us: u32,
+    /// GPU draw execution time (measured via `glFinish` only when timing collection is enabled).
+    pub draw_us: u32,
+    /// GPU-to-CPU pixel readback (and optional format conversion) time.
+    pub readback_us: u32,
+}
+
 /// A rendered RGBA8 frame produced by a VICON compositor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedFrame {
@@ -62,6 +73,53 @@ impl RenderedFrame {
             .chunks_exact(4)
             .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
             .count()
+    }
+
+    /// Resizes this frame to `dst_w × dst_h` using bilinear sampling (returns a clone if unchanged).
+    pub fn resize_bilinear(&self, dst_w: u32, dst_h: u32) -> Self {
+        let dst_w = dst_w.max(1);
+        let dst_h = dst_h.max(1);
+        if dst_w == self.width && dst_h == self.height {
+            return self.clone();
+        }
+        let sw = self.width.max(1) as usize;
+        let sh = self.height.max(1) as usize;
+        let dw = dst_w as usize;
+        let dh = dst_h as usize;
+        let mut out = vec![0u8; dw * dh * 4];
+        let x_scale = (sw as f32) / (dw as f32);
+        let y_scale = (sh as f32) / (dh as f32);
+        for dy in 0..dh {
+            let fy = ((dy as f32 + 0.5) * y_scale - 0.5).clamp(0.0, (sh - 1) as f32);
+            let y0 = fy.floor() as usize;
+            let y1 = (y0 + 1).min(sh - 1);
+            let wy = fy - y0 as f32;
+            let iwy = 1.0 - wy;
+            for dx in 0..dw {
+                let fx = ((dx as f32 + 0.5) * x_scale - 0.5).clamp(0.0, (sw - 1) as f32);
+                let x0 = fx.floor() as usize;
+                let x1 = (x0 + 1).min(sw - 1);
+                let wx = fx - x0 as f32;
+                let iwx = 1.0 - wx;
+
+                let p00 = (y0 * sw + x0) * 4;
+                let p10 = (y0 * sw + x1) * 4;
+                let p01 = (y1 * sw + x0) * 4;
+                let p11 = (y1 * sw + x1) * 4;
+                let dst = (dy * dw + dx) * 4;
+                for c in 0..3 {
+                    let top = self.rgba8[p00 + c] as f32 * iwx + self.rgba8[p10 + c] as f32 * wx;
+                    let bot = self.rgba8[p01 + c] as f32 * iwx + self.rgba8[p11 + c] as f32 * wx;
+                    out[dst + c] = (top * iwy + bot * wy + 0.5).clamp(0.0, 255.0) as u8;
+                }
+                out[dst + 3] = 255;
+            }
+        }
+        Self {
+            width: dst_w,
+            height: dst_h,
+            rgba8: out,
+        }
     }
 
     /// Converts this RGBA8 frame to row-major packed `RGB565`.

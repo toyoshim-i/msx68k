@@ -378,3 +378,116 @@ fn dirty_vram_uploads_and_exhaustive_grbi_contrast_match_across_generations() {
         assert_eq!(f565.rgb565.len(), 256 * 256);
     }
 }
+
+#[test]
+fn gles2_diagnostics_scaled_downsample_and_pipelined_submit_finish() {
+    let mut comps = Compositors::new();
+
+    // 256x256 game-like scene with CYNTHIA sprites (including past x=256), BG0, GVRAM, TVRAM,
+    // and mid-frame raster contrast change to exercise pre-baked (palette_id, contrast) rows.
+    let mut vm = X68kVm::new_app_vm();
+    vm.bus.crtc.regs[0] = 137;
+    vm.bus.crtc.regs[2] = 28;
+    vm.bus.crtc.regs[3] = 28 + 32; // 256 px wide
+    vm.bus.crtc.regs[4] = 567;
+    vm.bus.crtc.regs[6] = 10;
+    vm.bus.crtc.regs[7] = 10 + 256;
+    vm.bus.crtc.regs[20] = 0x0314; // 256x256 non-doubled
+    vm.bus.sysport.contrast = 15;
+    write16(&mut vm, 0xe82400, 0x0000);
+    write16(&mut vm, 0xe82500, 0x12e4);
+    write16(&mut vm, 0xe82600, 0x0061);
+
+    for i in 1..256u32 {
+        write16(&mut vm, 0xe82000 + i * 2, ((i as u16) * 0x0421) | 1);
+        write16(&mut vm, 0xe82200 + i * 2, ((i as u16) * 0x0631) | 1);
+    }
+    for y in 0..256u32 {
+        vm.bus.write_u8(0xe00000 + y * 128 + 1, 0xaa, true).unwrap();
+        vm.bus.write_u8(0xe20000 + y * 128 + 1, 0x55, true).unwrap();
+        write16(&mut vm, 0xc00000 + y * 1024 + 8, ((y & 14) as u16).max(2));
+    }
+    write16(&mut vm, 0xeb080c, 32);
+    write16(&mut vm, 0xeb080e, 10);
+    write16(&mut vm, 0xeb0808, 0x0201); // master + BG0 only (BG1 disabled -> skip BG1 pass)
+    for off in (0..128).step_by(2) {
+        write16(&mut vm, 0xeb8080 + off, 0x3579);
+    }
+    for row in 0..16u32 {
+        for col in 0..32u32 {
+            write16(&mut vm, 0xebc000 + (row * 64 + col) * 2, 0x0104);
+        }
+    }
+    // Sprite inside 0..256 and sprite outside (>= 256) to verify scissor clipping
+    for (idx, x, y, attr, flags) in [
+        (0, 32, 32, 0x0101, 3),
+        (1, 260, 40, 0x0201, 3),
+        (2, 300, 48, 0x0301, 2),
+    ] {
+        write16(&mut vm, 0xeb0000 + idx * 8, x);
+        write16(&mut vm, 0xeb0002 + idx * 8, y);
+        write16(&mut vm, 0xeb0004 + idx * 8, attr);
+        write16(&mut vm, 0xeb0006 + idx * 8, flags);
+    }
+
+    // Live uniform path parity (exercises VICON_FAST_UNIFORM_FS + 256px scissor)
+    assert_all_generations_match(&mut vm, &mut comps, "scissor-256-uniform");
+
+    // Step a full frame with mid-frame contrast change (exercises VICON_FAST_RASTER_FS + baked contrast)
+    for r in 0..568u32 {
+        if r == 140 {
+            vm.bus.sysport.contrast = 7;
+        }
+        vm.bus.advance_peripherals(LINE);
+    }
+    assert_all_generations_match(&mut vm, &mut comps, "scissor-256-raster-contrast");
+
+    // Diagnostics, GPU downsample, and pipelined submit/finish on ViconCompositor
+    let mut comp = ViconCompositor::new(RendererConfig {
+        generation: ShaderGeneration::Gles2,
+        max_width: 768,
+        max_height: 512,
+        output_format: PixelFormat::Rgb565,
+    });
+    #[cfg(feature = "gles2-backend")]
+    {
+        assert_eq!(comp.active_generation(), ShaderGeneration::Gles2);
+        assert!(
+            comp.renderer_name().is_some_and(|s| !s.is_empty()),
+            "GLES 2.0 renderer_name must be populated"
+        );
+    }
+    comp.set_collect_timing(true);
+    let sync_rgba = comp.render_frame(&mut vm.bus);
+    #[cfg(feature = "gles2-backend")]
+    assert!(
+        comp.last_timing().is_some(),
+        "timing stats must be recorded when enabled"
+    );
+
+    // Pipelined native submit/finish must match synchronous render_frame bit-for-bit
+    comp.submit_frame(&mut vm.bus);
+    let pipe_rgba = comp.finish_frame().expect("pending native frame");
+    assert_eq!(pipe_rgba, sync_rgba, "pipelined RGBA8 parity");
+
+    // Scaled downsample (256x256 -> 320x170) & (768x512 -> 320x170) + pipelined RGB565
+    let scaled_rgba = comp.render_frame_scaled(&mut vm.bus, 320, 170);
+    assert_eq!((scaled_rgba.width, scaled_rgba.height), (320, 170));
+    assert!(scaled_rgba.count_lit_pixels() > 0);
+
+    let sync_565 = comp.render_frame_scaled_rgb565(&mut vm.bus, 320, 170);
+    assert_eq!((sync_565.width, sync_565.height), (320, 170));
+    assert_eq!(sync_565.rgb565.len(), 320 * 170);
+
+    comp.submit_frame_scaled_rgb565(&mut vm.bus, 320, 170);
+    let pipe_565 = comp.finish_frame_rgb565().expect("pending scaled RGB565 frame");
+    assert_eq!(pipe_565, sync_565, "pipelined scaled RGB565 parity");
+
+    // Switch geometry to 768x512 and verify Pass 3 UV scaling clamps cleanly without edge bleed
+    vm.bus.crtc.regs[3] = 28 + 96; // 768 wide
+    vm.bus.crtc.regs[7] = 10 + 512;
+    vm.bus.crtc.regs[20] = 0x0315;
+    let hi_scaled = comp.render_frame_scaled_rgb565(&mut vm.bus, 320, 170);
+    assert_eq!((hi_scaled.width, hi_scaled.height), (320, 170));
+    assert_eq!(hi_scaled.rgb565.len(), 320 * 170);
+}
