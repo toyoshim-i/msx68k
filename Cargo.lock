@@ -949,6 +949,7 @@ dependencies = [
 name = "msx68k-app"
 version = "0.1.0"
 dependencies = [
+ "libloading",
  "msx68k-bus",
  "msx68k-vicon",
  "pollster",

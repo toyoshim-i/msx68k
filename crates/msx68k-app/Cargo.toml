@@ -16,3 +16,4 @@ msx68k-vicon = { path = "../msx68k-vicon" }
 wgpu = "24"
 winit = "0.30"
 pollster = "0.4"
+libloading = "0.8"

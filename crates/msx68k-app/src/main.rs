@@ -14,6 +14,9 @@
 //! - `F4`: Switch to `Burst` mode (0 wait, high-speed execution)
 //! - `F12`: Soft Reset X68000 VM
 
+#[allow(dead_code)]
+mod audio;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
