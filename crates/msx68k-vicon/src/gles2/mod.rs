@@ -41,6 +41,16 @@ enum RenderTarget {
     },
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct TextOnlySlotKey {
+    width: u32,
+    height: u32,
+    text_scroll_x: u32,
+    text_scroll_y: u32,
+    pal_gen: u64,
+    pal_row: u32,
+}
+
 #[derive(Copy, Clone)]
 struct PendingReadback {
     fbo: GLuint,
@@ -64,6 +74,7 @@ pub struct Gles2Compositor {
 
     prog_sprite: GLuint,
     prog_bg: GLuint,
+    prog_vicon_text_only: GLuint,
     prog_vicon_fast_u: GLuint,
     prog_vicon_fast_r: GLuint,
     prog_vicon_raw: GLuint,
@@ -84,6 +95,14 @@ pub struct Gles2Compositor {
     bg_u_tbl_inv_h: GLint,
     bg_u_pcg_inv_h: GLint,
 
+    // Uniform locations: VICON_TEXT_ONLY
+    vto_u_tvram: GLint,
+    vto_u_palette: GLint,
+    vto_u_pal_v: GLint,
+    vto_u_tx_scroll: GLint,
+    vto_u_y_flip: GLint,
+    vto_u_pal0_rgb: GLint,
+
     // Uniform locations: VICON_FAST_UNIFORM
     vfu_u_tvram: GLint,
     vfu_u_gvram: GLint,
@@ -92,7 +111,9 @@ pub struct Gles2Compositor {
     vfu_u_cynthia_inv_h: GLint,
     vfu_u_pal_v: GLint,
     vfu_u_r0_mode: GLint,
-    vfu_u_r2_display: GLint,
+    vfu_u_tx_en: GLint,
+    vfu_u_gr_en: GLint,
+    vfu_u_pal0_rgba: GLint,
     vfu_u_ranks: GLint,
     vfu_u_slots: GLint,
     vfu_u_tx_scroll: GLint,
@@ -189,7 +210,12 @@ pub struct Gles2Compositor {
     // Dirty tracking & CPU staging scratch
     vram_dirty_seeded: bool,
     prev_cursor_pages: u128,
+    gvram_nonzero_pages: u128,
     ext_tvram_was_active: bool,
+    last_palette_rgba: Vec<u8>,
+    palette_rgba_gen: u64,
+    slot_text_key: [Option<TextOnlySlotKey>; 2],
+    slot_dirty_tvram_bands: [u32; 2],
     scratch_verts: Vec<f32>,
     scratch_row_state: Vec<u8>,
     scratch_palette_rgba: Vec<u8>,
@@ -238,7 +264,7 @@ impl Gles2Compositor {
         let is_external = ctx.is_external();
         let gl = &ctx.gl;
 
-        let mut compiled_progs: Vec<GLuint> = Vec::with_capacity(6);
+        let mut compiled_progs: Vec<GLuint> = Vec::with_capacity(7);
         let mut try_compile = |vs: &str, fs: &str, attribs: &[(GLuint, &str)]| -> Option<GLuint> {
             match compile_program(gl, vs, fs, attribs) {
                 Ok(p) => {
@@ -260,6 +286,11 @@ impl Gles2Compositor {
             &[(0, "a_pos"), (1, "a_depth"), (2, "a_pat"), (3, "a_meta")],
         )?;
         let prog_bg = try_compile(shaders::BG_VS, shaders::BG_FS, &[(0, "a_pos")])?;
+        let prog_vicon_text_only = try_compile(
+            shaders::VICON_VS,
+            shaders::VICON_TEXT_ONLY_FS,
+            &[(0, "a_pos")],
+        )?;
         let prog_vicon_fast_u = try_compile(
             shaders::VICON_VS,
             shaders::VICON_FAST_UNIFORM_FS,
@@ -394,6 +425,13 @@ impl Gles2Compositor {
         let bg_u_tbl_inv_h = uniform_loc(gl, prog_bg, "u_tbl_inv_h");
         let bg_u_pcg_inv_h = uniform_loc(gl, prog_bg, "u_pcg_inv_h");
 
+        let vto_u_tvram = uniform_loc(gl, prog_vicon_text_only, "u_tvram");
+        let vto_u_palette = uniform_loc(gl, prog_vicon_text_only, "u_palette");
+        let vto_u_pal_v = uniform_loc(gl, prog_vicon_text_only, "u_pal_v");
+        let vto_u_tx_scroll = uniform_loc(gl, prog_vicon_text_only, "u_tx_scroll");
+        let vto_u_y_flip = uniform_loc(gl, prog_vicon_text_only, "u_y_flip");
+        let vto_u_pal0_rgb = uniform_loc(gl, prog_vicon_text_only, "u_pal0_rgba");
+
         let vfu_u_tvram = uniform_loc(gl, prog_vicon_fast_u, "u_tvram");
         let vfu_u_gvram = uniform_loc(gl, prog_vicon_fast_u, "u_gvram");
         let vfu_u_cynthia = uniform_loc(gl, prog_vicon_fast_u, "u_cynthia");
@@ -401,7 +439,9 @@ impl Gles2Compositor {
         let vfu_u_cynthia_inv_h = uniform_loc(gl, prog_vicon_fast_u, "u_cynthia_inv_h");
         let vfu_u_pal_v = uniform_loc(gl, prog_vicon_fast_u, "u_pal_v");
         let vfu_u_r0_mode = uniform_loc(gl, prog_vicon_fast_u, "u_r0_mode");
-        let vfu_u_r2_display = uniform_loc(gl, prog_vicon_fast_u, "u_r2_display");
+        let vfu_u_tx_en = uniform_loc(gl, prog_vicon_fast_u, "u_tx_en");
+        let vfu_u_gr_en = uniform_loc(gl, prog_vicon_fast_u, "u_gr_en");
+        let vfu_u_pal0_rgba = uniform_loc(gl, prog_vicon_fast_u, "u_pal0_rgba");
         let vfu_u_ranks = uniform_loc(gl, prog_vicon_fast_u, "u_ranks");
         let vfu_u_slots = uniform_loc(gl, prog_vicon_fast_u, "u_slots");
         let vfu_u_tx_scroll = uniform_loc(gl, prog_vicon_fast_u, "u_tx_scroll");
@@ -456,6 +496,13 @@ impl Gles2Compositor {
             bg_u_tbl_inv_h,
             bg_u_pcg_inv_h,
 
+            vto_u_tvram,
+            vto_u_palette,
+            vto_u_pal_v,
+            vto_u_tx_scroll,
+            vto_u_y_flip,
+            vto_u_pal0_rgb,
+
             vfu_u_tvram,
             vfu_u_gvram,
             vfu_u_cynthia,
@@ -463,7 +510,9 @@ impl Gles2Compositor {
             vfu_u_cynthia_inv_h,
             vfu_u_pal_v,
             vfu_u_r0_mode,
-            vfu_u_r2_display,
+            vfu_u_tx_en,
+            vfu_u_gr_en,
+            vfu_u_pal0_rgba,
             vfu_u_ranks,
             vfu_u_slots,
             vfu_u_tx_scroll,
@@ -515,6 +564,7 @@ impl Gles2Compositor {
 
             prog_sprite,
             prog_bg,
+            prog_vicon_text_only,
             prog_vicon_fast_u,
             prog_vicon_fast_r,
             prog_vicon_raw,
@@ -567,7 +617,12 @@ impl Gles2Compositor {
 
             vram_dirty_seeded: false,
             prev_cursor_pages: 0,
+            gvram_nonzero_pages: 0,
             ext_tvram_was_active: false,
+            last_palette_rgba: Vec::new(),
+            palette_rgba_gen: 0,
+            slot_text_key: [None; 2],
+            slot_dirty_tvram_bands: [u32::MAX; 2],
             scratch_verts: Vec::new(),
             scratch_row_state: Vec::new(),
             scratch_palette_rgba: Vec::new(),
@@ -688,6 +743,7 @@ impl Gles2Compositor {
         let progs = [
             self.prog_sprite,
             self.prog_bg,
+            self.prog_vicon_text_only,
             self.prog_vicon_fast_u,
             self.prog_vicon_fast_r,
             self.prog_vicon_raw,
@@ -726,6 +782,7 @@ impl Gles2Compositor {
         self.ibo_sprites = 0;
         self.prog_sprite = 0;
         self.prog_bg = 0;
+        self.prog_vicon_text_only = 0;
         self.prog_vicon_fast_u = 0;
         self.prog_vicon_fast_r = 0;
         self.prog_vicon_raw = 0;
@@ -749,7 +806,13 @@ impl Gles2Compositor {
         self.vbo_sprites_cap_bytes = 0;
         self.pending = None;
         self.vram_dirty_seeded = false;
+        self.prev_cursor_pages = 0;
+        self.gvram_nonzero_pages = 0;
         self.ext_tvram_was_active = false;
+        self.last_palette_rgba.clear();
+        self.palette_rgba_gen = 0;
+        self.slot_text_key = [None; 2];
+        self.slot_dirty_tvram_bands = [u32::MAX; 2];
         self.gl_destroyed = true;
     }
 
@@ -921,6 +984,8 @@ impl Gles2Compositor {
         }
         self.output_tex_w[slot] = nw;
         self.output_tex_h[slot] = nh;
+        self.slot_text_key[slot] = None;
+        self.slot_dirty_tvram_bands[slot] = u32::MAX;
         true
     }
 
@@ -1575,7 +1640,7 @@ impl Gles2Compositor {
         }
     }
 
-    fn upload_gvram_pages(&self, gvram: &[u8], pages: u128) {
+    fn upload_gvram_pages(&mut self, gvram: &[u8], pages: u128) {
         let gl = &self.ctx.gl;
         unsafe {
             (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_gvram);
@@ -1594,6 +1659,14 @@ impl Gles2Compositor {
             let byte_len = run * 4096;
             if off + byte_len > gvram.len() {
                 continue;
+            }
+            for p in start..end {
+                let p_off = p * 4096;
+                if slice_is_nonzero(&gvram[p_off..p_off + 4096]) {
+                    self.gvram_nonzero_pages |= 1u128 << p;
+                } else {
+                    self.gvram_nonzero_pages &= !(1u128 << p);
+                }
             }
             unsafe {
                 (gl.glTexSubImage2D)(
@@ -1650,6 +1723,7 @@ impl Gles2Compositor {
         if let Some(gvram) = bus.gvram() {
             self.upload_gvram_pages(gvram, u128::MAX);
         } else {
+            self.gvram_nonzero_pages = 0;
             let gl = &self.ctx.gl;
             let zero = vec![0u8; GVRAM_BYTES];
             unsafe {
@@ -1667,6 +1741,8 @@ impl Gles2Compositor {
                 );
             }
         }
+        self.slot_text_key = [None; 2];
+        self.slot_dirty_tvram_bands = [u32::MAX; 2];
         self.vram_dirty_seeded = false;
     }
 
@@ -1685,24 +1761,33 @@ impl Gles2Compositor {
             }
             self.ext_tvram_was_active = true;
             self.prev_cursor_pages = self.upload_cursor_overlay(bus, true, plane_bytes);
+            self.slot_text_key = [None; 2];
+            self.slot_dirty_tvram_bands = [u32::MAX; 2];
         } else {
             if self.ext_tvram_was_active {
                 self.ensure_standard_tvram_tex();
                 written.tvram = u128::MAX;
                 self.ext_tvram_was_active = false;
+                self.slot_text_key = [None; 2];
             }
             let pages = written.tvram | self.prev_cursor_pages;
+            let mut dirty_bands = tvram_pages_to_bands(pages);
             if pages != 0 {
                 if let Some(tvram) = bus.tvram() {
                     self.upload_standard_tvram_pages(tvram, pages);
                 }
             }
             self.prev_cursor_pages = self.upload_cursor_overlay(bus, false, plane_bytes);
+            dirty_bands |= tvram_pages_to_bands(self.prev_cursor_pages);
+            self.slot_dirty_tvram_bands[0] |= dirty_bands;
+            self.slot_dirty_tvram_bands[1] |= dirty_bands;
         }
 
         if written.gvram != 0 {
             if let Some(gvram) = bus.gvram() {
                 self.upload_gvram_pages(gvram, written.gvram);
+            } else {
+                self.gvram_nonzero_pages = 0;
             }
         }
     }
@@ -1723,15 +1808,19 @@ impl Gles2Compositor {
         let is_ext_tvram = !(uniforms.tvram_row_bytes == 128
             && uniforms.tvram_plane_bytes == TVRAM_PLANE_BYTES as u32);
 
-        // Determine if any row uses 65536-color byte-split palette mode
+        // Determine if any row actually renders 65536-color byte-split graphics
+        // (when all 4 graphic plane bits are off, e.g. Human68k 768x512 text console with
+        // r0=3, r2=0x20, 65536-color graphics are inactive and the fast/text-only path applies).
         let any_row_65536 = if let Some(frame) = completed {
             frame.lines.iter().any(|l| {
                 let m = l.state.registers.mode & 7;
-                m == 2 || m == 3
+                let d = l.state.registers.display & 127;
+                (m == 2 || m == 3) && (d & 0x0F) != 0
             })
         } else {
             let m = uniforms.r0_mode & 7;
-            m == 2 || m == 3
+            let d = uniforms.r2_display & 127;
+            (m == 2 || m == 3) && (d & 0x0F) != 0
         };
 
         // Pass 1 needs per-row `u_row_state` whenever CYNTHIA is enabled, but Pass 2 can still
@@ -1967,7 +2056,8 @@ impl Gles2Compositor {
         }
 
         if !any_row_65536 {
-            let mut pal_h = self.palette_rgba_tex_h;
+            let prev_pal_h = self.palette_rgba_tex_h;
+            let mut pal_h = prev_pal_h;
             self.ensure_2d_tex_height(
                 self.tex_palette_rgba,
                 512,
@@ -1976,20 +2066,27 @@ impl Gles2Compositor {
                 GL_RGBA,
             );
             self.palette_rgba_tex_h = pal_h;
-            let gl = &self.ctx.gl;
-            unsafe {
-                (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_palette_rgba);
-                (gl.glTexSubImage2D)(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    512,
-                    baked_pal_count as GLsizei,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    self.scratch_palette_rgba.as_ptr() as *const c_void,
-                );
+            let pal_bytes = (baked_pal_count as usize * 512 * 4).min(self.scratch_palette_rgba.len());
+            let pal_slice = &self.scratch_palette_rgba[..pal_bytes];
+            if pal_h != prev_pal_h || self.last_palette_rgba.as_slice() != pal_slice {
+                self.last_palette_rgba.clear();
+                self.last_palette_rgba.extend_from_slice(pal_slice);
+                self.palette_rgba_gen = self.palette_rgba_gen.wrapping_add(1);
+                let gl = &self.ctx.gl;
+                unsafe {
+                    (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_palette_rgba);
+                    (gl.glTexSubImage2D)(
+                        GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        512,
+                        baked_pal_count as GLsizei,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        pal_slice.as_ptr() as *const c_void,
+                    );
+                }
             }
         } else {
             let mut pal_h = self.palette_raw_tex_h;
@@ -2097,16 +2194,96 @@ impl Gles2Compositor {
 
         // Pass 2: VICON composite at native resolution
         let use_fast_uniform = !any_row_65536 && !vicon_has_row_map && !is_ext_tvram;
+        let can_persist_slot = !is_external_fbo && !pass2_is_565_direct;
+
+        let r0_mode = uniform_row.r0_mode & 7;
+        let r2 = uniform_row.r2_display & 127;
+        let gr_rank_u = (uniform_row.r1_priority >> 8) & 3;
+        let tx_en = (r2 & 32) != 0 && gr_rank_u < 3;
+        let cyn_active = cynthia_enabled && first_cyn_active && (r2 & 64) != 0 && gr_rank_u < 3;
+        let gr_has_en_bits = if r0_mode >= 4 {
+            (r2 & 16) != 0
+        } else {
+            (r2 & 15) != 0
+        };
+        let gr_effectively_active = gr_has_en_bits && self.gvram_nonzero_pages != 0;
+        let is_blank_uniform = uniform_baked_pal_id == u32::MAX
+            || r2 == 0
+            || (!tx_en && !cyn_active && !gr_effectively_active);
+        let use_text_only = use_fast_uniform
+            && !is_blank_uniform
+            && tx_en
+            && !cyn_active
+            && !gr_effectively_active;
+
+        let pal0_rgba = if !any_row_65536 && uniform_baked_pal_id != u32::MAX {
+            let off = uniform_baked_pal_id as usize * 512 * 4;
+            if off + 4 <= self.scratch_palette_rgba.len() {
+                [
+                    self.scratch_palette_rgba[off] as f32 / 255.0,
+                    self.scratch_palette_rgba[off + 1] as f32 / 255.0,
+                    self.scratch_palette_rgba[off + 2] as f32 / 255.0,
+                    self.scratch_palette_rgba[off + 3] as f32 / 255.0,
+                ]
+            } else {
+                [0.0; 4]
+            }
+        } else {
+            [0.0; 4]
+        };
+
+        let mut text_only_spans: Vec<(u32, u32)> = Vec::new();
+        let mut skip_pass2 = false;
+        let mut use_scissor_spans = false;
+        if use_text_only && can_persist_slot {
+            let cur_key = TextOnlySlotKey {
+                width: uniforms.width,
+                height: uniforms.height,
+                text_scroll_x: uniform_row.text_scroll_x & 1023,
+                text_scroll_y: uniform_row.text_scroll_y & 1023,
+                pal_gen: self.palette_rgba_gen,
+                pal_row: uniform_baked_pal_id,
+            };
+            if self.slot_text_key[slot] == Some(cur_key) {
+                let dirty_bands = self.slot_dirty_tvram_bands[slot];
+                if dirty_bands == 0 {
+                    skip_pass2 = true;
+                } else if dirty_bands != u32::MAX {
+                    dirty_screen_y_spans(
+                        dirty_bands,
+                        cur_key.text_scroll_y,
+                        uniforms.height,
+                        &mut text_only_spans,
+                    );
+                    if text_only_spans.is_empty() {
+                        skip_pass2 = true;
+                    } else if !(text_only_spans.len() == 1
+                        && text_only_spans[0] == (0, uniforms.height))
+                    {
+                        use_scissor_spans = true;
+                    }
+                }
+            } else {
+                self.slot_text_key[slot] = Some(cur_key);
+            }
+            self.slot_dirty_tvram_bands[slot] = 0;
+        } else if can_persist_slot {
+            self.slot_text_key[slot] = None;
+            self.slot_dirty_tvram_bands[slot] = u32::MAX;
+        }
+
         let gl = &self.ctx.gl;
         unsafe {
-            (gl.glBindFramebuffer)(GL_FRAMEBUFFER, pass2_fbo);
-            (gl.glViewport)(0, 0, uniforms.width as GLsizei, uniforms.height as GLsizei);
-            (gl.glDisable)(GL_DEPTH_TEST);
-            (gl.glDepthMask)(GL_FALSE);
+            if !skip_pass2 {
+                (gl.glBindFramebuffer)(GL_FRAMEBUFFER, pass2_fbo);
+                (gl.glViewport)(0, 0, uniforms.width as GLsizei, uniforms.height as GLsizei);
+                (gl.glDisable)(GL_DEPTH_TEST);
+                (gl.glDepthMask)(GL_FALSE);
+            }
 
-            if use_fast_uniform
-                && ((uniform_row.r2_display & 127) == 0 || uniform_baked_pal_id == u32::MAX)
-            {
+            if skip_pass2 {
+                // Owned output FBO already holds the exact pixels for this text-only frame.
+            } else if use_fast_uniform && is_blank_uniform {
                 // Fully blank uniform frame: clear directly without invoking VICON shader
                 if is_external_fbo {
                     (gl.glEnable)(GL_SCISSOR_TEST);
@@ -2116,6 +2293,53 @@ impl Gles2Compositor {
                 (gl.glClear)(GL_COLOR_BUFFER_BIT);
                 if is_external_fbo {
                     (gl.glDisable)(GL_SCISSOR_TEST);
+                }
+            } else if use_text_only {
+                (gl.glUseProgram)(self.prog_vicon_text_only);
+
+                (gl.glActiveTexture)(GL_TEXTURE0);
+                (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_tvram);
+                (gl.glUniform1i)(self.vto_u_tvram, 0);
+
+                (gl.glActiveTexture)(GL_TEXTURE0 + 1);
+                (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_palette_rgba);
+                (gl.glUniform1i)(self.vto_u_palette, 1);
+
+                (gl.glUniform1f)(
+                    self.vto_u_pal_v,
+                    (uniform_baked_pal_id as f32 + 0.5) / (self.palette_rgba_tex_h as f32),
+                );
+                (gl.glUniform2f)(
+                    self.vto_u_tx_scroll,
+                    (uniform_row.text_scroll_x & 1023) as f32,
+                    (uniform_row.text_scroll_y & 1023) as f32,
+                );
+                (gl.glUniform2f)(self.vto_u_y_flip, y_flip.0, y_flip.1);
+                (gl.glUniform4f)(
+                    self.vto_u_pal0_rgb,
+                    pal0_rgba[0],
+                    pal0_rgba[1],
+                    pal0_rgba[2],
+                    1.0,
+                );
+
+                (gl.glBindBuffer)(GL_ARRAY_BUFFER, self.vbo_quad);
+                (gl.glEnableVertexAttribArray)(0);
+                (gl.glVertexAttribPointer)(0, 2, GL_FLOAT, GL_FALSE, 8, ptr::null());
+                if use_scissor_spans {
+                    (gl.glEnable)(GL_SCISSOR_TEST);
+                    for &(sy0, sy1) in &text_only_spans {
+                        (gl.glScissor)(
+                            0,
+                            sy0 as GLint,
+                            uniforms.width as GLsizei,
+                            (sy1 - sy0) as GLsizei,
+                        );
+                        (gl.glDrawArrays)(GL_TRIANGLE_STRIP, 0, 4);
+                    }
+                    (gl.glDisable)(GL_SCISSOR_TEST);
+                } else {
+                    (gl.glDrawArrays)(GL_TRIANGLE_STRIP, 0, 4);
                 }
             } else if use_fast_uniform {
                 (gl.glUseProgram)(self.prog_vicon_fast_u);
@@ -2136,17 +2360,21 @@ impl Gles2Compositor {
                 (gl.glBindTexture)(GL_TEXTURE_2D, self.tex_palette_rgba);
                 (gl.glUniform1i)(self.vfu_u_palette, 3);
 
-                let gr_rank = ((uniform_row.r1_priority >> 8) & 3) as f32;
+                let gr_rank = gr_rank_u as f32;
                 let tx_rank = ((uniform_row.r1_priority >> 10) & 3) as f32;
                 let sp_rank = ((uniform_row.r1_priority >> 12) & 3) as f32;
-                let cyn_act = if cynthia_enabled
-                    && first_cyn_active
-                    && (uniform_row.r2_display & 64 != 0)
-                    && gr_rank < 2.5
-                {
-                    1.0
+                let cyn_act = if cyn_active { 1.0 } else { 0.0 };
+                let gr_en = if !gr_effectively_active {
+                    [0.0; 4]
+                } else if r0_mode >= 4 {
+                    [if (r2 & 16) != 0 { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]
                 } else {
-                    0.0
+                    [
+                        if (r2 & 1) != 0 { 1.0 } else { 0.0 },
+                        if (r2 & 2) != 0 { 1.0 } else { 0.0 },
+                        if (r2 & 4) != 0 { 1.0 } else { 0.0 },
+                        if (r2 & 8) != 0 { 1.0 } else { 0.0 },
+                    ]
                 };
 
                 (gl.glUniform1f)(
@@ -2157,8 +2385,16 @@ impl Gles2Compositor {
                     self.vfu_u_pal_v,
                     (uniform_baked_pal_id as f32 + 0.5) / (self.palette_rgba_tex_h as f32),
                 );
-                (gl.glUniform1f)(self.vfu_u_r0_mode, (uniform_row.r0_mode & 7) as f32);
-                (gl.glUniform1f)(self.vfu_u_r2_display, (uniform_row.r2_display & 127) as f32);
+                (gl.glUniform1f)(self.vfu_u_r0_mode, r0_mode as f32);
+                (gl.glUniform1f)(self.vfu_u_tx_en, if tx_en { 1.0 } else { 0.0 });
+                (gl.glUniform4f)(self.vfu_u_gr_en, gr_en[0], gr_en[1], gr_en[2], gr_en[3]);
+                (gl.glUniform4f)(
+                    self.vfu_u_pal0_rgba,
+                    pal0_rgba[0],
+                    pal0_rgba[1],
+                    pal0_rgba[2],
+                    pal0_rgba[3],
+                );
                 (gl.glUniform4f)(self.vfu_u_ranks, gr_rank, tx_rank, sp_rank, cyn_act);
                 (gl.glUniform4f)(
                     self.vfu_u_slots,
@@ -2172,11 +2408,7 @@ impl Gles2Compositor {
                     (uniform_row.text_scroll_x & 1023) as f32,
                     (uniform_row.text_scroll_y & 1023) as f32,
                 );
-                let gmask = if (uniform_row.r0_mode & 7) >= 4 {
-                    1023
-                } else {
-                    511
-                };
+                let gmask = if r0_mode >= 4 { 1023 } else { 511 };
                 (gl.glUniform4f)(
                     self.vfu_u_gr_scroll01,
                     (uniform_row.gr_scroll_x[0] & gmask) as f32,
@@ -2932,6 +3164,72 @@ fn pack_row_state_entry(
     set(14, [if large { 255 } else { 0 }, 0, 0, 0]);
 }
 
+#[inline]
+fn slice_is_nonzero(bytes: &[u8]) -> bool {
+    let (prefix, words, suffix) = unsafe { bytes.align_to::<u64>() };
+    prefix.iter().any(|&b| b != 0)
+        || words.iter().any(|&w| w != 0)
+        || suffix.iter().any(|&b| b != 0)
+}
+
+#[inline]
+fn tvram_pages_to_bands(pages: u128) -> u32 {
+    ((pages | (pages >> 32) | (pages >> 64) | (pages >> 96)) & 0xFFFF_FFFF) as u32
+}
+
+fn dirty_screen_y_spans(dirty_bands: u32, scroll_y: u32, height: u32, out: &mut Vec<(u32, u32)>) {
+    out.clear();
+    if dirty_bands == 0 || height == 0 {
+        return;
+    }
+    let scroll_y = scroll_y & 1023;
+    let mut push_clipped = |sy0: u32, sy1: u32| {
+        if sy0 < height {
+            let end = sy1.min(height);
+            if sy0 < end {
+                out.push((sy0, end));
+            }
+        }
+    };
+
+    let mut mask = dirty_bands;
+    while mask != 0 {
+        let b0 = mask.trailing_zeros();
+        let run = (mask >> b0).trailing_ones();
+        let b1 = b0 + run;
+        mask = if b1 >= 32 {
+            0
+        } else {
+            mask & !((1u32 << b1) - 1)
+        };
+        let ty0 = b0 * 32;
+        let len = run * 32;
+        let sy0 = (ty0 + 1024 - scroll_y) & 1023;
+        if sy0 + len <= 1024 {
+            push_clipped(sy0, sy0 + len);
+        } else {
+            push_clipped(sy0, 1024);
+            push_clipped(0, sy0 + len - 1024);
+        }
+    }
+
+    if out.len() <= 1 {
+        return;
+    }
+    out.sort_unstable_by_key(|&(s, _)| s);
+    let mut write = 0usize;
+    for read in 1..out.len() {
+        let (s, e) = out[read];
+        if s <= out[write].1 {
+            out[write].1 = out[write].1.max(e);
+        } else {
+            write += 1;
+            out[write] = (s, e);
+        }
+    }
+    out.truncate(write + 1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3087,6 +3385,7 @@ mod tests {
         let gl = &comp.ctx.gl;
 
         for (name, fs_src) in [
+            ("VICON_TEXT_ONLY_FS", shaders::VICON_TEXT_ONLY_FS),
             ("VICON_FAST_UNIFORM_FS", shaders::VICON_FAST_UNIFORM_FS),
             ("VICON_FAST_RASTER_FS", shaders::VICON_FAST_RASTER_FS),
             ("VICON_RAW_FS", shaders::VICON_RAW_FS),
@@ -3719,5 +4018,120 @@ mod tests {
             none_result,
             "from_current_context with no current GL context must return None"
         );
+    }
+
+    #[test]
+    fn dirty_screen_y_spans_maps_and_coalesces_bands() {
+        let mut spans = Vec::new();
+
+        // No scroll: band 0 and band 1 coalesce into [0, 64), band 20 is off-screen for h=512
+        dirty_screen_y_spans((1 << 0) | (1 << 1) | (1 << 20), 0, 512, &mut spans);
+        assert_eq!(spans, vec![(0, 64)]);
+
+        // Off-screen band only -> empty
+        dirty_screen_y_spans(1 << 20, 0, 512, &mut spans);
+        assert!(spans.is_empty());
+
+        // Scroll wrap-around: scroll_y = 1008 -> TVRAM [1008..1024) maps to screen [0..16),
+        // and TVRAM [0..32) maps to screen [16..48), coalescing into [0..48).
+        dirty_screen_y_spans((1 << 31) | (1 << 0), 1008, 512, &mut spans);
+        assert_eq!(spans, vec![(0, 48)]);
+
+        // Partial wrap at bottom of screen: scroll_y = 16 -> band 0 [0..32) maps to
+        // screen [1008..1024) (off-screen) and [0..16) (on-screen).
+        dirty_screen_y_spans(1 << 0, 16, 512, &mut spans);
+        assert_eq!(spans, vec![(0, 16)]);
+    }
+
+    #[test]
+    fn text_only_fast_path_scissor_and_gvram_empty_transitions_match_cpu() {
+        let mut comp = Gles2Compositor::new().expect("headless EGL + GLES 2.0 context required");
+        let mut vm = X68kVm::new(msx68k_bus::VmConfig::app_vm());
+        // 768x512 Human68k-like mode (16-color 1024x1024 GVRAM bit enabled, but GVRAM all-zero!)
+        vm.bus.crtc.regs[2] = 0;
+        vm.bus.crtc.regs[3] = 96; // 768px
+        vm.bus.crtc.regs[6] = 0;
+        vm.bus.crtc.regs[7] = 512;
+        vm.bus.crtc.regs[20] = 0x0416; // 768x512
+        vm.bus.sysport.contrast = 15;
+        let _ = vm.bus.write_u16(0xe82400, 0x0004, true); // R0: 1024x1024 16-color
+        let _ = vm.bus.write_u16(0xe82500, 0x12e4, true); // R1: standard priority
+        let _ = vm.bus.write_u16(0xe82600, 0x0030, true); // R2: Text + Graphic 1024x1024 ON
+        // Set text palette (including non-zero colors)
+        for i in 1..16u32 {
+            let _ = vm
+                .bus
+                .write_u16(0xe82200 + i * 2, ((i as u16) * 0x1042) | 1, true);
+        }
+        // Write a few rows of TVRAM across planes 0..3
+        for row in [0u32, 15, 40, 200, 490] {
+            for col in 0..8u32 {
+                let off = row * 128 + col;
+                let _ = vm.bus.write_u8(0xe00000 + off, 0xA5 ^ (row as u8), true);
+                let _ = vm.bus.write_u8(0xe20000 + off, 0x3C, true);
+                let _ = vm.bus.write_u8(0xe40000 + off, 0x0F, true);
+            }
+        }
+
+        // Frame 1 & 2: initial full draws on both double-buffered slots (GVRAM empty -> Text-only path)
+        for _ in 0..2 {
+            let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+            let cpu = render_bus_frame_cpu(&vm.bus);
+            assert_eq!(gpu.width, 768);
+            assert_eq!(gpu.height, 512);
+            assert_eq!(gpu.rgba8, cpu.rgba8, "initial text-only frame mismatch");
+        }
+        assert_eq!(comp.gvram_nonzero_pages, 0);
+
+        // Frame 3 & 4: completely unchanged frames -> Pass 2 skipped on both slots
+        for _ in 0..2 {
+            let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+            let cpu = render_bus_frame_cpu(&vm.bus);
+            assert_eq!(gpu.rgba8, cpu.rgba8, "unchanged text-only skip mismatch");
+        }
+
+        // Frame 5 & 6: modify a single TVRAM band (row 64 -> band 2) -> scissored partial update on both slots
+        let _ = vm.bus.write_u8(0xe00000 + 64 * 128 + 3, 0xFF, true);
+        let _ = vm.bus.write_u8(0xe60000 + 64 * 128 + 3, 0xFF, true);
+        for _ in 0..2 {
+            let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+            let cpu = render_bus_frame_cpu(&vm.bus);
+            assert_eq!(gpu.rgba8, cpu.rgba8, "scissored dirty band mismatch");
+        }
+
+        // Frame 7: non-zero text palette[0] (opaque background) + text scroll wrap-around
+        let _ = vm.bus.write_u16(0xe82200, 0x0843, true);
+        vm.bus.crtc.regs[10] = 13;
+        vm.bus.crtc.regs[11] = 1008;
+        let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+        let cpu = render_bus_frame_cpu(&vm.bus);
+        assert_eq!(gpu.rgba8, cpu.rgba8, "non-zero pal0 + scroll wrap mismatch");
+
+        // Frame 8: write a single pixel to GVRAM -> must leave text-only path and show GVRAM pixel
+        let _ = vm.bus.write_u16(0xe82002, 0xF801, true); // graphic palette[1]
+        let _ = vm.bus.write_u16(0xc00000 + 10 * 1024 + 20 * 2, 0x0001, true);
+        let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+        let cpu = render_bus_frame_cpu(&vm.bus);
+        assert_ne!(comp.gvram_nonzero_pages, 0);
+        assert_eq!(gpu.rgba8, cpu.rgba8, "gvram non-empty transition mismatch");
+
+        // Frame 9: clear GVRAM pixel back to 0 -> returns cleanly to text-only path
+        let _ = vm.bus.write_u16(0xc00000 + 10 * 1024 + 20 * 2, 0x0000, true);
+        let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+        let cpu = render_bus_frame_cpu(&vm.bus);
+        assert_eq!(comp.gvram_nonzero_pages, 0);
+        assert_eq!(gpu.rgba8, cpu.rgba8, "gvram cleared back to empty mismatch");
+
+        // Frame 10: Human68k 768x512 boot state (r0=3 65536-color mode, r2=0x20 text-only)
+        // Must take Text-only fast path rather than falling back to VICON_RAW_FS.
+        let _ = vm.bus.write_u16(0xe82400, 0x0003, true); // R0: 65536-color mode
+        let _ = vm.bus.write_u16(0xe82600, 0x0020, true); // R2: Text only (GVRAM bits 0..3 off)
+        let gpu = comp.render_bus_frame_dirty(&mut vm.bus);
+        let cpu = render_bus_frame_cpu(&vm.bus);
+        assert!(
+            comp.slot_text_key[0].is_some() || comp.slot_text_key[1].is_some(),
+            "r0=3 with r2=0x20 must use text-only fast path"
+        );
+        assert_eq!(gpu.rgba8, cpu.rgba8, "r0=3 r2=0x20 text-only mismatch");
     }
 }

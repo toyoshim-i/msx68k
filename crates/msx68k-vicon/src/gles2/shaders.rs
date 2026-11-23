@@ -181,10 +181,67 @@ void main() {
 }
 "#;
 
+/// Pass 2 text-only specialized uniform VICON shader:
+/// - Used when no row uses 65536-color mode, VICON state is uniform, standard TVRAM is active,
+///   text is enabled, and both GVRAM (disabled or all-zero) and CYNTHIA are inactive.
+/// - Eliminates GVRAM/CYNTHIA/priority branching and skips dependent palette fetches on empty
+///   TVRAM bytes (`raw == 0`) and `tx_idx == 0` pixels.
+pub const VICON_TEXT_ONLY_FS: &str = r#"
+precision mediump float;
+
+uniform sampler2D u_tvram;
+uniform sampler2D u_palette;
+
+uniform float u_pal_v;
+uniform vec2 u_tx_scroll;
+uniform vec2 u_y_flip;
+uniform vec4 u_pal0_rgba;
+
+float bit_scale(float bit_pos) {
+    float s = 1.0;
+    float bp = bit_pos;
+    if (bp < 4.0) { s *= 0.0625; } else { bp -= 4.0; }
+    if (bp < 2.0) { s *= 0.25; } else { bp -= 2.0; }
+    if (bp < 1.0) { s *= 0.5; }
+    return s;
+}
+
+void main() {
+    float tx = floor(gl_FragCoord.x) + u_tx_scroll.x;
+    if (tx >= 1024.0) {
+        tx -= 1024.0;
+    }
+    float ty = u_y_flip.x + floor(gl_FragCoord.y) * u_y_flip.y + u_tx_scroll.y;
+    if (ty >= 1024.0) {
+        ty -= 1024.0;
+    }
+    float byte_x = floor(tx * 0.125);
+    float half_sel = step(512.0, ty);
+    float tex_y = (ty - half_sel * 512.0 + 0.5) / 512.0;
+    float tex_x = (half_sel * 128.0 + byte_x + 0.5) / 256.0;
+    vec4 raw = texture2D(u_tvram, vec2(tex_x, tex_y));
+    if (raw.r + raw.g + raw.b + raw.a == 0.0) {
+        gl_FragColor = u_pal0_rgba;
+        return;
+    }
+    float bit_pos = tx - byte_x * 8.0;
+    vec4 tb = floor(raw * 255.0 + 0.5);
+    vec4 shifted = floor(tb * bit_scale(bit_pos));
+    vec4 bits = shifted - floor(shifted * 0.5) * 2.0;
+    float tx_idx = dot(bits, vec4(1.0, 2.0, 4.0, 8.0));
+    if (tx_idx < 0.5) {
+        gl_FragColor = u_pal0_rgba;
+        return;
+    }
+    vec4 col = texture2D(u_palette, vec2((tx_idx + 0.5) / 512.0, u_pal_v));
+    gl_FragColor = vec4(col.rgb, 1.0);
+}
+"#;
+
 /// Pass 2 fast uniform VICON shader:
 /// - Used when no row uses 65536-color mode, VICON state is uniform across rows, and TVRAM is standard.
 /// - Zero `u_row_state` fetches, zero `u_lut` fetches, 1-fetch RGBA TVRAM, pre-baked RGBA palette,
-///   disabled GVRAM page skipping, and front-to-back layer priority early-out.
+///   pre-unpacked plane enables, disabled GVRAM page skipping, and front-to-back layer priority early-out.
 pub const VICON_FAST_UNIFORM_FS: &str = r#"
 precision mediump float;
 
@@ -196,7 +253,9 @@ uniform sampler2D u_palette;
 uniform float u_cynthia_inv_h;
 uniform float u_pal_v;
 uniform float u_r0_mode;
-uniform float u_r2_display;
+uniform float u_tx_en;
+uniform vec4 u_gr_en;       // (en0, en1, en2, en3) or (en_1024, 0, 0, 0) when mode >= 4
+uniform vec4 u_pal0_rgba;   // pre-baked text palette[0] RGBA (alpha 0 if GRBI==0)
 uniform vec4 u_ranks;       // x: gr_rank, y: tx_rank, z: sp_rank, w: cynthia_active
 uniform vec4 u_slots;       // p0, p1, p2, p3
 uniform vec2 u_tx_scroll;   // tx_sx, tx_sy
@@ -218,23 +277,33 @@ vec4 pal_rgba(float col) {
 }
 
 vec4 sample_text(float x, float y) {
-    if (mod(floor(u_r2_display / 32.0), 2.0) < 0.5) {
+    if (u_tx_en < 0.5) {
         return vec4(0.0);
     }
-    float tx = mod(x + u_tx_scroll.x, 1024.0);
+    float tx = x + u_tx_scroll.x;
+    if (tx >= 1024.0) {
+        tx -= 1024.0;
+    }
     float ty = y + u_tx_scroll.y;
     if (ty >= 1024.0) {
         ty -= 1024.0;
     }
     float byte_x = floor(tx * 0.125);
-    float bit_pos = tx - byte_x * 8.0;
     float half_sel = step(512.0, ty);
     float tex_y = (ty - half_sel * 512.0 + 0.5) / 512.0;
     float tex_x = (half_sel * 128.0 + byte_x + 0.5) / 256.0;
-    vec4 tb = floor(texture2D(u_tvram, vec2(tex_x, tex_y)) * 255.0 + 0.5);
+    vec4 raw = texture2D(u_tvram, vec2(tex_x, tex_y));
+    if (raw.r + raw.g + raw.b + raw.a == 0.0) {
+        return u_pal0_rgba;
+    }
+    float bit_pos = tx - byte_x * 8.0;
+    vec4 tb = floor(raw * 255.0 + 0.5);
     vec4 shifted = floor(tb * bit_scale(bit_pos));
     vec4 bits = shifted - floor(shifted * 0.5) * 2.0;
     float tx_idx = dot(bits, vec4(1.0, 2.0, 4.0, 8.0));
+    if (tx_idx < 0.5) {
+        return u_pal0_rgba;
+    }
     return pal_rgba(tx_idx);
 }
 
@@ -279,11 +348,13 @@ float gv_nibble(float page, float x, float y, float do_scroll) {
 
 vec4 sample_graphics(float x, float y) {
     if (u_r0_mode >= 3.5) {
-        if (mod(floor(u_r2_display / 16.0), 2.0) < 0.5) {
+        if (u_gr_en.x < 0.5) {
             return vec4(0.0);
         }
-        float gx = mod(x + u_gr_scroll01.x, 1024.0);
-        float gy = mod(y + u_gr_scroll01.y, 1024.0);
+        float gx = x + u_gr_scroll01.x;
+        if (gx >= 1024.0) { gx -= 1024.0; }
+        float gy = y + u_gr_scroll01.y;
+        if (gy >= 1024.0) { gy -= 1024.0; }
         float qx = step(512.0, gx);
         float qy = step(512.0, gy);
         float slot = qy * 2.0 + qx;
@@ -298,28 +369,24 @@ vec4 sample_graphics(float x, float y) {
         return pal_rgba(256.0 + idx);
     }
 
-    float en0 = mod(u_r2_display, 2.0);
-    float en1 = mod(floor(u_r2_display * 0.5), 2.0);
-    float en2 = mod(floor(u_r2_display * 0.25), 2.0);
-    float en3 = mod(floor(u_r2_display * 0.125), 2.0);
-    if (en0 + en1 + en2 + en3 < 0.5) {
+    if (u_gr_en.x + u_gr_en.y + u_gr_en.z + u_gr_en.w < 0.5) {
         return vec4(0.0);
     }
 
     if (u_r0_mode < 0.5) {
-        if (en0 > 0.5) {
+        if (u_gr_en.x > 0.5) {
             float n0 = gv_nibble(u_slots.x, x, y, 1.0);
             if (n0 > 0.5) { return pal_rgba(256.0 + n0); }
         }
-        if (en1 > 0.5) {
+        if (u_gr_en.y > 0.5) {
             float n1 = gv_nibble(u_slots.y, x, y, 1.0);
             if (n1 > 0.5) { return pal_rgba(256.0 + n1); }
         }
-        if (en2 > 0.5) {
+        if (u_gr_en.z > 0.5) {
             float n2 = gv_nibble(u_slots.z, x, y, 1.0);
             if (n2 > 0.5) { return pal_rgba(256.0 + n2); }
         }
-        if (en3 > 0.5) {
+        if (u_gr_en.w > 0.5) {
             float n3 = gv_nibble(u_slots.w, x, y, 1.0);
             if (n3 > 0.5) { return pal_rgba(256.0 + n3); }
         }
@@ -327,11 +394,11 @@ vec4 sample_graphics(float x, float y) {
     }
 
     // 256-color mode
-    if (en0 + en1 > 0.5) {
+    if (u_gr_en.x + u_gr_en.y > 0.5) {
         float c01 = gv_nibble(u_slots.x, x, y, 1.0) + gv_nibble(u_slots.y, x, y, 1.0) * 16.0;
         if (c01 > 0.5) { return pal_rgba(256.0 + c01); }
     }
-    if (en2 + en3 > 0.5) {
+    if (u_gr_en.z + u_gr_en.w > 0.5) {
         float c23 = gv_nibble(u_slots.z, x, y, 1.0) + gv_nibble(u_slots.w, x, y, 1.0) * 16.0;
         if (c23 > 0.5) { return pal_rgba(256.0 + c23); }
     }
