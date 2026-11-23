@@ -5,12 +5,12 @@
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use msx68k_bus::opm::OPM_SAMPLE_RATE;
+use msx68k_bus::opm::{Opm, OpmRegEvent, OpmSynthMode, OPM_SAMPLE_RATE};
 
 /// Host audio output sample rate (Hz).
 pub const HOST_SAMPLE_RATE: u32 = 48_000;
@@ -47,11 +47,15 @@ impl Resampler {
     }
 
     fn fill_chunk(&mut self, queue: &mut VecDeque<(i16, i16)>, out: &mut [i16]) {
+        self.fill_chunk_with(|| queue.pop_front(), out);
+    }
+
+    fn fill_chunk_with(&mut self, mut next_sample: impl FnMut() -> Option<(i16, i16)>, out: &mut [i16]) {
         debug_assert_eq!(out.len() % 2, 0);
         if !self.primed {
-            if let Some(first) = queue.pop_front() {
+            if let Some(first) = next_sample() {
                 self.prev = first;
-                self.curr = queue.pop_front().unwrap_or(first);
+                self.curr = next_sample().unwrap_or(first);
                 self.primed = true;
             } else {
                 out.fill(0);
@@ -71,14 +75,17 @@ impl Resampler {
             while self.phase >= RESAMPLE_DEN {
                 self.phase -= RESAMPLE_DEN;
                 self.prev = self.curr;
-                self.curr = queue.pop_front().unwrap_or((0, 0));
+                self.curr = next_sample().unwrap_or((0, 0));
             }
         }
     }
 }
 
 struct SharedAudio {
+    mode: OpmSynthMode,
     queue: Mutex<VecDeque<(i16, i16)>>,
+    events: Mutex<VecDeque<OpmRegEvent>>,
+    produced_clock: AtomicU64,
     queued_samples: AtomicUsize,
     stop: AtomicBool,
 }
@@ -93,9 +100,20 @@ pub struct AudioOutput {
 impl AudioOutput {
     /// Attempts to open a host audio stream (PulseAudio / PipeWire via `libpulse-simple.so.0`).
     /// Returns an inactive `AudioOutput` if no audio backend is available.
-    pub fn open() -> Self {
+    pub fn open(mode: OpmSynthMode) -> Self {
         let shared = Arc::new(SharedAudio {
-            queue: Mutex::new(VecDeque::with_capacity(MAX_OPM_SAMPLES)),
+            mode,
+            queue: Mutex::new(VecDeque::with_capacity(if mode == OpmSynthMode::Inline {
+                MAX_OPM_SAMPLES
+            } else {
+                0
+            })),
+            events: Mutex::new(VecDeque::with_capacity(if mode == OpmSynthMode::Offload {
+                1024
+            } else {
+                0
+            })),
+            produced_clock: AtomicU64::new(0),
             queued_samples: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
         });
@@ -130,6 +148,12 @@ impl AudioOutput {
         }
     }
 
+    /// Returns the configured OPM synthesis mode.
+    #[inline]
+    pub fn mode(&self) -> OpmSynthMode {
+        self.shared.mode
+    }
+
     /// Returns `true` if host audio output is active.
     #[inline]
     pub const fn is_active(&self) -> bool {
@@ -157,7 +181,7 @@ impl AudioOutput {
         }
     }
 
-    /// Appends newly generated OPM stereo samples (at 62,500 Hz) to the playback queue.
+    /// Appends newly generated OPM stereo samples (at 62,500 Hz) in `Inline` mode.
     pub fn push_samples(&self, samples: &[(i16, i16)]) {
         if !self.active || samples.is_empty() {
             return;
@@ -171,6 +195,21 @@ impl AudioOutput {
         self.shared
             .queued_samples
             .store(queue.len(), Ordering::Relaxed);
+    }
+
+    /// Appends timestamped OPM register write events and advances the produced sample clock
+    /// in `Offload` mode.
+    pub fn push_events(&self, events: &[OpmRegEvent], produced_clock: u64) {
+        if !self.active {
+            return;
+        }
+        if !events.is_empty() {
+            let mut queue = self.shared.events.lock().unwrap();
+            queue.extend(events.iter().copied());
+        }
+        self.shared
+            .produced_clock
+            .store(produced_clock, Ordering::Release);
     }
 }
 
@@ -187,12 +226,56 @@ impl Drop for AudioOutput {
 fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
     let mut resampler = Resampler::new();
     let mut buf = vec![0i16; CHUNK_FRAMES * 2];
+    let mut synth_opm = Opm::new();
+    synth_opm.set_audio_enabled(true);
+    let mut synth_clock: u64 = 0;
 
     while !shared.stop.load(Ordering::Relaxed) {
-        {
-            let mut queue = shared.queue.lock().unwrap();
-            resampler.fill_chunk(&mut queue, &mut buf);
-            shared.queued_samples.store(queue.len(), Ordering::Relaxed);
+        match shared.mode {
+            OpmSynthMode::Inline => {
+                let mut queue = shared.queue.lock().unwrap();
+                resampler.fill_chunk(&mut queue, &mut buf);
+                shared.queued_samples.store(queue.len(), Ordering::Relaxed);
+            }
+            OpmSynthMode::Offload => {
+                let produced = shared.produced_clock.load(Ordering::Acquire);
+                let mut events = shared.events.lock().unwrap();
+                // Drop excess backlog if VM ever ran far ahead (e.g. pause/debugger).
+                if produced.saturating_sub(synth_clock) > MAX_OPM_SAMPLES as u64 {
+                    let skip_to = produced - MAX_OPM_SAMPLES as u64;
+                    while let Some(ev) = events.front() {
+                        if ev.sample_time <= skip_to {
+                            synth_opm.write_reg(ev.reg, ev.val);
+                            events.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    synth_clock = skip_to;
+                }
+                resampler.fill_chunk_with(
+                    || {
+                        if synth_clock >= produced {
+                            return None;
+                        }
+                        while let Some(ev) = events.front() {
+                            if ev.sample_time <= synth_clock {
+                                synth_opm.write_reg(ev.reg, ev.val);
+                                events.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                        synth_clock += 1;
+                        Some(synth_opm.next_sample())
+                    },
+                    &mut buf,
+                );
+                shared.queued_samples.store(
+                    produced.saturating_sub(synth_clock) as usize,
+                    Ordering::Relaxed,
+                );
+            }
         }
         if !stream.write(&buf) {
             break;

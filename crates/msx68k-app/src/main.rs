@@ -23,7 +23,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use msx68k_bus::vm_thread::{Pace, VmThread};
-use msx68k_bus::{CpuModel, CpuSpeedMode, FrameBudget, GdbServer, VmConfig, VmEvent, X68kVm};
+use msx68k_bus::{
+    CpuModel, CpuSpeedMode, FrameBudget, GdbServer, OpmRegEvent, OpmSynthMode, VmConfig, VmEvent,
+    X68kVm,
+};
 use msx68k_vicon::{
     ScreenRect, ViconGpuCompositor, ViconSurfacePresenter, VmLayer, VmScreen, VmScreenOutput,
 };
@@ -260,6 +263,7 @@ struct AppArgs {
     gdb_port: Option<u16>,
     /// Host directories mounted as file-level remote drives via `--remote-drive`.
     remote_drives: Vec<PathBuf>,
+    opm_synth_mode: OpmSynthMode,
 }
 
 impl Default for AppArgs {
@@ -298,6 +302,10 @@ impl Default for AppArgs {
             vsync: false,
             gdb_port: None,
             remote_drives: Vec::new(),
+            opm_synth_mode: match std::env::var("MSX68K_OPM_THREAD").ok().as_deref() {
+                Some("offload") => OpmSynthMode::Offload,
+                _ => OpmSynthMode::Inline,
+            },
         }
     }
 }
@@ -411,6 +419,14 @@ impl AppArgs {
                         cfg.remote_drives.push(PathBuf::from(p));
                     }
                 }
+                "--opm-thread" => {
+                    if let Some(m) = args.next() {
+                        cfg.opm_synth_mode = match m.as_str() {
+                            "offload" => OpmSynthMode::Offload,
+                            _ => OpmSynthMode::Inline,
+                        };
+                    }
+                }
                 "--help" | "-h" => {
                     println!(
                         "msx68k — Sharp X68000 / SX-Window Hybrid Execution Environment\n\n\
@@ -429,6 +445,7 @@ impl AppArgs {
                            --scale <1..4>       Initial window scale (default: 1 = 768x512)\n  \
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
                            --fullscreen, -f     Start in host native fullscreen 1:1 mode\n  \
+                           --opm-thread <mode>  YM2151 synth thread: inline | offload (default: inline)\n  \
                            --gdb <port>         Serve the GDB remote protocol on 127.0.0.1:<port>\n\n\
                          Hotkeys:\n  \
                            F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F5: Cycle Resolution | F12: Reset"
@@ -535,6 +552,7 @@ struct Msx68kApp {
     vsync: bool,
     audio: audio::AudioOutput,
     audio_scratch: Vec<(i16, i16)>,
+    audio_events: Vec<OpmRegEvent>,
 }
 
 impl Msx68kApp {
@@ -733,7 +751,8 @@ impl Msx68kApp {
         // VMs opened by VMX68K.X have the CPU of their setup whatever the primary VM's is.
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         let vsync = args.vsync;
-        let audio = audio::AudioOutput::open();
+        let audio = audio::AudioOutput::open(args.opm_synth_mode);
+        vm.set_opm_synth_mode(args.opm_synth_mode);
         vm.set_audio_enabled(audio.is_active());
         Self {
             args,
@@ -761,6 +780,7 @@ impl Msx68kApp {
             vsync,
             audio,
             audio_scratch: Vec::with_capacity(2048),
+            audio_events: Vec::with_capacity(256),
         }
     }
 
@@ -1370,8 +1390,18 @@ impl Msx68kApp {
             _ => self.vm.run_frame(budget),
         }
         if self.audio.is_active() {
-            self.vm.take_audio_samples(&mut self.audio_scratch);
-            self.audio.push_samples(&self.audio_scratch);
+            match self.audio.mode() {
+                OpmSynthMode::Inline => {
+                    self.vm.take_audio_samples(&mut self.audio_scratch);
+                    self.audio.push_samples(&self.audio_scratch);
+                    self.audio_scratch.clear();
+                }
+                OpmSynthMode::Offload => {
+                    let clock = self.vm.take_audio_events(&mut self.audio_events);
+                    self.audio.push_events(&self.audio_events, clock);
+                    self.audio_events.clear();
+                }
+            }
         }
     }
 }
