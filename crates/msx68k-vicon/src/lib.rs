@@ -156,6 +156,29 @@ impl ViconCompositor {
         }
     }
 
+    /// Creates a compositor borrowing a host-managed GLES 2.0 context that is already current
+    /// on the calling thread.
+    ///
+    /// # Safety
+    /// A valid OpenGL ES 2.0 context must be current on the calling thread during initialization
+    /// and every subsequent render/destruction call (unless [`Self::mark_context_lost`] is called
+    /// before drop).
+    #[cfg(feature = "gles2-backend")]
+    pub unsafe fn new_gles2_external(
+        config: RendererConfig,
+        get_proc_address: Option<gles2::GlGetProcAddressFn>,
+    ) -> Option<Self> {
+        let es2 = gles2::Gles2Compositor::from_current_context(config, get_proc_address)?;
+        Some(Self {
+            config,
+            generation: ShaderGeneration::Gles2,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu: None,
+            gles2: Some(es2),
+            pending_fallback: None,
+        })
+    }
+
     fn cpu(config: RendererConfig) -> Self {
         Self {
             config,
@@ -340,6 +363,65 @@ impl ViconCompositor {
             return es2.finish_frame_rgb565();
         }
         self.pending_fallback.take().map(|f| f.to_rgb565())
+    }
+
+    /// Renders a frame directly into `target_fbo` at native resolution without CPU readback,
+    /// consuming dirty VRAM page tracking on `bus`.
+    ///
+    /// Returns `Some((width, height))` on the GLES 2.0 backend while GL resources are live,
+    /// or `None` on non-GLES2 backends (or after [`Self::mark_context_lost`] /
+    /// [`Self::destroy_gl_resources`]).
+    pub fn render_frame_to_fbo(
+        &mut self,
+        bus: &mut X68kBus,
+        target_fbo: u32,
+        flip_y: bool,
+    ) -> Option<(u32, u32)> {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            if !es2.has_live_gl_resources() {
+                return None;
+            }
+            return Some(es2.render_bus_frame_to_fbo(bus, target_fbo, flip_y));
+        }
+        let _ = (bus, target_fbo, flip_y);
+        None
+    }
+
+    /// Renders a frame directly into `target_fbo` from an immutable `&X68kBus` with a full VRAM
+    /// upload and without CPU readback.
+    pub fn render_frame_to_fbo_readonly(
+        &mut self,
+        bus: &X68kBus,
+        target_fbo: u32,
+        flip_y: bool,
+    ) -> Option<(u32, u32)> {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            if !es2.has_live_gl_resources() {
+                return None;
+            }
+            return Some(es2.render_bus_frame_to_fbo_readonly(bus, target_fbo, flip_y));
+        }
+        let _ = (bus, target_fbo, flip_y);
+        None
+    }
+
+    /// Notifies that the host GL context was lost or destroyed, suppressing `glDelete*` calls in
+    /// `Drop`.
+    pub fn mark_context_lost(&mut self) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.mark_context_lost();
+        }
+    }
+
+    /// Explicitly frees owned GL objects while the borrowed GL context is still current.
+    pub fn destroy_gl_resources(&mut self) {
+        #[cfg(feature = "gles2-backend")]
+        if let Some(es2) = self.gles2.as_mut() {
+            es2.destroy_gl_resources();
+        }
     }
 }
 

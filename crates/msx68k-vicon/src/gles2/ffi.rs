@@ -5,6 +5,9 @@ use std::ptr;
 
 use libloading::Library;
 
+/// Proc-address loader callback compatible with libretro's `retro_hw_get_proc_address_t`.
+pub type GlGetProcAddressFn = unsafe extern "C" fn(*const c_char) -> *const c_void;
+
 pub type GLenum = c_uint;
 pub type GLboolean = u8;
 pub type GLbitfield = c_uint;
@@ -40,6 +43,7 @@ pub const EGL_OPENGL_ES_API: EGLenum = 0x30A0;
 pub const EGL_PLATFORM_SURFACELESS_MESA: EGLenum = 0x31DD;
 
 pub const GL_FALSE: GLboolean = 0;
+pub const GL_TRUE: GLboolean = 1;
 pub const GL_TRIANGLES: GLenum = 0x0004;
 pub const GL_TRIANGLE_STRIP: GLenum = 0x0005;
 pub const GL_LESS: GLenum = 0x0201;
@@ -60,6 +64,7 @@ pub const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
 pub const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
 pub const GL_CLAMP_TO_EDGE: GLint = 0x812F;
 pub const GL_DEPTH_TEST: GLenum = 0x0B71;
+pub const GL_STENCIL_TEST: GLenum = 0x0B90;
 pub const GL_SCISSOR_TEST: GLenum = 0x0C11;
 pub const GL_BLEND: GLenum = 0x0BE2;
 pub const GL_DITHER: GLenum = 0x0BD0;
@@ -89,7 +94,7 @@ pub const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
 pub const GL_DEPTH_ATTACHMENT: GLenum = 0x8D00;
 pub const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
 
-#[allow(non_snake_case)]
+#[allow(non_snake_case, dead_code)]
 pub struct EglProcs {
     pub eglGetDisplay: unsafe extern "C" fn(*mut c_void) -> EGLDisplay,
     pub eglGetPlatformDisplay: Option<
@@ -114,6 +119,7 @@ pub struct EglProcs {
     pub eglMakeCurrent:
         unsafe extern "C" fn(EGLDisplay, EGLSurface, EGLSurface, EGLContext) -> EGLBoolean,
     pub eglGetCurrentContext: unsafe extern "C" fn() -> EGLContext,
+    pub eglGetProcAddress: Option<unsafe extern "C" fn(*const c_char) -> *const c_void>,
 }
 
 #[allow(non_snake_case, dead_code)]
@@ -131,6 +137,7 @@ pub struct Gles2Procs {
     pub glClear: unsafe extern "C" fn(GLbitfield),
     pub glClearColor: unsafe extern "C" fn(GLfloat, GLfloat, GLfloat, GLfloat),
     pub glClearDepthf: unsafe extern "C" fn(GLfloat),
+    pub glColorMask: unsafe extern "C" fn(GLboolean, GLboolean, GLboolean, GLboolean),
     pub glCompileShader: unsafe extern "C" fn(GLuint),
     pub glCreateProgram: unsafe extern "C" fn() -> GLuint,
     pub glCreateShader: unsafe extern "C" fn(GLenum) -> GLuint,
@@ -209,6 +216,28 @@ unsafe fn load_sym<T: Copy>(lib: &Library, name: &[u8]) -> Option<T> {
     lib.get::<T>(name).ok().map(|s| *s)
 }
 
+unsafe fn resolve_gl_sym<T: Copy>(
+    get_proc: Option<GlGetProcAddressFn>,
+    fallback_lib: &mut Option<Library>,
+    name: &[u8],
+) -> Option<T> {
+    debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<*const c_void>());
+    debug_assert_eq!(name.last(), Some(&0));
+    if let Some(loader) = get_proc {
+        let ptr = loader(name.as_ptr() as *const c_char);
+        if !ptr.is_null() {
+            return Some(std::mem::transmute_copy::<*const c_void, T>(&ptr));
+        }
+    }
+    if fallback_lib.is_none() {
+        *fallback_lib = Library::new("libGLESv2.so.2")
+            .or_else(|_| Library::new("libGLESv2.so"))
+            .ok();
+    }
+    let lib = fallback_lib.as_ref()?;
+    load_sym(lib, name)
+}
+
 impl EglProcs {
     unsafe fn load(lib: &Library) -> Option<Self> {
         Some(Self {
@@ -224,96 +253,103 @@ impl EglProcs {
             eglDestroyContext: load_sym(lib, b"eglDestroyContext\0")?,
             eglMakeCurrent: load_sym(lib, b"eglMakeCurrent\0")?,
             eglGetCurrentContext: load_sym(lib, b"eglGetCurrentContext\0")?,
+            eglGetProcAddress: load_sym(lib, b"eglGetProcAddress\0"),
         })
     }
 }
 
 impl Gles2Procs {
-    unsafe fn load(lib: &Library) -> Option<Self> {
-        Some(Self {
-            glActiveTexture: load_sym(lib, b"glActiveTexture\0")?,
-            glAttachShader: load_sym(lib, b"glAttachShader\0")?,
-            glBindAttribLocation: load_sym(lib, b"glBindAttribLocation\0")?,
-            glBindBuffer: load_sym(lib, b"glBindBuffer\0")?,
-            glBindFramebuffer: load_sym(lib, b"glBindFramebuffer\0")?,
-            glBindRenderbuffer: load_sym(lib, b"glBindRenderbuffer\0")?,
-            glBindTexture: load_sym(lib, b"glBindTexture\0")?,
-            glBufferData: load_sym(lib, b"glBufferData\0")?,
-            glBufferSubData: load_sym(lib, b"glBufferSubData\0")?,
-            glCheckFramebufferStatus: load_sym(lib, b"glCheckFramebufferStatus\0")?,
-            glClear: load_sym(lib, b"glClear\0")?,
-            glClearColor: load_sym(lib, b"glClearColor\0")?,
-            glClearDepthf: load_sym(lib, b"glClearDepthf\0")?,
-            glCompileShader: load_sym(lib, b"glCompileShader\0")?,
-            glCreateProgram: load_sym(lib, b"glCreateProgram\0")?,
-            glCreateShader: load_sym(lib, b"glCreateShader\0")?,
-            glDeleteBuffers: load_sym(lib, b"glDeleteBuffers\0")?,
-            glDeleteFramebuffers: load_sym(lib, b"glDeleteFramebuffers\0")?,
-            glDeleteProgram: load_sym(lib, b"glDeleteProgram\0")?,
-            glDeleteRenderbuffers: load_sym(lib, b"glDeleteRenderbuffers\0")?,
-            glDeleteShader: load_sym(lib, b"glDeleteShader\0")?,
-            glDeleteTextures: load_sym(lib, b"glDeleteTextures\0")?,
-            glDepthFunc: load_sym(lib, b"glDepthFunc\0")?,
-            glDepthMask: load_sym(lib, b"glDepthMask\0")?,
-            glDisable: load_sym(lib, b"glDisable\0")?,
-            glDisableVertexAttribArray: load_sym(lib, b"glDisableVertexAttribArray\0")?,
-            glDrawArrays: load_sym(lib, b"glDrawArrays\0")?,
-            glDrawElements: load_sym(lib, b"glDrawElements\0")?,
-            glEnable: load_sym(lib, b"glEnable\0")?,
-            glEnableVertexAttribArray: load_sym(lib, b"glEnableVertexAttribArray\0")?,
-            glFinish: load_sym(lib, b"glFinish\0")?,
-            glFlush: load_sym(lib, b"glFlush\0")?,
-            glFramebufferRenderbuffer: load_sym(lib, b"glFramebufferRenderbuffer\0")?,
-            glFramebufferTexture2D: load_sym(lib, b"glFramebufferTexture2D\0")?,
-            glGenBuffers: load_sym(lib, b"glGenBuffers\0")?,
-            glGenFramebuffers: load_sym(lib, b"glGenFramebuffers\0")?,
-            glGenRenderbuffers: load_sym(lib, b"glGenRenderbuffers\0")?,
-            glGenTextures: load_sym(lib, b"glGenTextures\0")?,
-            glGetError: load_sym(lib, b"glGetError\0")?,
-            glGetIntegerv: load_sym(lib, b"glGetIntegerv\0")?,
-            glGetProgramInfoLog: load_sym(lib, b"glGetProgramInfoLog\0")?,
-            glGetProgramiv: load_sym(lib, b"glGetProgramiv\0")?,
-            glGetShaderInfoLog: load_sym(lib, b"glGetShaderInfoLog\0")?,
-            glGetShaderiv: load_sym(lib, b"glGetShaderiv\0")?,
-            glGetString: load_sym(lib, b"glGetString\0")?,
-            glGetUniformLocation: load_sym(lib, b"glGetUniformLocation\0")?,
-            glLinkProgram: load_sym(lib, b"glLinkProgram\0")?,
-            glPixelStorei: load_sym(lib, b"glPixelStorei\0")?,
-            glReadPixels: load_sym(lib, b"glReadPixels\0")?,
-            glRenderbufferStorage: load_sym(lib, b"glRenderbufferStorage\0")?,
-            glScissor: load_sym(lib, b"glScissor\0")?,
-            glShaderSource: load_sym(lib, b"glShaderSource\0")?,
-            glTexImage2D: load_sym(lib, b"glTexImage2D\0")?,
-            glTexParameteri: load_sym(lib, b"glTexParameteri\0")?,
-            glTexSubImage2D: load_sym(lib, b"glTexSubImage2D\0")?,
-            glUniform1f: load_sym(lib, b"glUniform1f\0")?,
-            glUniform1i: load_sym(lib, b"glUniform1i\0")?,
-            glUniform2f: load_sym(lib, b"glUniform2f\0")?,
-            glUniform4f: load_sym(lib, b"glUniform4f\0")?,
-            glUseProgram: load_sym(lib, b"glUseProgram\0")?,
-            glVertexAttribPointer: load_sym(lib, b"glVertexAttribPointer\0")?,
-            glViewport: load_sym(lib, b"glViewport\0")?,
-        })
+    unsafe fn load_with_loader(get_proc: Option<GlGetProcAddressFn>) -> Option<(Self, Option<Library>)> {
+        let mut fallback_lib: Option<Library> = None;
+        let procs = Self {
+            glActiveTexture: resolve_gl_sym(get_proc, &mut fallback_lib, b"glActiveTexture\0")?,
+            glAttachShader: resolve_gl_sym(get_proc, &mut fallback_lib, b"glAttachShader\0")?,
+            glBindAttribLocation: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBindAttribLocation\0")?,
+            glBindBuffer: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBindBuffer\0")?,
+            glBindFramebuffer: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBindFramebuffer\0")?,
+            glBindRenderbuffer: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBindRenderbuffer\0")?,
+            glBindTexture: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBindTexture\0")?,
+            glBufferData: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBufferData\0")?,
+            glBufferSubData: resolve_gl_sym(get_proc, &mut fallback_lib, b"glBufferSubData\0")?,
+            glCheckFramebufferStatus: resolve_gl_sym(get_proc, &mut fallback_lib, b"glCheckFramebufferStatus\0")?,
+            glClear: resolve_gl_sym(get_proc, &mut fallback_lib, b"glClear\0")?,
+            glClearColor: resolve_gl_sym(get_proc, &mut fallback_lib, b"glClearColor\0")?,
+            glClearDepthf: resolve_gl_sym(get_proc, &mut fallback_lib, b"glClearDepthf\0")?,
+            glColorMask: resolve_gl_sym(get_proc, &mut fallback_lib, b"glColorMask\0")?,
+            glCompileShader: resolve_gl_sym(get_proc, &mut fallback_lib, b"glCompileShader\0")?,
+            glCreateProgram: resolve_gl_sym(get_proc, &mut fallback_lib, b"glCreateProgram\0")?,
+            glCreateShader: resolve_gl_sym(get_proc, &mut fallback_lib, b"glCreateShader\0")?,
+            glDeleteBuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteBuffers\0")?,
+            glDeleteFramebuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteFramebuffers\0")?,
+            glDeleteProgram: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteProgram\0")?,
+            glDeleteRenderbuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteRenderbuffers\0")?,
+            glDeleteShader: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteShader\0")?,
+            glDeleteTextures: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDeleteTextures\0")?,
+            glDepthFunc: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDepthFunc\0")?,
+            glDepthMask: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDepthMask\0")?,
+            glDisable: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDisable\0")?,
+            glDisableVertexAttribArray: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDisableVertexAttribArray\0")?,
+            glDrawArrays: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDrawArrays\0")?,
+            glDrawElements: resolve_gl_sym(get_proc, &mut fallback_lib, b"glDrawElements\0")?,
+            glEnable: resolve_gl_sym(get_proc, &mut fallback_lib, b"glEnable\0")?,
+            glEnableVertexAttribArray: resolve_gl_sym(get_proc, &mut fallback_lib, b"glEnableVertexAttribArray\0")?,
+            glFinish: resolve_gl_sym(get_proc, &mut fallback_lib, b"glFinish\0")?,
+            glFlush: resolve_gl_sym(get_proc, &mut fallback_lib, b"glFlush\0")?,
+            glFramebufferRenderbuffer: resolve_gl_sym(get_proc, &mut fallback_lib, b"glFramebufferRenderbuffer\0")?,
+            glFramebufferTexture2D: resolve_gl_sym(get_proc, &mut fallback_lib, b"glFramebufferTexture2D\0")?,
+            glGenBuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGenBuffers\0")?,
+            glGenFramebuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGenFramebuffers\0")?,
+            glGenRenderbuffers: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGenRenderbuffers\0")?,
+            glGenTextures: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGenTextures\0")?,
+            glGetError: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetError\0")?,
+            glGetIntegerv: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetIntegerv\0")?,
+            glGetProgramInfoLog: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetProgramInfoLog\0")?,
+            glGetProgramiv: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetProgramiv\0")?,
+            glGetShaderInfoLog: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetShaderInfoLog\0")?,
+            glGetShaderiv: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetShaderiv\0")?,
+            glGetString: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetString\0")?,
+            glGetUniformLocation: resolve_gl_sym(get_proc, &mut fallback_lib, b"glGetUniformLocation\0")?,
+            glLinkProgram: resolve_gl_sym(get_proc, &mut fallback_lib, b"glLinkProgram\0")?,
+            glPixelStorei: resolve_gl_sym(get_proc, &mut fallback_lib, b"glPixelStorei\0")?,
+            glReadPixels: resolve_gl_sym(get_proc, &mut fallback_lib, b"glReadPixels\0")?,
+            glRenderbufferStorage: resolve_gl_sym(get_proc, &mut fallback_lib, b"glRenderbufferStorage\0")?,
+            glScissor: resolve_gl_sym(get_proc, &mut fallback_lib, b"glScissor\0")?,
+            glShaderSource: resolve_gl_sym(get_proc, &mut fallback_lib, b"glShaderSource\0")?,
+            glTexImage2D: resolve_gl_sym(get_proc, &mut fallback_lib, b"glTexImage2D\0")?,
+            glTexParameteri: resolve_gl_sym(get_proc, &mut fallback_lib, b"glTexParameteri\0")?,
+            glTexSubImage2D: resolve_gl_sym(get_proc, &mut fallback_lib, b"glTexSubImage2D\0")?,
+            glUniform1f: resolve_gl_sym(get_proc, &mut fallback_lib, b"glUniform1f\0")?,
+            glUniform1i: resolve_gl_sym(get_proc, &mut fallback_lib, b"glUniform1i\0")?,
+            glUniform2f: resolve_gl_sym(get_proc, &mut fallback_lib, b"glUniform2f\0")?,
+            glUniform4f: resolve_gl_sym(get_proc, &mut fallback_lib, b"glUniform4f\0")?,
+            glUseProgram: resolve_gl_sym(get_proc, &mut fallback_lib, b"glUseProgram\0")?,
+            glVertexAttribPointer: resolve_gl_sym(get_proc, &mut fallback_lib, b"glVertexAttribPointer\0")?,
+            glViewport: resolve_gl_sym(get_proc, &mut fallback_lib, b"glViewport\0")?,
+        };
+        Some((procs, fallback_lib))
     }
 }
 
-pub struct EglContextGuard {
+struct OwnedEgl {
     _egl_lib: Library,
-    _gles_lib: Library,
-    pub egl: EglProcs,
-    pub gl: Gles2Procs,
+    egl: EglProcs,
     display: EGLDisplay,
     surface: EGLSurface,
     context: EGLContext,
+}
+
+pub struct EglContextGuard {
+    owned_egl: Option<OwnedEgl>,
+    _gles_lib: Option<Library>,
+    pub gl: Gles2Procs,
 }
 
 impl EglContextGuard {
     pub fn new_headless() -> Option<Self> {
         unsafe {
             let egl_lib = Library::new("libEGL.so.1").ok()?;
-            let gles_lib = Library::new("libGLESv2.so.2").ok()?;
             let egl = EglProcs::load(&egl_lib)?;
-            let gl = Gles2Procs::load(&gles_lib)?;
+            let (gl, gles_lib) = Gles2Procs::load_with_loader(None)?;
 
             let mut display = ptr::null_mut();
             if let Some(get_plat) = egl.eglGetPlatformDisplay {
@@ -399,24 +435,61 @@ impl EglContextGuard {
             }
 
             Some(Self {
-                _egl_lib: egl_lib,
+                owned_egl: Some(OwnedEgl {
+                    _egl_lib: egl_lib,
+                    egl,
+                    display,
+                    surface,
+                    context,
+                }),
                 _gles_lib: gles_lib,
-                egl,
                 gl,
-                display,
-                surface,
-                context,
             })
         }
     }
 
+    /// Borrows the thread-local current GLES 2.0 context without touching EGL.
+    pub unsafe fn from_current_context(get_proc_address: Option<GlGetProcAddressFn>) -> Option<Self> {
+        let (gl, gles_lib) = Gles2Procs::load_with_loader(get_proc_address)?;
+        Some(Self {
+            owned_egl: None,
+            _gles_lib: gles_lib,
+            gl,
+        })
+    }
+
+    pub const fn is_external(&self) -> bool {
+        self.owned_egl.is_none()
+    }
+
     pub fn make_current(&self) -> bool {
+        let Some(owned) = &self.owned_egl else {
+            return true;
+        };
         unsafe {
-            if (self.egl.eglGetCurrentContext)() == self.context {
+            if (owned.egl.eglGetCurrentContext)() == owned.context {
                 return true;
             }
-            (self.egl.eglMakeCurrent)(self.display, self.surface, self.surface, self.context) != EGL_FALSE
+            (owned.egl.eglMakeCurrent)(owned.display, owned.surface, owned.surface, owned.context)
+                != EGL_FALSE
         }
+    }
+
+    #[cfg(test)]
+    pub const fn has_fallback_gles_lib(&self) -> bool {
+        self._gles_lib.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn egl_current_context_matches(&self) -> bool {
+        self.owned_egl
+            .as_ref()
+            .is_some_and(|owned| unsafe { (owned.egl.eglGetCurrentContext)() == owned.context })
+    }
+
+    #[cfg(test)]
+    pub fn egl_get_proc_address(&self) -> Option<GlGetProcAddressFn> {
+        self.owned_egl.as_ref().and_then(|owned| owned.egl.eglGetProcAddress)
     }
 
     pub fn renderer_string(&self) -> String {
@@ -440,25 +513,33 @@ impl EglContextGuard {
 
     pub fn max_texture_units(&self) -> u32 {
         unsafe {
-            let mut v = 8;
+            let mut v: GLint = 0;
             (self.gl.glGetIntegerv)(GL_MAX_TEXTURE_IMAGE_UNITS, &mut v);
-            v.max(8) as u32
+            v.max(0) as u32
         }
     }
 }
 
 impl Drop for EglContextGuard {
     fn drop(&mut self) {
+        let Some(owned) = &self.owned_egl else {
+            return;
+        };
         unsafe {
-            (self.egl.eglMakeCurrent)(self.display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-            if !self.surface.is_null() {
-                (self.egl.eglDestroySurface)(self.display, self.surface);
+            (owned.egl.eglMakeCurrent)(
+                owned.display,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            if !owned.surface.is_null() {
+                (owned.egl.eglDestroySurface)(owned.display, owned.surface);
             }
-            if !self.context.is_null() {
-                (self.egl.eglDestroyContext)(self.display, self.context);
+            if !owned.context.is_null() {
+                (owned.egl.eglDestroyContext)(owned.display, owned.context);
             }
-            if !self.display.is_null() {
-                (self.egl.eglTerminate)(self.display);
+            if !owned.display.is_null() {
+                (owned.egl.eglTerminate)(owned.display);
             }
         }
     }
@@ -480,6 +561,11 @@ pub fn compile_program(
             }
         };
         let prog = (gl.glCreateProgram)();
+        if prog == 0 {
+            (gl.glDeleteShader)(vs);
+            (gl.glDeleteShader)(fs);
+            return Err("GL program creation failed".to_string());
+        }
         (gl.glAttachShader)(prog, vs);
         (gl.glAttachShader)(prog, fs);
         for &(idx, name) in attribs {
@@ -505,6 +591,9 @@ pub fn compile_program(
 
 unsafe fn compile_shader(gl: &Gles2Procs, ty: GLenum, src: &str) -> Result<GLuint, String> {
     let shader = (gl.glCreateShader)(ty);
+    if shader == 0 {
+        return Err("GL shader creation failed".to_string());
+    }
     let ptr = src.as_ptr() as *const c_char;
     let len = src.len() as GLint;
     (gl.glShaderSource)(shader, 1, &ptr, &len);

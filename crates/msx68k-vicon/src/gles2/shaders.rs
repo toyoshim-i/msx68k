@@ -202,6 +202,7 @@ uniform vec4 u_slots;       // p0, p1, p2, p3
 uniform vec2 u_tx_scroll;   // tx_sx, tx_sy
 uniform vec4 u_gr_scroll01; // gs0x, gs0y, gs1x, gs1y
 uniform vec4 u_gr_scroll23; // gs2x, gs2y, gs3x, gs3y
+uniform vec2 u_y_flip;      // (0, 1) normal; (height - 1, -1) y-flipped
 
 float bit_scale(float bit_pos) {
     float s = 1.0;
@@ -346,7 +347,7 @@ vec4 eval_ts(float is_text, float x, float y) {
 
 void main() {
     float x = floor(gl_FragCoord.x);
-    float y = floor(gl_FragCoord.y);
+    float y = u_y_flip.x + floor(gl_FragCoord.y) * u_y_flip.y;
 
     float gr_rank = u_ranks.x;
     if (gr_rank >= 2.5) {
@@ -409,6 +410,7 @@ uniform float u_has_row_map;
 uniform float u_cynthia_enabled;
 uniform float u_is_ext_tvram;
 uniform vec4 u_ext_tvram; // x: row_bytes, y: plane_bytes, z: tex_w, w: tex_inv_h
+uniform vec2 u_y_flip;    // (0, 1) normal; (height - 1, -1) y-flipped
 
 vec4 row_texel(float col, float y) {
     float ry = mix(0.0, y, u_has_row_map);
@@ -580,7 +582,7 @@ vec4 eval_ts(float is_text, float x, float y, float r2, float cyn_act, float pal
 
 void main() {
     float x = floor(gl_FragCoord.x);
-    float y = floor(gl_FragCoord.y);
+    float y = u_y_flip.x + floor(gl_FragCoord.y) * u_y_flip.y;
 
     vec4 r5 = row_texel(5.0, y);
     float mode = floor(r5.r * 255.0 + 0.5);
@@ -658,6 +660,7 @@ uniform float u_has_row_map;
 uniform float u_cynthia_enabled;
 uniform float u_is_ext_tvram;
 uniform vec4 u_ext_tvram; // x: row_bytes, y: plane_bytes, z: tex_w, w: tex_inv_h
+uniform vec2 u_y_flip;    // (0, 1) normal; (height - 1, -1) y-flipped
 
 vec4 row_texel(float col, float y) {
     float ry = mix(0.0, y, u_has_row_map);
@@ -804,7 +807,7 @@ vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, fl
 
 void main() {
     float x = floor(gl_FragCoord.x);
-    float y = floor(gl_FragCoord.y);
+    float y = u_y_flip.x + floor(gl_FragCoord.y) * u_y_flip.y;
 
     vec4 r0 = row_texel(0.0, y);
     vec4 r5 = row_texel(5.0, y);
