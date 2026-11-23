@@ -22,6 +22,25 @@ const BUSY_CYCLES_10MHZ: u32 = 80;
 /// Maximum EG attenuation (10-bit, silent).
 const EG_SILENT: u16 = 0x3FF;
 
+/// Where YM2151 FM synthesis runs relative to the VM execution thread.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum OpmSynthMode {
+    /// Synthesize 62.5 kHz FM samples inline on the VM thread during `advance()`.
+    #[default]
+    Inline,
+    /// Only run timers, Busy, IRQ, and timestamped register event capture on the VM thread;
+    /// FM synthesis runs on the audio thread.
+    Offload,
+}
+
+/// Timestamped OPM register write event for offloaded synthesis.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct OpmRegEvent {
+    pub sample_time: u64,
+    pub reg: u8,
+    pub val: u8,
+}
+
 /// Envelope phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EgPhase {
@@ -582,7 +601,10 @@ pub struct Opm {
     channels: [Channel; 8],
     active_mask: u8,
     audio_enabled: bool,
+    synth_mode: OpmSynthMode,
+    sample_clock: u64,
     samples: Vec<(i16, i16)>,
+    events: Vec<OpmRegEvent>,
 }
 
 impl Default for Opm {
@@ -624,27 +646,80 @@ impl Opm {
             ],
             active_mask: 0,
             audio_enabled: false,
+            synth_mode: OpmSynthMode::Inline,
+            sample_clock: 0,
             samples: Vec::new(),
+            events: Vec::new(),
         }
     }
 
     pub fn reset(&mut self) {
         let audio_enabled = self.audio_enabled;
+        let synth_mode = self.synth_mode;
         *self = Self::new();
         self.audio_enabled = audio_enabled;
+        self.synth_mode = synth_mode;
     }
 
-    /// Enables or disables 62.5 kHz sample buffering (disabled in headless/test runs).
+    /// Enables or disables 62.5 kHz sample buffering / event recording (disabled in headless/test runs).
     pub fn set_audio_enabled(&mut self, enabled: bool) {
         self.audio_enabled = enabled;
         if !enabled {
             self.samples.clear();
+            self.events.clear();
         }
     }
 
-    /// Drains accumulated 62.5 kHz stereo samples into `out`.
+    /// Sets whether FM synthesis runs inline on the VM thread or is offloaded via register events.
+    pub fn set_synth_mode(&mut self, mode: OpmSynthMode) {
+        self.synth_mode = mode;
+        self.samples.clear();
+        self.events.clear();
+    }
+
+    /// Returns the configured synthesis mode.
+    #[inline]
+    pub const fn synth_mode(&self) -> OpmSynthMode {
+        self.synth_mode
+    }
+
+    /// Drains accumulated 62.5 kHz stereo samples into `out` (used in `Inline` mode).
     pub fn take_samples(&mut self, out: &mut Vec<(i16, i16)>) {
         out.append(&mut self.samples);
+    }
+
+    /// Drains timestamped register write events into `out` and returns the current 62.5 kHz
+    /// sample clock (used in `Offload` mode).
+    pub fn take_events(&mut self, out: &mut Vec<OpmRegEvent>) -> u64 {
+        out.append(&mut self.events);
+        self.sample_clock
+    }
+
+    /// Writes an OPM register directly (used by an offloaded synthesis instance).
+    #[inline]
+    pub fn write_reg(&mut self, reg: u8, val: u8) {
+        self.regs[reg as usize] = val;
+        self.apply_register(reg, val);
+    }
+
+    /// Advances the chip by exactly one 62.5 kHz sample (including CSM Timer A if active) and
+    /// returns the stereo PCM sample, skipping FM math when `active_mask == 0`.
+    #[inline]
+    pub fn next_sample(&mut self) -> (i16, i16) {
+        let ctrl = self.regs[0x14];
+        if (ctrl & 0x85) == 0x85 {
+            let ta = ((self.regs[0x10] as u32) << 2) | ((self.regs[0x11] & 0x03) as u32);
+            let period_10mhz = (1024 - ta).max(1) * CYCLES_PER_SAMPLE_10MHZ;
+            self.timer_a_sub += CYCLES_PER_SAMPLE_10MHZ;
+            if self.timer_a_sub >= period_10mhz {
+                self.timer_a_sub -= period_10mhz;
+                self.trigger_csm();
+            }
+        }
+        if self.active_mask == 0 {
+            return (0, 0);
+        }
+        self.step_sample()
     }
 
     /// Returns `true` if OPM `CT2` (register `$1B` bit 6) is high, which forces FDC Ready.
@@ -677,7 +752,10 @@ impl Opm {
             let period_10mhz = (1024 - ta).max(1) * CYCLES_PER_SAMPLE_10MHZ;
             self.timer_a_sub = self.timer_a_sub.saturating_add(cycles_10mhz);
             if self.timer_a_sub >= period_10mhz {
-                self.timer_a_sub %= period_10mhz;
+                self.timer_a_sub -= period_10mhz;
+                if self.timer_a_sub >= period_10mhz {
+                    self.timer_a_sub %= period_10mhz;
+                }
                 if (ctrl & 0x04) != 0 {
                     self.status |= 0x01;
                 }
@@ -692,21 +770,12 @@ impl Opm {
             let period_10mhz = (256 - tb).max(1) * (CYCLES_PER_SAMPLE_10MHZ * 16);
             self.timer_b_sub = self.timer_b_sub.saturating_add(cycles_10mhz);
             if self.timer_b_sub >= period_10mhz {
-                self.timer_b_sub %= period_10mhz;
+                self.timer_b_sub -= period_10mhz;
+                if self.timer_b_sub >= period_10mhz {
+                    self.timer_b_sub %= period_10mhz;
+                }
                 if (ctrl & 0x08) != 0 {
                     self.status |= 0x02;
-                }
-            }
-        }
-
-        if csm_trigger {
-            for (ch_idx, ch) in self.channels.iter_mut().enumerate() {
-                let pm = Self::channel_pm_offset(ch.pms, self.lfo_pm);
-                for op in &mut ch.ops {
-                    op.csm_key_on(ch.kc, ch.kf, pm);
-                }
-                if ch.is_active() {
-                    self.active_mask |= 1 << ch_idx;
                 }
             }
         }
@@ -717,11 +786,30 @@ impl Opm {
 
         self.sample_sub = self.sample_sub.saturating_add(cycles_10mhz);
         if self.sample_sub < CYCLES_PER_SAMPLE_10MHZ {
+            if csm_trigger && self.synth_mode == OpmSynthMode::Inline {
+                self.trigger_csm();
+            }
             return;
         }
-        let sample_count = self.sample_sub / CYCLES_PER_SAMPLE_10MHZ;
-        self.sample_sub %= CYCLES_PER_SAMPLE_10MHZ;
+        let sample_count = if self.sample_sub < CYCLES_PER_SAMPLE_10MHZ * 2 {
+            self.sample_sub -= CYCLES_PER_SAMPLE_10MHZ;
+            1
+        } else {
+            let n = self.sample_sub / CYCLES_PER_SAMPLE_10MHZ;
+            self.sample_sub %= CYCLES_PER_SAMPLE_10MHZ;
+            n
+        };
 
+        if self.synth_mode == OpmSynthMode::Offload {
+            self.sample_clock += sample_count as u64;
+            return;
+        }
+
+        if csm_trigger {
+            self.trigger_csm();
+        }
+
+        self.sample_clock += sample_count as u64;
         if self.active_mask == 0 {
             self.samples.resize(self.samples.len() + sample_count as usize, (0, 0));
             return;
@@ -736,6 +824,18 @@ impl Opm {
                     self.samples.resize(self.samples.len() + remaining, (0, 0));
                 }
                 break;
+            }
+        }
+    }
+
+    fn trigger_csm(&mut self) {
+        for (ch_idx, ch) in self.channels.iter_mut().enumerate() {
+            let pm = Self::channel_pm_offset(ch.pms, self.lfo_pm);
+            for op in &mut ch.ops {
+                op.csm_key_on(ch.kc, ch.kf, pm);
+            }
+            if ch.is_active() {
+                self.active_mask |= 1 << ch_idx;
             }
         }
     }
@@ -895,7 +995,25 @@ impl Opm {
             let r = self.addr_latch as usize;
             self.regs[r] = val;
             self.busy_cycles = BUSY_CYCLES_10MHZ;
-            self.apply_register(r as u8, val);
+            if self.synth_mode == OpmSynthMode::Offload {
+                if self.audio_enabled {
+                    self.events.push(OpmRegEvent {
+                        sample_time: self.sample_clock,
+                        reg: r as u8,
+                        val,
+                    });
+                }
+                if r == 0x14 {
+                    if (val & 0x10) != 0 {
+                        self.status &= !0x01;
+                    }
+                    if (val & 0x20) != 0 {
+                        self.status &= !0x02;
+                    }
+                }
+            } else {
+                self.apply_register(r as u8, val);
+            }
         }
         Ok(())
     }
@@ -1228,5 +1346,57 @@ mod tests {
             .filter(|w| w[0].0 < 0 && w[1].0 >= 0)
             .count();
         assert!((488..=495).contains(&cycles), "expected ~492 Hz, got {cycles} Hz");
+    }
+
+    #[test]
+    fn offload_events_match_inline_samples_bit_for_bit() {
+        let mut inline = Opm::new();
+        inline.set_audio_enabled(true);
+        inline.set_synth_mode(OpmSynthMode::Inline);
+
+        let mut offload = Opm::new();
+        offload.set_audio_enabled(true);
+        offload.set_synth_mode(OpmSynthMode::Offload);
+
+        for opm in [&mut inline, &mut offload] {
+            write_reg(opm, 0x20, 0xC4); // L+R, CON=4
+            write_reg(opm, 0x28, 0x4A);
+            write_reg(opm, 0x40, 0x01);
+            write_reg(opm, 0x50, 0x01);
+            write_reg(opm, 0x60, 0x18);
+            write_reg(opm, 0x70, 0x00);
+            write_reg(opm, 0x80, 0x1F);
+            write_reg(opm, 0x90, 0x1F);
+            write_reg(opm, 0x08, 0x78); // Key-on
+        }
+
+        inline.advance(160 * 100);
+        offload.advance(160 * 100);
+
+        write_reg(&mut inline, 0x28, 0x4E); // Pitch change mid-stream
+        write_reg(&mut offload, 0x28, 0x4E);
+
+        inline.advance(160 * 100);
+        let target_clock = offload.advance(160 * 100);
+        let _ = target_clock;
+
+        let mut inline_samples = Vec::new();
+        inline.take_samples(&mut inline_samples);
+
+        let mut events = Vec::new();
+        let total_samples = offload.take_events(&mut events);
+        assert_eq!(total_samples as usize, inline_samples.len());
+
+        let mut synth = Opm::new();
+        let mut ev_idx = 0;
+        let mut offload_samples = Vec::with_capacity(total_samples as usize);
+        for t in 0..total_samples {
+            while ev_idx < events.len() && events[ev_idx].sample_time <= t {
+                synth.write_reg(events[ev_idx].reg, events[ev_idx].val);
+                ev_idx += 1;
+            }
+            offload_samples.push(synth.next_sample());
+        }
+        assert_eq!(inline_samples, offload_samples);
     }
 }

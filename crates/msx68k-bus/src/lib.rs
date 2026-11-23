@@ -50,6 +50,7 @@ pub use host_fs::HostFsBridge;
 pub use mfp::Mfp;
 pub use vmx68k::{VmEvent, VmWindowLayout};
 pub use vram_pages::{DirtyVramPages, VRAM_PAGE_BYTES};
+pub use opm::{OpmRegEvent, OpmSynthMode};
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use scsi::{
     build_bootable_sxwin_scsi_hdd, extract_files_from_xdf, parse_scsi_partitions,

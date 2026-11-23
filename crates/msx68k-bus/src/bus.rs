@@ -685,10 +685,22 @@ impl X68kBus {
         self.opm.set_audio_enabled(enabled);
     }
 
+    /// Configures whether OPM FM synthesis runs inline or is offloaded via register events.
+    #[inline]
+    pub fn set_opm_synth_mode(&mut self, mode: crate::opm::OpmSynthMode) {
+        self.opm.set_synth_mode(mode);
+    }
+
     /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {
         self.opm.take_samples(out);
+    }
+
+    /// Drains timestamped OPM register write events and returns the current 62,500 Hz sample clock.
+    #[inline]
+    pub fn take_audio_events(&mut self, out: &mut Vec<crate::opm::OpmRegEvent>) -> u64 {
+        self.opm.take_events(out)
     }
 
     /// Triggers a level-7 Non-Maskable Interrupt (NMI), equivalent to pressing the INTERRUPT
