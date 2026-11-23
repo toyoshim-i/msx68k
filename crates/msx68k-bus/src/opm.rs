@@ -78,26 +78,22 @@ const EXP_TABLE: [u16; 256] = [
 /// X68000's 4.000 MHz clock produces the exact hardware pitch offset drivers expect.
 const fn build_phase_inc_table() -> [u32; 768] {
     // Octave 7 C#..C base f-numbers at 3.579545 MHz / 64, pre-scaled for 20-bit phase.
-    // C#8 = 4434.92 Hz -> inc_oct7 = round(4434.92 * 1048576 / 55930.39) = 83148.
-    // Approximated in const fn with exact 2^(k/768) polynomial / rational steps.
+    // C#7 = 2217.46 Hz -> inc_oct7 = round(2217.46 * 1048576 / 55930.39) = 41574.
     let mut table = [0u32; 768];
-    // Base C#8 (index 0) = 83148, C9 (index 768) = 166296.
-    // Using 16.16 fixed-point iterative 2^(1/768) = 1.0009029098 -> 65595 / 65536 (very close: 65595.17).
-    // Even better: exact 12-semitone base table (from 440 Hz * 2^((n-9)/12)) + 64-step linear/quad.
     const SEMI_BASE: [u32; 13] = [
-        83148,  // C#8
-        88092,  // D8
-        93330,  // D#8
-        98880,  // E8
-        104760, // F8
-        110989, // F#8
-        117589, // G8
-        124581, // G#8
-        131989, // A8 (131989 / 16 = 8249.3 = A4)
-        139837, // A#8
-        148152, // B8
-        156962, // C9
-        166296, // C#9
+        41574, // C#7
+        44046, // D7
+        46665, // D#7
+        49440, // E7
+        52380, // F7
+        55495, // F#7
+        58795, // G7
+        62291, // G#7
+        65995, // A7 (65995 / 8 = 8249 = A4 = 440 Hz @ 3.579545 MHz)
+        69918, // A#7
+        74076, // B7
+        78481, // C8
+        83148, // C#8
     ];
     let mut s = 0;
     while s < 12 {
@@ -1209,5 +1205,28 @@ mod tests {
         opm.advance(160 * 4);
         assert_eq!(opm.lfo_pm, 0);
         assert_eq!(opm.channels[0].ops[0].phase_inc, base_inc);
+    }
+
+    #[test]
+    fn a4_kc_produces_expected_4mhz_frequency() {
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        write_reg(&mut opm, 0x20, 0xC7); // Ch 0 L+R, CON=7
+        write_reg(&mut opm, 0x28, 0x4A); // KC = A4
+        write_reg(&mut opm, 0x40, 0x01); // MUL=1
+        write_reg(&mut opm, 0x60, 0x00); // TL=0
+        write_reg(&mut opm, 0x80, 0x1F); // AR=31
+        write_reg(&mut opm, 0x08, 0x08); // Key-on M1
+
+        let mut out = Vec::new();
+        opm.advance(160 * OPM_SAMPLE_RATE); // 1 second at 62,500 Hz
+        opm.take_samples(&mut out);
+
+        // Count rising zero-crossings: 440 * (4.000 / 3.579545) = ~491.7 Hz.
+        let cycles = out
+            .windows(2)
+            .filter(|w| w[0].0 < 0 && w[1].0 >= 0)
+            .count();
+        assert!((488..=495).contains(&cycles), "expected ~492 Hz, got {cycles} Hz");
     }
 }
