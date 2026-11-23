@@ -14,7 +14,6 @@
 //! - `F4`: Switch to `Burst` mode (0 wait, high-speed execution)
 //! - `F12`: Soft Reset X68000 VM
 
-#[allow(dead_code)]
 mod audio;
 
 use std::io::Write;
@@ -534,6 +533,8 @@ struct Msx68kApp {
     last_resolution: (u32, u32),
     last_fullscreen: bool,
     vsync: bool,
+    audio: audio::AudioOutput,
+    audio_scratch: Vec<(i16, i16)>,
 }
 
 impl Msx68kApp {
@@ -732,6 +733,8 @@ impl Msx68kApp {
         // VMs opened by VMX68K.X have the CPU of their setup whatever the primary VM's is.
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         let vsync = args.vsync;
+        let audio = audio::AudioOutput::open();
+        vm.set_audio_enabled(audio.is_active());
         Self {
             args,
             vm,
@@ -756,6 +759,8 @@ impl Msx68kApp {
             last_resolution: initial_res,
             last_fullscreen: initial_fs,
             vsync,
+            audio,
+            audio_scratch: Vec::with_capacity(2048),
         }
     }
 
@@ -1364,6 +1369,10 @@ impl Msx68kApp {
             Some(gdb) if gdb.is_connected() => gdb.run_frame(&mut self.vm, budget),
             _ => self.vm.run_frame(budget),
         }
+        if self.audio.is_active() {
+            self.vm.take_audio_samples(&mut self.audio_scratch);
+            self.audio.push_samples(&self.audio_scratch);
+        }
     }
 }
 
@@ -1668,6 +1677,12 @@ impl ApplicationHandler for Msx68kApp {
             self.update_guest_vms();
             self.update_vm_lamps();
             self.render_frame();
+
+            if self.audio.is_active() && self.vm.speed_mode() != CpuSpeedMode::Burst {
+                // Lock VM pacing to the audio output clock so Timer-driven music drivers keep
+                // rock-solid tempo without stretching or compressing waveforms, even with VSync.
+                self.next_frame_deadline = Instant::now() + self.audio.suggested_wait();
+            }
         }
         // A GDB client waits for each reply, so keep round trips well below a frame.
         let wake_at = if gdb_connected {

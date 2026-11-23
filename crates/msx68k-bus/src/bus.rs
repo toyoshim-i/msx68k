@@ -679,6 +679,18 @@ impl X68kBus {
         }
     }
 
+    /// Enables or disables OPM audio sample buffering.
+    #[inline]
+    pub fn set_audio_enabled(&mut self, enabled: bool) {
+        self.opm.set_audio_enabled(enabled);
+    }
+
+    /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
+    #[inline]
+    pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {
+        self.opm.take_samples(out);
+    }
+
     /// Triggers a level-7 Non-Maskable Interrupt (NMI), equivalent to pressing the INTERRUPT
     /// button on the top of a real X68000.
     #[inline]

@@ -373,6 +373,18 @@ impl X68kVm {
         self.bus.set_timing_config(next_timing);
     }
 
+    /// Enables or disables OPM audio sample buffering.
+    #[inline]
+    pub fn set_audio_enabled(&mut self, enabled: bool) {
+        self.bus.set_audio_enabled(enabled);
+    }
+
+    /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
+    #[inline]
+    pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {
+        self.bus.take_audio_samples(out);
+    }
+
     /// Enters or exits temporary disk-I/O Burst mode (when `config.burst_on_disk_io` is enabled).
     pub fn set_disk_io_active(&mut self, active: bool) {
         self.disk_io_burst_active = active && self.config.burst_on_disk_io;
