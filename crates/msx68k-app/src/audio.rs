@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use msx68k_bus::adpcm::AdpcmSampleEvent;
 use msx68k_bus::opm::{Opm, OpmRegEvent, OpmSynthMode, OPM_SAMPLE_RATE};
 
 /// Host audio output sample rate (Hz).
@@ -85,6 +86,7 @@ struct SharedAudio {
     mode: OpmSynthMode,
     queue: Mutex<VecDeque<(i16, i16)>>,
     events: Mutex<VecDeque<OpmRegEvent>>,
+    adpcm_events: Mutex<VecDeque<AdpcmSampleEvent>>,
     produced_clock: AtomicU64,
     queued_samples: AtomicUsize,
     stop: AtomicBool,
@@ -109,6 +111,11 @@ impl AudioOutput {
                 0
             })),
             events: Mutex::new(VecDeque::with_capacity(if mode == OpmSynthMode::Offload {
+                1024
+            } else {
+                0
+            })),
+            adpcm_events: Mutex::new(VecDeque::with_capacity(if mode == OpmSynthMode::Offload {
                 1024
             } else {
                 0
@@ -197,15 +204,24 @@ impl AudioOutput {
             .store(queue.len(), Ordering::Relaxed);
     }
 
-    /// Appends timestamped OPM register write events and advances the produced sample clock
+    /// Appends timestamped OPM/ADPCM events and advances the produced sample clock
     /// in `Offload` mode.
-    pub fn push_events(&self, events: &[OpmRegEvent], produced_clock: u64) {
+    pub fn push_events(
+        &self,
+        events: &[OpmRegEvent],
+        adpcm_events: &[AdpcmSampleEvent],
+        produced_clock: u64,
+    ) {
         if !self.active {
             return;
         }
         if !events.is_empty() {
             let mut queue = self.shared.events.lock().unwrap();
             queue.extend(events.iter().copied());
+        }
+        if !adpcm_events.is_empty() {
+            let mut queue = self.shared.adpcm_events.lock().unwrap();
+            queue.extend(adpcm_events.iter().copied());
         }
         self.shared
             .produced_clock
@@ -229,6 +245,7 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
     let mut synth_opm = Opm::new();
     synth_opm.set_audio_enabled(true);
     let mut synth_clock: u64 = 0;
+    let mut adpcm_lr: (i16, i16) = (0, 0);
 
     while !shared.stop.load(Ordering::Relaxed) {
         match shared.mode {
@@ -240,6 +257,7 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
             OpmSynthMode::Offload => {
                 let produced = shared.produced_clock.load(Ordering::Acquire);
                 let mut events = shared.events.lock().unwrap();
+                let mut adpcm_events = shared.adpcm_events.lock().unwrap();
                 // Drop excess backlog if VM ever ran far ahead (e.g. pause/debugger).
                 if produced.saturating_sub(synth_clock) > MAX_OPM_SAMPLES as u64 {
                     let skip_to = produced - MAX_OPM_SAMPLES as u64;
@@ -247,6 +265,14 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
                         if ev.sample_time <= skip_to {
                             synth_opm.write_reg(ev.reg, ev.val);
                             events.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    while let Some(ev) = adpcm_events.front() {
+                        if ev.sample_time <= skip_to {
+                            adpcm_lr = (ev.left, ev.right);
+                            adpcm_events.pop_front();
                         } else {
                             break;
                         }
@@ -266,8 +292,17 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
                                 break;
                             }
                         }
+                        while let Some(ev) = adpcm_events.front() {
+                            if ev.sample_time <= synth_clock {
+                                adpcm_lr = (ev.left, ev.right);
+                                adpcm_events.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
                         synth_clock += 1;
-                        Some(synth_opm.next_sample())
+                        let (ol, or) = synth_opm.next_sample();
+                        Some((ol.saturating_add(adpcm_lr.0), or.saturating_add(adpcm_lr.1)))
                     },
                     &mut buf,
                 );

@@ -144,8 +144,8 @@ pub struct X68kBus {
     pub sysport: SystemPort,
     /// YM2151 FM Sound Generator (`$E90000`–`$E91FFF`).
     pub opm: Opm,
-    /// MSM6258V ADPCM status (`$E92000`–`$E93FFF`).
-    pub adpcm_active: bool,
+    /// MSM6258V ADPCM Voice Synthesizer (`$E92000`–`$E93FFF`).
+    pub adpcm: crate::adpcm::Adpcm,
     /// uPD72065 Floppy Disk Controller & 4-Drive FDD (`$E94000`–`$E95FFF`).
     pub fdc: Fdc,
     /// Z8530 Serial Communications Controller (`$E98000`–`$E99FFF`).
@@ -263,7 +263,7 @@ impl X68kBus {
             rtc: Rtc::new(),
             sysport: SystemPort::new(),
             opm: Opm::new(),
-            adpcm_active: false,
+            adpcm: crate::adpcm::Adpcm::new(),
             fdc: Fdc::new(),
             scc: Scc::new(),
             ppi: Ppi::new(),
@@ -479,6 +479,7 @@ impl X68kBus {
         self.dmac.reset();
         self.mfp.reset();
         self.opm.reset();
+        self.adpcm.reset();
         self.scc.reset();
         self.fdc.reset(&mut self.ioi);
 
@@ -673,34 +674,46 @@ impl X68kBus {
             }
             self.mfp.update_crtc_sync(sync);
             self.opm.advance(step);
+            self.adpcm.advance(step);
+            self.refresh_adpcm_dma_request();
             self.mfp.set_opm_irq(self.opm.irq_active());
             self.mfp.advance(step);
             cycles_10mhz -= step;
         }
     }
 
-    /// Enables or disables OPM audio sample buffering.
+    /// Enables or disables OPM/ADPCM audio sample buffering.
     #[inline]
     pub fn set_audio_enabled(&mut self, enabled: bool) {
         self.opm.set_audio_enabled(enabled);
+        self.adpcm.set_audio_enabled(enabled);
     }
 
     /// Configures whether OPM FM synthesis runs inline or is offloaded via register events.
     #[inline]
     pub fn set_opm_synth_mode(&mut self, mode: crate::opm::OpmSynthMode) {
         self.opm.set_synth_mode(mode);
+        self.adpcm.set_synth_mode(mode);
     }
 
-    /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
+    /// Drains all generated OPM + ADPCM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {
+        let start = out.len();
         self.opm.take_samples(out);
+        self.adpcm.mix_into(&mut out[start..]);
     }
 
     /// Drains timestamped OPM register write events and returns the current 62,500 Hz sample clock.
     #[inline]
     pub fn take_audio_events(&mut self, out: &mut Vec<crate::opm::OpmRegEvent>) -> u64 {
         self.opm.take_events(out)
+    }
+
+    /// Drains timestamped ADPCM level changes for `Offload` mode.
+    #[inline]
+    pub fn take_adpcm_events(&mut self, out: &mut Vec<crate::adpcm::AdpcmSampleEvent>) {
+        self.adpcm.take_events(out);
     }
 
     /// Triggers a level-7 Non-Maskable Interrupt (NMI), equivalent to pressing the INTERRUPT
@@ -800,6 +813,7 @@ impl Bus for X68kBus {
         self.dmac.reset();
         self.mfp.reset();
         self.opm.reset();
+        self.adpcm.reset();
         self.scc.reset();
         self.fdc.reset(&mut self.ioi);
     }
@@ -893,18 +907,7 @@ impl Bus for X68kBus {
                 }
             }
             MemoryRegion::Opm => self.opm.read_u8(a),
-            MemoryRegion::Adpcm => {
-                if (a & 1) == 0 {
-                    Err(BusFault::BusError {
-                        addr: a,
-                        is_write: false,
-                    })
-                } else if (a & 3) == 1 {
-                    Ok(if self.adpcm_active { 0xC0 } else { 0x40 })
-                } else {
-                    Ok(0xFF)
-                }
-            }
+            MemoryRegion::Adpcm => self.adpcm.read_u8(a),
             MemoryRegion::Fdc => {
                 let result = self.fdc.read_u8(a, &mut self.ioi);
                 self.refresh_fdc_dma_request();
@@ -1155,21 +1158,9 @@ impl Bus for X68kBus {
                 Ok(())
             }
             MemoryRegion::Adpcm => {
-                if (a & 1) == 0 {
-                    Err(BusFault::BusError {
-                        addr: a,
-                        is_write: true,
-                    })
-                } else {
-                    if (a & 3) == 1 {
-                        if (val & 0x01) != 0 {
-                            self.adpcm_active = false;
-                        } else if (val & 0x02) != 0 {
-                            self.adpcm_active = true;
-                        }
-                    }
-                    Ok(())
-                }
+                let result = self.adpcm.write_u8(a, val);
+                self.refresh_adpcm_dma_request();
+                result
             }
             MemoryRegion::Fdc => {
                 let result = self.fdc.write_u8(a, val, &mut self.ioi);
@@ -1187,7 +1178,13 @@ impl Bus for X68kBus {
                 }
             }
             MemoryRegion::Scc => self.scc.write_u8(a, val),
-            MemoryRegion::Ppi => self.ppi.write_u8(a, val),
+            MemoryRegion::Ppi => {
+                let result = self.ppi.write_u8(a, val);
+                if result.is_ok() {
+                    self.adpcm.set_ppi_port_c(self.ppi.port_c());
+                }
+                result
+            }
             MemoryRegion::Ioi => {
                 if a >= 0x00E9_E000 {
                     Err(BusFault::BusError {

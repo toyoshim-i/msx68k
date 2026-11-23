@@ -12,6 +12,12 @@ impl X68kBus {
             .set_request_with_delay(0, self.fdc.dma_request(), cycle);
     }
 
+    pub(crate) fn refresh_adpcm_dma_request(&mut self) {
+        let cycle = self.dma_cycle_unit();
+        self.dmac
+            .set_request_with_delay(3, self.adpcm.dma_request(), cycle);
+    }
+
     /// Idle path is one predictable test. Inactive channels are not scanned.
     #[inline(always)]
     pub(crate) fn advance_cpu_time(&mut self, ticks: u32) -> u32 {

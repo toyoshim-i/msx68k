@@ -397,6 +397,12 @@ impl X68kVm {
         self.bus.take_audio_events(out)
     }
 
+    /// Drains timestamped ADPCM level changes for `Offload` mode.
+    #[inline]
+    pub fn take_adpcm_events(&mut self, out: &mut Vec<crate::adpcm::AdpcmSampleEvent>) {
+        self.bus.take_adpcm_events(out);
+    }
+
     /// Enters or exits temporary disk-I/O Burst mode (when `config.burst_on_disk_io` is enabled).
     pub fn set_disk_io_active(&mut self, active: bool) {
         self.disk_io_burst_active = active && self.config.burst_on_disk_io;

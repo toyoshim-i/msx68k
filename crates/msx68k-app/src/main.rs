@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use msx68k_bus::vm_thread::{Pace, VmThread};
 use msx68k_bus::{
-    CpuModel, CpuSpeedMode, FrameBudget, GdbServer, OpmRegEvent, OpmSynthMode, VmConfig, VmEvent,
-    X68kVm,
+    AdpcmSampleEvent, CpuModel, CpuSpeedMode, FrameBudget, GdbServer, OpmRegEvent, OpmSynthMode,
+    VmConfig, VmEvent, X68kVm,
 };
 use msx68k_vicon::{
     ScreenRect, ViconGpuCompositor, ViconSurfacePresenter, VmLayer, VmScreen, VmScreenOutput,
@@ -553,6 +553,7 @@ struct Msx68kApp {
     audio: audio::AudioOutput,
     audio_scratch: Vec<(i16, i16)>,
     audio_events: Vec<OpmRegEvent>,
+    adpcm_events: Vec<AdpcmSampleEvent>,
 }
 
 impl Msx68kApp {
@@ -781,6 +782,7 @@ impl Msx68kApp {
             audio,
             audio_scratch: Vec::with_capacity(2048),
             audio_events: Vec::with_capacity(256),
+            adpcm_events: Vec::with_capacity(256),
         }
     }
 
@@ -1398,8 +1400,11 @@ impl Msx68kApp {
                 }
                 OpmSynthMode::Offload => {
                     let clock = self.vm.take_audio_events(&mut self.audio_events);
-                    self.audio.push_events(&self.audio_events, clock);
+                    self.vm.take_adpcm_events(&mut self.adpcm_events);
+                    self.audio
+                        .push_events(&self.audio_events, &self.adpcm_events, clock);
                     self.audio_events.clear();
+                    self.adpcm_events.clear();
                 }
             }
         }

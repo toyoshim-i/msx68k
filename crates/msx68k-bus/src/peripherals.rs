@@ -333,6 +333,12 @@ impl Ppi {
         self.port_a = value;
     }
 
+    /// Returns PPI Port C (`$E9A005`, ADPCM pan/rate/clock) state.
+    #[inline]
+    pub const fn port_c(&self) -> u8 {
+        self.port_c
+    }
+
     pub fn read_u8(&self, addr: u32) -> Result<u8, BusFault> {
         let a = addr & 0x00FF_FFFF;
         if (a & 1) == 0 {
