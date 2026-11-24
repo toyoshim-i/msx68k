@@ -154,6 +154,8 @@ pub struct X68kBus {
     pub ppi: Ppi,
     /// I/O Interrupt Controller (`$E9C000`–`$E9DFFF`, Level 1).
     pub ioi: IoInterruptController,
+    /// SHARP CZ-6BM1 MIDI Interface Boards (`$EAFA00`–`$EAFA1F`, IRQ4 / IRQ2).
+    pub midi: crate::midi::MidiController,
     /// Virtual SCSI Controller (`$FC0000` ROM + `IOCS $F5` + `romdb`).
     pub scsi: crate::scsi::ScsiController,
     /// Host OS mouse pointer in guest screen coordinates.
@@ -268,6 +270,7 @@ impl X68kBus {
             scc: Scc::new(),
             ppi: Ppi::new(),
             ioi: IoInterruptController::new(),
+            midi: crate::midi::MidiController::new(),
             scsi: crate::scsi::ScsiController::new(),
             host_mouse_pos: None,
             pending_wheel: Default::default(),
@@ -482,6 +485,7 @@ impl X68kBus {
         self.adpcm.reset();
         self.scc.reset();
         self.fdc.reset(&mut self.ioi);
+        self.midi.reset();
 
         self.ext_tvram = None;
         self.native_gm_text_base = None;
@@ -675,6 +679,7 @@ impl X68kBus {
             self.mfp.update_crtc_sync(sync);
             self.opm.advance(step);
             self.adpcm.advance(step);
+            self.midi.advance(step);
             self.refresh_adpcm_dma_request();
             self.mfp.set_opm_irq(self.opm.irq_active());
             self.mfp.advance(step);
@@ -728,6 +733,52 @@ impl X68kBus {
         self.adpcm.take_events(out);
     }
 
+    /// Installs or removes CZ-6BM1 MIDI board `board` (`0` = `$EAFA00`, `1` = `$EAFA10`).
+    #[inline]
+    pub fn set_midi_board_enabled(&mut self, board: usize, enabled: bool) {
+        if let Some(b) = self.midi.board_mut(board) {
+            b.set_enabled(enabled);
+        }
+    }
+
+    /// Returns whether CZ-6BM1 MIDI board `board` (`0` or `1`) is installed.
+    #[inline]
+    pub fn midi_board_enabled(&self, board: usize) -> bool {
+        self.midi.board(board).is_some_and(|b| b.is_enabled())
+    }
+
+    /// Configures the hardware IRQ jumper (`IRQ4` or `IRQ2`) for MIDI board `board`.
+    #[inline]
+    pub fn set_midi_board_irq(&mut self, board: usize, irq: crate::midi::MidiIrqLevel) {
+        if let Some(b) = self.midi.board_mut(board) {
+            b.set_irq_level(irq);
+        }
+    }
+
+    /// Attaches or detaches an external [`crate::midi::MidiPort`] on MIDI board `board`.
+    #[inline]
+    pub fn set_midi_port(&mut self, board: usize, port: Option<Box<dyn crate::midi::MidiPort>>) {
+        if let Some(b) = self.midi.board_mut(board) {
+            b.set_port(port);
+        }
+    }
+
+    /// Enables MIDI board `board` and attaches `port` in one call.
+    #[inline]
+    pub fn attach_midi_port(&mut self, board: usize, port: Box<dyn crate::midi::MidiPort>) {
+        if let Some(b) = self.midi.board_mut(board) {
+            b.set_enabled(true);
+            b.set_port(Some(port));
+        }
+    }
+
+    /// Enables MIDI board `board`, attaches a channel-backed port, and returns the host endpoint.
+    pub fn attach_midi_channel(&mut self, board: usize) -> crate::midi::MidiChannelEndpoint {
+        let (port, endpoint) = crate::midi::midi_channel();
+        self.attach_midi_port(board, Box::new(port));
+        endpoint
+    }
+
     /// Triggers a level-7 Non-Maskable Interrupt (NMI), equivalent to pressing the INTERRUPT
     /// button on the top of a real X68000.
     #[inline]
@@ -739,7 +790,9 @@ impl X68kBus {
     /// - Level 7: NMI (`INTERRUPT` button)
     /// - Level 6: MFP (`MC68901`)
     /// - Level 5: SCC (`Z8530` Mouse / RS-232C)
+    /// - Level 4: MIDI (`CZ-6BM1` / `YM3802`, IRQ4 jumper)
     /// - Level 3: DMAC (`HD63450`)
+    /// - Level 2: MIDI (`CZ-6BM1` / `YM3802`, IRQ2 jumper)
     /// - Level 1: I/O Interrupt Controller (`FDC`, `FDD`, `HDC`, `PRN`)
     #[inline]
     pub fn highest_pending_ipl(&self) -> u8 {
@@ -749,8 +802,12 @@ impl X68kBus {
             6
         } else if self.scc.has_pending_interrupt() {
             5
+        } else if self.midi.has_pending_interrupt(crate::midi::MidiIrqLevel::Irq4) {
+            4
         } else if self.dmac.has_pending_interrupt() {
             3
+        } else if self.midi.has_pending_interrupt(crate::midi::MidiIrqLevel::Irq2) {
+            2
         } else if self.ioi.has_pending_interrupt() {
             1
         } else {
@@ -828,6 +885,7 @@ impl Bus for X68kBus {
         self.adpcm.reset();
         self.scc.reset();
         self.fdc.reset(&mut self.ioi);
+        self.midi.reset();
     }
 
     fn acknowledge_interrupt(&mut self, level: u8) -> Option<u8> {
@@ -838,7 +896,9 @@ impl Bus for X68kBus {
             }
             6 => self.mfp.acknowledge_interrupt(),
             5 => self.scc.acknowledge_interrupt(),
+            4 => self.midi.acknowledge_interrupt(crate::midi::MidiIrqLevel::Irq4),
             3 => self.dmac.acknowledge_interrupt(),
+            2 => self.midi.acknowledge_interrupt(crate::midi::MidiIrqLevel::Irq2),
             1 => self.ioi.acknowledge_interrupt(),
             _ => None,
         }
@@ -980,10 +1040,19 @@ impl Bus for X68kBus {
                 }
                 Ok(self.rom[offset])
             }
-            MemoryRegion::ExpansionIo => Err(BusFault::BusError {
-                addr: a,
-                is_write: false,
-            }),
+            MemoryRegion::ExpansionIo => {
+                if (crate::midi::MIDI_BOARD0_BASE..crate::midi::MIDI_WINDOW_END).contains(&a) {
+                    if self.midi.is_mapped_addr(a) {
+                        self.access_flags.sound_io_accessed = true;
+                    }
+                    self.midi.read_u8(a)
+                } else {
+                    Err(BusFault::BusError {
+                        addr: a,
+                        is_write: false,
+                    })
+                }
+            }
         }
     }
 
@@ -1026,9 +1095,9 @@ impl Bus for X68kBus {
                 is_write: false,
             });
         }
-        // 8-bit odd-byte-mapped peripherals ($E88000..$E9DFFF):
+        // 8-bit odd-byte-mapped peripherals ($E88000..$E9DFFF, and installed CZ-6BM1 MIDI boards):
         // 16-bit word read activates LDS and reads only the lower byte (a | 1) with upper byte $FF.
-        if (0x00E8_8000..0x00E9_E000).contains(&a) {
+        if (0x00E8_8000..0x00E9_E000).contains(&a) || self.midi.is_mapped_addr(a) {
             let lo = self.read_u8(a | 1, supervisor)? as u16;
             return Ok(0xFF00 | lo);
         }
@@ -1256,10 +1325,19 @@ impl Bus for X68kBus {
                 // Writes to populated ROM are ignored on X68000 hardware.
                 Ok(())
             }
-            MemoryRegion::ExpansionIo => Err(BusFault::BusError {
-                addr: a,
-                is_write: true,
-            }),
+            MemoryRegion::ExpansionIo => {
+                if (crate::midi::MIDI_BOARD0_BASE..crate::midi::MIDI_WINDOW_END).contains(&a) {
+                    if self.midi.is_mapped_addr(a) {
+                        self.access_flags.sound_io_accessed = true;
+                    }
+                    self.midi.write_u8(a, val)
+                } else {
+                    Err(BusFault::BusError {
+                        addr: a,
+                        is_write: true,
+                    })
+                }
+            }
         }
     }
 
@@ -1317,9 +1395,9 @@ impl Bus for X68kBus {
             self.mark_tvram_write((a as usize) & (TVRAM_BYTES - 2));
             return Ok(());
         }
-        // 8-bit odd-byte-mapped peripherals ($E86000..$E9DFFF):
+        // 8-bit odd-byte-mapped peripherals ($E86000..$E9DFFF, and installed CZ-6BM1 MIDI boards):
         // 16-bit word write activates LDS and writes the low byte to (a | 1).
-        if (0x00E8_6000..0x00E9_E000).contains(&a) {
+        if (0x00E8_6000..0x00E9_E000).contains(&a) || self.midi.is_mapped_addr(a) {
             return self.write_u8(a | 1, val as u8, supervisor);
         }
         self.write_u8(a, (val >> 8) as u8, supervisor)?;

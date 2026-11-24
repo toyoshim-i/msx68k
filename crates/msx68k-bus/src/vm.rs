@@ -415,6 +415,42 @@ impl X68kVm {
         self.bus.take_adpcm_events(out);
     }
 
+    /// Installs or removes CZ-6BM1 MIDI board `board` (`0` = `$EAFA00`, `1` = `$EAFA10`).
+    #[inline]
+    pub fn set_midi_board_enabled(&mut self, board: usize, enabled: bool) {
+        self.bus.set_midi_board_enabled(board, enabled);
+    }
+
+    /// Returns whether CZ-6BM1 MIDI board `board` (`0` or `1`) is installed.
+    #[inline]
+    pub fn midi_board_enabled(&self, board: usize) -> bool {
+        self.bus.midi_board_enabled(board)
+    }
+
+    /// Configures the hardware IRQ jumper (`IRQ4` or `IRQ2`) for MIDI board `board`.
+    #[inline]
+    pub fn set_midi_board_irq(&mut self, board: usize, irq: crate::midi::MidiIrqLevel) {
+        self.bus.set_midi_board_irq(board, irq);
+    }
+
+    /// Attaches or detaches an external [`crate::midi::MidiPort`] on MIDI board `board`.
+    #[inline]
+    pub fn set_midi_port(&mut self, board: usize, port: Option<Box<dyn crate::midi::MidiPort>>) {
+        self.bus.set_midi_port(board, port);
+    }
+
+    /// Enables MIDI board `board` and attaches `port` in one call.
+    #[inline]
+    pub fn attach_midi_port(&mut self, board: usize, port: Box<dyn crate::midi::MidiPort>) {
+        self.bus.attach_midi_port(board, port);
+    }
+
+    /// Enables MIDI board `board`, attaches a channel-backed port, and returns the host endpoint.
+    #[inline]
+    pub fn attach_midi_channel(&mut self, board: usize) -> crate::midi::MidiChannelEndpoint {
+        self.bus.attach_midi_channel(board)
+    }
+
     /// Enters or exits temporary disk-I/O Burst mode (when `config.burst_on_disk_io` is enabled).
     pub fn set_disk_io_active(&mut self, active: bool) {
         self.disk_io_burst_active = active && self.config.burst_on_disk_io;

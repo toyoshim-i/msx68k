@@ -16,6 +16,7 @@ pub mod host_fs;
 pub mod human_fs;
 pub mod hypercall;
 pub mod mfp;
+pub mod midi;
 pub mod native_gm;
 pub mod opm;
 pub mod peripherals;
@@ -49,6 +50,11 @@ pub use fdc::{Fdc, FloppyDrive, FloppyGeometry, IoInterruptController};
 pub use gdb::GdbServer;
 pub use host_fs::HostFsBridge;
 pub use mfp::Mfp;
+pub use midi::{
+    midi_channel, MidiBoard, MidiByteEvent, MidiCallbackPort, MidiChannelEndpoint, MidiChannelPort,
+    MidiController, MidiIrqLevel, MidiMessageParser, MidiPort, MIDI_BOARD0_BASE, MIDI_BOARD1_BASE,
+    MIDI_BOARD_COUNT, MIDI_WINDOW_END,
+};
 pub use vmx68k::{VmEvent, VmWindowLayout};
 pub use vram_pages::{DirtyVramPages, VRAM_PAGE_BYTES};
 pub use adpcm::{Adpcm, AdpcmLpf, AdpcmSampleEvent};
