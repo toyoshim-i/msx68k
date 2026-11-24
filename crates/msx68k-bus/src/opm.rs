@@ -22,6 +22,9 @@ const BUSY_CYCLES_10MHZ: u32 = 80;
 /// Maximum EG attenuation (10-bit, silent).
 const EG_SILENT: u16 = 0x3FF;
 
+/// EG attenuation threshold where Decay/Sustain/Release transitions to Off/Mute (`0x3F0` in silicon).
+const EG_OFF_LEVEL: u16 = 0x3F0;
+
 /// Where YM2151 FM synthesis runs relative to the VM execution thread.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum OpmSynthMode {
@@ -51,89 +54,189 @@ enum EgPhase {
     Release,
 }
 
-/// 1/4-wave log-sin table: `round(-log2(sin((i + 0.5) * pi / 512)) * 256)`.
+/// 1/4-wave log-sin table (`logsinrom` from YM2151 silicon).
 const LOG_SIN_TABLE: [u16; 256] = [
-    2137, 1731, 1543, 1419, 1326, 1252, 1190, 1137, 1091, 1050, 1013, 979, 949, 920, 894, 869,
-    846, 825, 804, 785, 767, 749, 732, 717, 701, 687, 672, 659, 646, 633, 621, 609,
-    598, 587, 576, 566, 556, 546, 536, 527, 518, 509, 501, 492, 484, 476, 468, 461,
-    453, 446, 439, 432, 425, 418, 411, 405, 399, 392, 386, 380, 375, 369, 363, 358,
-    352, 347, 341, 336, 331, 326, 321, 316, 311, 307, 302, 297, 293, 288, 284, 280,
-    275, 271, 267, 263, 259, 255, 251, 247, 243, 239, 236, 232, 228, 225, 221, 218,
-    214, 211, 207, 204, 201, 198, 194, 191, 188, 185, 182, 179, 176, 173, 170, 167,
-    165, 162, 159, 156, 154, 151, 148, 146, 143, 141, 138, 136, 133, 131, 128, 126,
-    124, 121, 119, 117, 115, 112, 110, 108, 106, 104, 102, 100, 98, 96, 94, 92,
-    90, 88, 86, 84, 82, 80, 79, 77, 75, 73, 72, 70, 68, 67, 65, 63,
-    62, 60, 59, 57, 56, 54, 53, 51, 50, 48, 47, 46, 44, 43, 42, 40,
-    39, 38, 37, 35, 34, 33, 32, 31, 30, 29, 27, 26, 25, 24, 23, 22,
-    21, 20, 19, 19, 18, 17, 16, 15, 14, 14, 13, 12, 11, 11, 10, 9,
-    9, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 3, 2, 2, 2,
-    1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0x859, 0x6c3, 0x607, 0x58b, 0x52e, 0x4e4, 0x4a6, 0x471,
+    0x443, 0x41a, 0x3f5, 0x3d3, 0x3b5, 0x398, 0x37e, 0x365,
+    0x34e, 0x339, 0x324, 0x311, 0x2ff, 0x2ed, 0x2dc, 0x2cd,
+    0x2bd, 0x2af, 0x2a0, 0x293, 0x286, 0x279, 0x26d, 0x261,
+    0x256, 0x24b, 0x240, 0x236, 0x22c, 0x222, 0x218, 0x20f,
+    0x206, 0x1fd, 0x1f5, 0x1ec, 0x1e4, 0x1dc, 0x1d4, 0x1cd,
+    0x1c5, 0x1be, 0x1b7, 0x1b0, 0x1a9, 0x1a2, 0x19b, 0x195,
+    0x18f, 0x188, 0x182, 0x17c, 0x177, 0x171, 0x16b, 0x166,
+    0x160, 0x15b, 0x155, 0x150, 0x14b, 0x146, 0x141, 0x13c,
+    0x137, 0x133, 0x12e, 0x129, 0x125, 0x121, 0x11c, 0x118,
+    0x114, 0x10f, 0x10b, 0x107, 0x103, 0x0ff, 0x0fb, 0x0f8,
+    0x0f4, 0x0f0, 0x0ec, 0x0e9, 0x0e5, 0x0e2, 0x0de, 0x0db,
+    0x0d7, 0x0d4, 0x0d1, 0x0cd, 0x0ca, 0x0c7, 0x0c4, 0x0c1,
+    0x0be, 0x0bb, 0x0b8, 0x0b5, 0x0b2, 0x0af, 0x0ac, 0x0a9,
+    0x0a7, 0x0a4, 0x0a1, 0x09f, 0x09c, 0x099, 0x097, 0x094,
+    0x092, 0x08f, 0x08d, 0x08a, 0x088, 0x086, 0x083, 0x081,
+    0x07f, 0x07d, 0x07a, 0x078, 0x076, 0x074, 0x072, 0x070,
+    0x06e, 0x06c, 0x06a, 0x068, 0x066, 0x064, 0x062, 0x060,
+    0x05e, 0x05c, 0x05b, 0x059, 0x057, 0x055, 0x053, 0x052,
+    0x050, 0x04e, 0x04d, 0x04b, 0x04a, 0x048, 0x046, 0x045,
+    0x043, 0x042, 0x040, 0x03f, 0x03e, 0x03c, 0x03b, 0x039,
+    0x038, 0x037, 0x035, 0x034, 0x033, 0x031, 0x030, 0x02f,
+    0x02e, 0x02d, 0x02b, 0x02a, 0x029, 0x028, 0x027, 0x026,
+    0x025, 0x024, 0x023, 0x022, 0x021, 0x020, 0x01f, 0x01e,
+    0x01d, 0x01c, 0x01b, 0x01a, 0x019, 0x018, 0x017, 0x017,
+    0x016, 0x015, 0x014, 0x014, 0x013, 0x012, 0x011, 0x011,
+    0x010, 0x00f, 0x00f, 0x00e, 0x00d, 0x00d, 0x00c, 0x00c,
+    0x00b, 0x00a, 0x00a, 0x009, 0x009, 0x008, 0x008, 0x007,
+    0x007, 0x007, 0x006, 0x006, 0x005, 0x005, 0x005, 0x004,
+    0x004, 0x004, 0x003, 0x003, 0x003, 0x002, 0x002, 0x002,
+    0x002, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001, 0x001,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
 ];
 
-/// Exponential lookup table: `round(2^(11 - i / 256))` (`1025..=2048`).
+/// Exponential lookup table (`exprom` from YM2151 silicon: `round(2^((255 - i) / 256) * 1024)`, `1024..=2042`).
 const EXP_TABLE: [u16; 256] = [
-    2048, 2042, 2037, 2031, 2026, 2020, 2015, 2010, 2004, 1999, 1993, 1988, 1983, 1977, 1972, 1967,
-    1961, 1956, 1951, 1945, 1940, 1935, 1930, 1924, 1919, 1914, 1909, 1904, 1899, 1893, 1888, 1883,
-    1878, 1873, 1868, 1863, 1858, 1853, 1848, 1843, 1838, 1833, 1828, 1823, 1818, 1813, 1808, 1804,
-    1799, 1794, 1789, 1784, 1779, 1775, 1770, 1765, 1760, 1756, 1751, 1746, 1741, 1737, 1732, 1727,
-    1723, 1718, 1713, 1709, 1704, 1699, 1695, 1690, 1686, 1681, 1677, 1672, 1668, 1663, 1659, 1654,
-    1650, 1645, 1641, 1636, 1632, 1627, 1623, 1619, 1614, 1610, 1606, 1601, 1597, 1593, 1588, 1584,
-    1580, 1575, 1571, 1567, 1563, 1558, 1554, 1550, 1546, 1542, 1538, 1533, 1529, 1525, 1521, 1517,
-    1513, 1509, 1505, 1501, 1497, 1493, 1488, 1484, 1480, 1476, 1472, 1468, 1465, 1461, 1457, 1453,
-    1449, 1445, 1441, 1437, 1433, 1429, 1425, 1422, 1418, 1414, 1410, 1406, 1403, 1399, 1395, 1391,
-    1387, 1384, 1380, 1376, 1373, 1369, 1365, 1361, 1358, 1354, 1350, 1347, 1343, 1340, 1336, 1332,
-    1329, 1325, 1322, 1318, 1314, 1311, 1307, 1304, 1300, 1297, 1293, 1290, 1286, 1283, 1279, 1276,
-    1272, 1269, 1266, 1262, 1259, 1255, 1252, 1249, 1245, 1242, 1238, 1235, 1232, 1228, 1225, 1222,
-    1219, 1215, 1212, 1209, 1205, 1202, 1199, 1196, 1192, 1189, 1186, 1183, 1180, 1176, 1173, 1170,
-    1167, 1164, 1161, 1158, 1154, 1151, 1148, 1145, 1142, 1139, 1136, 1133, 1130, 1127, 1124, 1121,
-    1118, 1115, 1112, 1109, 1106, 1103, 1100, 1097, 1094, 1091, 1088, 1085, 1082, 1079, 1076, 1073,
-    1070, 1067, 1065, 1062, 1059, 1056, 1053, 1050, 1047, 1045, 1042, 1039, 1036, 1033, 1031, 1028,
+    0x7fa, 0x7f5, 0x7ef, 0x7ea, 0x7e4, 0x7df, 0x7da, 0x7d4,
+    0x7cf, 0x7c9, 0x7c4, 0x7bf, 0x7b9, 0x7b4, 0x7ae, 0x7a9,
+    0x7a4, 0x79f, 0x799, 0x794, 0x78f, 0x78a, 0x784, 0x77f,
+    0x77a, 0x775, 0x770, 0x76a, 0x765, 0x760, 0x75b, 0x756,
+    0x751, 0x74c, 0x747, 0x742, 0x73d, 0x738, 0x733, 0x72e,
+    0x729, 0x724, 0x71f, 0x71a, 0x715, 0x710, 0x70b, 0x706,
+    0x702, 0x6fd, 0x6f8, 0x6f3, 0x6ee, 0x6e9, 0x6e5, 0x6e0,
+    0x6db, 0x6d6, 0x6d2, 0x6cd, 0x6c8, 0x6c4, 0x6bf, 0x6ba,
+    0x6b5, 0x6b1, 0x6ac, 0x6a8, 0x6a3, 0x69e, 0x69a, 0x695,
+    0x691, 0x68c, 0x688, 0x683, 0x67f, 0x67a, 0x676, 0x671,
+    0x66d, 0x668, 0x664, 0x65f, 0x65b, 0x657, 0x652, 0x64e,
+    0x649, 0x645, 0x641, 0x63c, 0x638, 0x634, 0x630, 0x62b,
+    0x627, 0x623, 0x61e, 0x61a, 0x616, 0x612, 0x60e, 0x609,
+    0x605, 0x601, 0x5fd, 0x5f9, 0x5f5, 0x5f0, 0x5ec, 0x5e8,
+    0x5e4, 0x5e0, 0x5dc, 0x5d8, 0x5d4, 0x5d0, 0x5cc, 0x5c8,
+    0x5c4, 0x5c0, 0x5bc, 0x5b8, 0x5b4, 0x5b0, 0x5ac, 0x5a8,
+    0x5a4, 0x5a0, 0x59c, 0x599, 0x595, 0x591, 0x58d, 0x589,
+    0x585, 0x581, 0x57e, 0x57a, 0x576, 0x572, 0x56f, 0x56b,
+    0x567, 0x563, 0x560, 0x55c, 0x558, 0x554, 0x551, 0x54d,
+    0x549, 0x546, 0x542, 0x53e, 0x53b, 0x537, 0x534, 0x530,
+    0x52c, 0x529, 0x525, 0x522, 0x51e, 0x51b, 0x517, 0x514,
+    0x510, 0x50c, 0x509, 0x506, 0x502, 0x4ff, 0x4fb, 0x4f8,
+    0x4f4, 0x4f1, 0x4ed, 0x4ea, 0x4e7, 0x4e3, 0x4e0, 0x4dc,
+    0x4d9, 0x4d6, 0x4d2, 0x4cf, 0x4cc, 0x4c8, 0x4c5, 0x4c2,
+    0x4be, 0x4bb, 0x4b8, 0x4b5, 0x4b1, 0x4ae, 0x4ab, 0x4a8,
+    0x4a4, 0x4a1, 0x49e, 0x49b, 0x498, 0x494, 0x491, 0x48e,
+    0x48b, 0x488, 0x485, 0x482, 0x47e, 0x47b, 0x478, 0x475,
+    0x472, 0x46f, 0x46c, 0x469, 0x466, 0x463, 0x460, 0x45d,
+    0x45a, 0x457, 0x454, 0x451, 0x44e, 0x44b, 0x448, 0x445,
+    0x442, 0x43f, 0x43c, 0x439, 0x436, 0x433, 0x430, 0x42d,
+    0x42a, 0x428, 0x425, 0x422, 0x41f, 0x41c, 0x419, 0x416,
+    0x414, 0x411, 0x40e, 0x40b, 0x408, 0x406, 0x403, 0x400,
 ];
 
-/// YM2151 octave-7 base phase increments for the 768 steps (`12 semitones * 64 KF`).
-///
-/// Computed against the OPM's internal 3.579545 MHz / 64 (55,930.39 Hz) tuning reference so that
-/// X68000's 4.000 MHz clock produces the exact hardware pitch offset drivers expect.
-const fn build_phase_inc_table() -> [u32; 768] {
-    // Octave 7 C#..C base f-numbers at 3.579545 MHz / 64, pre-scaled for 20-bit phase.
-    // C#7 = 2217.46 Hz -> inc_oct7 = round(2217.46 * 1048576 / 55930.39) = 41574.
-    let mut table = [0u32; 768];
-    const SEMI_BASE: [u32; 13] = [
-        41574, // C#7
-        44046, // D7
-        46665, // D#7
-        49440, // E7
-        52380, // F7
-        55495, // F#7
-        58795, // G7
-        62291, // G#7
-        65995, // A7 (65995 / 8 = 8249 = A4 = 440 Hz @ 3.579545 MHz)
-        69918, // A#7
-        74076, // B7
-        78481, // C8
-        83148, // C#8
-    ];
-    let mut s = 0;
-    while s < 12 {
-        let a = SEMI_BASE[s] as u64;
-        let b = SEMI_BASE[s + 1] as u64;
-        let mut kf = 0;
-        while kf < 64 {
-            // Linear interpolation within 1 semitone (max error < 0.02% = 0.3 cents).
-            let val = a + ((b - a) * (kf as u64) + 32) / 64;
-            table[s * 64 + kf] = val as u32;
-            kf += 1;
+/// YM2151 silicon piecewise-linear F-number ROM (`pg_freqtable[64]`: `(basefreq, approxtype, slope)`).
+const PG_FREQ_TABLE: [(i32, u8, i32); 64] = [
+    (1299, 1, 19), (1318, 1, 19), (1337, 1, 19), (1356, 1, 20),
+    (1376, 1, 20), (1396, 1, 20), (1416, 1, 21), (1437, 1, 20),
+    (1458, 1, 21), (1479, 1, 21), (1501, 1, 22), (1523, 1, 22),
+    (0,    0, 16), (0,    0, 16), (0,    0, 16), (0,    0, 16),
+    (1545, 1, 22), (1567, 1, 22), (1590, 1, 23), (1613, 1, 23),
+    (1637, 1, 23), (1660, 1, 24), (1685, 1, 24), (1709, 1, 24),
+    (1734, 1, 25), (1759, 1, 25), (1785, 1, 26), (1811, 1, 26),
+    (0,    0, 16), (0,    0, 16), (0,    0, 16), (0,    0, 16),
+    (1837, 1, 26), (1864, 1, 27), (1891, 1, 27), (1918, 1, 28),
+    (1946, 1, 28), (1975, 1, 28), (2003, 1, 29), (2032, 1, 30),
+    (2062, 1, 30), (2092, 1, 30), (2122, 1, 31), (2153, 1, 31),
+    (0,    0, 16), (0,    0, 16), (0,    0, 16), (0,    0, 16),
+    (2185, 1, 31), (2216, 0, 31), (2249, 0, 31), (2281, 0, 31),
+    (2315, 0, 31), (2348, 0, 31), (2382, 0, 30), (2417, 0, 30),
+    (2452, 0, 30), (2488, 0, 30), (2524, 0, 30), (2561, 0, 30),
+    (0,    0, 16), (0,    0, 16), (0,    0, 16), (0,    0, 16),
+];
+
+/// Converts YM2151 internal keycode (`OPM_CalcKCode` output) to 12-bit F-number.
+#[inline]
+fn kc_to_fnum(kcode: i32) -> u32 {
+    let kcode_h = ((kcode >> 4) & 63) as usize;
+    let kcode_l = kcode & 15;
+    let (basefreq, approxtype, raw_slope) = PG_FREQ_TABLE[kcode_h];
+    let mut sum = 0i32;
+    if approxtype != 0 {
+        for i in 0..4 {
+            if (kcode_l & (1 << i)) != 0 {
+                sum += raw_slope >> (3 - i);
+            }
         }
-        s += 1;
+    } else {
+        let slope = raw_slope | 1;
+        if (kcode_l & 1) != 0 {
+            sum += (slope >> 3) + 2;
+        }
+        if (kcode_l & 2) != 0 {
+            sum += 8;
+        }
+        if (kcode_l & 4) != 0 {
+            sum += slope >> 1;
+        }
+        if (kcode_l & 8) != 0 {
+            sum += slope + 1;
+        }
+        if (kcode_l & 12) == 12 && (raw_slope & 1) == 0 {
+            sum += 4;
+        }
     }
-    table
+    (basefreq + (sum >> 1)) as u32
 }
 
-const PHASE_INC_TABLE: [u32; 768] = build_phase_inc_table();
+/// Combines channel `KC`/`KF`, LFO PM offset (`lfo_mag`, `lfo_neg`), and `DT2` using YM2151's
+/// hardware carry-skipping keycode arithmetic (`OPM_CalcKCode`).
+#[inline]
+fn calc_kcode(kcf: i32, lfo_mag: i32, lfo_neg: bool, dt: u8) -> i32 {
+    let lfo_sign = !lfo_neg;
+    let lfo = if !lfo_sign { !lfo_mag } else { lfo_mag };
+    let mut sum = (kcf & 8191) + (lfo & 8191) + (!lfo_sign as i32);
+    let cr = ((kcf & 255) + (lfo & 255) + (!lfo_sign as i32)) >> 8;
+    let overflow1 = (sum & (1 << 13)) != 0;
+    sum &= 8191;
+    if lfo_sign && ((((sum >> 6) & 3) == 3) || cr != 0) {
+        sum += 64;
+    }
+    let mut negoverflow = false;
+    if !lfo_sign && cr == 0 && (lfo & 192) != 0 {
+        sum += (-64i32) & 8191;
+        negoverflow = true;
+    }
+    let overflow2 = (sum & (1 << 13)) != 0;
+    sum &= 8191;
+    if (!lfo_sign && !overflow1) || (negoverflow && !overflow2) {
+        sum = 0;
+    }
+    if lfo_sign && (overflow1 || overflow2) {
+        sum = 8127;
+    }
 
-/// DT2 offsets in KF units (`0, +384, +500, +608`).
-const DT2_TABLE: [u16; 4] = [0, 384, 500, 608];
+    let mut t2 = sum & 63;
+    if dt == 2 {
+        t2 += 20;
+    }
+    if dt == 2 || dt == 3 {
+        t2 += 32;
+    }
+
+    let b0 = ((t2 >> 6) & 1) != 0;
+    let b1 = dt == 2;
+    let b2 = ((sum >> 6) & 1) != 0;
+    let b3 = ((sum >> 7) & 1) != 0;
+
+    let w2 = b0 && b1 && b2;
+    let w3 = b0 && b3;
+    let w6 = (b0 && !w2 && !w3) || (b3 && !b0 && b1);
+
+    t2 &= 63;
+    let mut t3 = (sum >> 6)
+        + (w6 as i32)
+        + (b1 as i32)
+        + ((w2 || w3) as i32) * 2
+        + ((dt == 3) as i32) * 4
+        + ((dt != 0) as i32) * 8;
+    if (t3 & 128) != 0 {
+        t2 = 63;
+        t3 = 126;
+    }
+    t3 * 64 + t2
+}
 
 /// DT1 magnitudes for `dt1 & 3` across 32 keycodes (0..31).
 const DT1_TABLE: [[u8; 32]; 4] = [
@@ -143,40 +246,12 @@ const DT1_TABLE: [[u8; 32]; 4] = [
     [2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7, 8, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 20, 22, 22, 22, 22],
 ];
 
-/// EG counter shift amount per rate (0..63).
-const EG_RATE_SHIFT: [u8; 64] = [
-    11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8,
-    7, 7, 7, 7, 6, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4,
-    3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
-
-/// EG increment step row index per rate (0..63).
-const EG_RATE_ROW: [u8; 64] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2,
-    1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2,
-    1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2,
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 15, 15,
-];
-
-/// EG step values across 8 substeps (indexed by `EG_RATE_ROW`).
-const EG_INC_TABLE: [[u8; 8]; 16] = [
-    [0, 0, 0, 0, 0, 0, 0, 0], // 0: rate 0..3 (no change)
-    [0, 1, 0, 1, 0, 1, 0, 1], // 1: 4/8
-    [0, 1, 1, 1, 0, 1, 1, 1], // 2: 6/8
-    [0, 1, 1, 1, 1, 1, 1, 1], // 3: 7/8 (rate 48)
-    [1, 1, 1, 1, 1, 1, 1, 1], // 4: 1
-    [1, 1, 1, 2, 1, 1, 1, 2], // 5: 1.25
-    [1, 2, 1, 2, 1, 2, 1, 2], // 6: 1.5
-    [1, 2, 2, 2, 1, 2, 2, 2], // 7: 1.75
-    [2, 2, 2, 2, 2, 2, 2, 2], // 8: 2
-    [2, 2, 2, 4, 2, 2, 2, 4], // 9: 2.5
-    [2, 4, 2, 4, 2, 4, 2, 4], // 10: 3
-    [2, 4, 4, 4, 2, 4, 4, 4], // 11: 3.5
-    [4, 4, 4, 4, 4, 4, 4, 4], // 12: 4
-    [4, 4, 4, 8, 4, 4, 4, 8], // 13: 5
-    [4, 8, 4, 8, 4, 8, 4, 8], // 14: 6
-    [8, 8, 8, 8, 8, 8, 8, 8], // 15: 8
+/// High-rate EG substep pattern (`eg_stephi` from YM2151 silicon, rates 48..63).
+const EG_STEPHI: [[u8; 4]; 4] = [
+    [0, 0, 0, 0],
+    [1, 0, 0, 0],
+    [1, 0, 1, 0],
+    [1, 1, 1, 0],
 ];
 
 /// LFO AM sensitivity shift (`AMS` 0..3).
@@ -200,6 +275,7 @@ struct Operator {
     // Phase & Envelope state
     phase: u32,
     phase_inc: u32,
+    pg_kcode: u8,
     eg_phase: EgPhase,
     eg_level: u16,
     key_on: bool,
@@ -222,6 +298,7 @@ impl Operator {
             rr: 0,
             phase: 0,
             phase_inc: 0,
+            pg_kcode: 0,
             eg_phase: EgPhase::Off,
             eg_level: EG_SILENT,
             key_on: false,
@@ -235,7 +312,8 @@ impl Operator {
         }
         self.key_on = true;
         self.phase = 0;
-        let rate = self.effective_rate(self.ar, kc);
+        self.update_phase_inc(kc, kf, pm_offset);
+        let rate = self.effective_rate(self.ar);
         if rate >= 62 {
             self.eg_level = 0;
             self.eg_phase = if self.d1l == 0 {
@@ -246,7 +324,6 @@ impl Operator {
         } else {
             self.eg_phase = EgPhase::Attack;
         }
-        self.update_phase_inc(kc, kf, pm_offset);
     }
 
     fn key_off(&mut self) {
@@ -264,79 +341,79 @@ impl Operator {
             return;
         }
         self.phase = 0;
-        let rate = self.effective_rate(self.ar, kc);
+        self.update_phase_inc(kc, kf, pm_offset);
+        let rate = self.effective_rate(self.ar);
         if rate >= 62 {
             self.eg_level = 0;
         }
         self.eg_phase = EgPhase::Release;
-        self.update_phase_inc(kc, kf, pm_offset);
     }
 
     #[inline]
-    fn keycode(kc: u8) -> u8 {
-        let oct = (kc >> 4) & 7;
-        let note = kc & 0x0F;
-        let semi = note.saturating_sub(note >> 2).min(11);
-        (oct << 2) | (semi >> 2)
-    }
-
-    #[inline]
-    fn effective_rate(&self, base_5bit: u8, kc: u8) -> u8 {
+    fn effective_rate(&self, base_5bit: u8) -> u8 {
         if base_5bit == 0 {
             return 0;
         }
-        let kcode = Self::keycode(kc) >> (3 - self.ks);
-        ((base_5bit << 1) + kcode).min(63)
+        let ksv = self.pg_kcode >> (3 - self.ks);
+        ((base_5bit << 1) + ksv).min(63)
     }
 
     fn update_phase_inc(&mut self, kc: u8, kf: u8, pm_offset: i32) {
-        let oct = ((kc >> 4) & 7) as i32;
-        let note = (kc & 0x0F) as i32;
-        let semi = (note - (note >> 2)).min(11);
-        let kf6 = (kf >> 2) as i32;
-        let dt2 = DT2_TABLE[self.dt2 as usize] as i32;
+        let kcf = ((kc as i32) << 6) + ((kf >> 2) as i32);
+        let lfo_neg = pm_offset < 0;
+        let lfo_mag = pm_offset.abs();
+        let kcode = calc_kcode(kcf, lfo_mag, lfo_neg, self.dt2);
+        let fnum = kc_to_fnum(kcode);
+        let kcode_h = ((kcode >> 8) & 0x1F) as u32;
+        self.pg_kcode = kcode_h as u8;
 
-        let pitch = (oct * 768 + semi * 64 + kf6 + dt2 + pm_offset).clamp(0, 8 * 768 - 1);
-        let eff_oct = (pitch / 768) as u32;
-        let step_idx = (pitch % 768) as usize;
-
-        let mut inc = PHASE_INC_TABLE[step_idx] >> (7 - eff_oct);
-        let kcode = Self::keycode(kc) as usize;
-        let dt1_mag = DT1_TABLE[(self.dt1 & 3) as usize][kcode] as u32;
+        let block = kcode_h >> 2;
+        let mut basefreq = (fnum << block) >> 2;
+        let dt1_kcode = kcode_h.min(0x1C) as usize;
+        let dt1_mag = DT1_TABLE[(self.dt1 & 3) as usize][dt1_kcode] as u32;
         if (self.dt1 & 4) != 0 {
-            inc = inc.wrapping_sub(dt1_mag);
+            basefreq = basefreq.wrapping_sub(dt1_mag);
         } else {
-            inc = inc.wrapping_add(dt1_mag);
+            basefreq = basefreq.wrapping_add(dt1_mag);
         }
-        inc &= 0xFFFFF;
-        if self.mul == 0 {
-            inc >>= 1;
+        basefreq &= 0x1FFFF;
+        let inc = if self.mul == 0 {
+            basefreq >> 1
         } else {
-            inc = (inc * (self.mul as u32)) & 0xFFFFF;
-        }
-        self.phase_inc = inc;
+            basefreq.wrapping_mul(self.mul as u32)
+        };
+        self.phase_inc = inc & 0xFFFFF;
     }
 
-    fn step_eg(&mut self, eg_counter: u32, kc: u8) {
+    fn step_eg(&mut self, eg_counter: u32) {
         let rate = match self.eg_phase {
             EgPhase::Off => return,
-            EgPhase::Attack => self.effective_rate(self.ar, kc),
-            EgPhase::Decay => self.effective_rate(self.d1r, kc),
-            EgPhase::Sustain => self.effective_rate(self.d2r, kc),
-            EgPhase::Release => self.effective_rate((self.rr << 1) | 1, kc),
+            EgPhase::Attack => self.effective_rate(self.ar),
+            EgPhase::Decay => self.effective_rate(self.d1r),
+            EgPhase::Sustain => self.effective_rate(self.d2r),
+            EgPhase::Release => self.effective_rate((self.rr << 1) | 1),
         };
-        if rate < 4 {
+        if rate == 0 {
             return;
         }
-        let shift = EG_RATE_SHIFT[rate as usize];
-        if (eg_counter & ((1u32 << shift) - 1)) != 0 {
-            return;
-        }
-        let substep = ((eg_counter >> shift) & 7) as usize;
-        let step = EG_INC_TABLE[EG_RATE_ROW[rate as usize] as usize][substep] as u16;
-        if step == 0 {
-            return;
-        }
+        let step: u16 = if rate >= 48 {
+            let inchi = EG_STEPHI[(rate & 3) as usize][(eg_counter & 3) as usize];
+            let inc = (inchi + (rate >> 2) - 11).min(4);
+            1u16 << (inc - 1)
+        } else {
+            let timer16 = (eg_counter & 0xFFFF) as u16;
+            if timer16 == 0 {
+                return;
+            }
+            let shift = ((timer16.trailing_zeros() + 1) + (rate >> 2) as u32) & 15;
+            let hit = match shift {
+                12 => true,
+                13 => ((rate >> 1) & 1) != 0,
+                14 => (rate & 1) != 0,
+                _ => false,
+            };
+            if hit { 1 } else { return }
+        };
         match self.eg_phase {
             EgPhase::Attack => {
                 if self.eg_level > 0 {
@@ -354,16 +431,24 @@ impl Operator {
             }
             EgPhase::Decay => {
                 self.eg_level = (self.eg_level + step).min(EG_SILENT);
-                if self.eg_level >= self.d1l {
+                if self.eg_level >= EG_OFF_LEVEL {
+                    self.eg_level = EG_SILENT;
+                    self.eg_phase = EgPhase::Off;
+                } else if self.eg_level >= self.d1l {
                     self.eg_phase = EgPhase::Sustain;
                 }
             }
             EgPhase::Sustain => {
                 self.eg_level = (self.eg_level + step).min(EG_SILENT);
+                if self.eg_level >= EG_OFF_LEVEL {
+                    self.eg_level = EG_SILENT;
+                    self.eg_phase = EgPhase::Off;
+                }
             }
             EgPhase::Release => {
                 self.eg_level = (self.eg_level + step).min(EG_SILENT);
-                if self.eg_level >= EG_SILENT {
+                if self.eg_level >= EG_OFF_LEVEL {
+                    self.eg_level = EG_SILENT;
                     self.eg_phase = EgPhase::Off;
                 }
             }
@@ -391,7 +476,7 @@ impl Operator {
         let val = if shift >= 13 {
             0
         } else {
-            ((EXP_TABLE[(atten & 0xFF) as usize] << 1) >> shift) as i32
+            ((EXP_TABLE[(atten & 0xFF) as usize] << 2) >> shift) as i32
         };
         self.out = if (phase_10 & 0x200) != 0 { -val } else { val };
         self.out
@@ -402,17 +487,12 @@ impl Operator {
         self.phase = (self.phase + self.phase_inc) & 0xFFFFF;
         let total_eg = (self.eg_level + ((self.tl as u16) << 3) + if self.ams_en { am_atten } else { 0 })
             .min(EG_SILENT);
-        if total_eg >= EG_SILENT {
+        if total_eg >= EG_OFF_LEVEL {
             self.out = 0;
             return 0;
         }
-        let atten = total_eg << 2;
-        let shift = atten >> 8;
-        let val = if shift >= 13 {
-            0
-        } else {
-            ((EXP_TABLE[(atten & 0xFF) as usize] << 1) >> shift) as i32
-        };
+        // Hardware YM2151 noise channel uses linear EG attenuation (±2044 max), not EXP_TABLE.
+        let val = ((EG_SILENT - total_eg) as i32) << 1;
         self.out = if noise_bit { val } else { -val };
         self.out
     }
@@ -433,6 +513,7 @@ struct Channel {
     pms: u8,
     ams: u8,
     op1_hist: [i32; 2],
+    op_c1_prev: i32,
     ops: [Operator; 4], // 0: M1, 1: M2, 2: C1, 3: C2
 }
 
@@ -447,6 +528,7 @@ impl Channel {
             pms: 0,
             ams: 0,
             op1_hist: [0; 2],
+            op_c1_prev: 0,
             ops: [
                 Operator::new(),
                 Operator::new(),
@@ -465,13 +547,7 @@ impl Channel {
     }
 
     fn update_pitch(&mut self, pm_lfo: i32) {
-        let pm = if self.pms == 0 {
-            0
-        } else if self.pms <= 5 {
-            (pm_lfo * (self.pms as i32)) >> 5
-        } else {
-            (pm_lfo << (self.pms - 5)) >> 2
-        };
+        let pm = Opm::channel_pm_offset(self.pms, pm_lfo);
         for op in &mut self.ops {
             op.update_phase_inc(self.kc, self.kf, pm);
         }
@@ -479,7 +555,7 @@ impl Channel {
 
     fn step_eg(&mut self, eg_counter: u32) {
         for op in &mut self.ops {
-            op.step_eg(eg_counter, self.kc);
+            op.step_eg(eg_counter);
         }
     }
 
@@ -491,76 +567,52 @@ impl Channel {
             am_lfo >> AMS_SHIFT[self.ams as usize]
         };
 
-        // M1 (op 0) with 2-sample feedback (FB=1..7 -> pi/16 .. 4*pi)
+        // Hardware TDM slot order: M1(0) -> M2(1) -> C1(2) -> C2(3) with 16-cycle pipeline.
+        // M1 uses op1_hist[0..2]; M2 uses previous M1/C1; C1 uses current M1;
+        // C2 uses current M1/M2 and previous C1.
+        let m1_prev = self.op1_hist[0];
+        let c1_prev = self.op_c1_prev;
+
         let fb = if self.fl == 0 {
             0
         } else {
-            (self.op1_hist[0] + self.op1_hist[1]) >> (9 - self.fl)
+            ((self.op1_hist[0] + self.op1_hist[1]) >> 1) >> (9 - self.fl)
         };
         let m1 = self.ops[0].compute_sample(fb, am_atten);
+
+        let m2_mod = match self.con {
+            0 | 2 => c1_prev >> 1,
+            1 => (m1_prev + c1_prev) >> 1,
+            5 => m1_prev >> 1,
+            _ => 0,
+        };
+        let m2 = self.ops[1].compute_sample(m2_mod, am_atten);
+
+        let c1_mod = match self.con {
+            0 | 3 | 4 | 5 | 6 => m1 >> 1,
+            _ => 0,
+        };
+        let c1 = self.ops[2].compute_sample(c1_mod, am_atten);
+
+        let c2_mod = match self.con {
+            0 | 1 | 4 => m2 >> 1,
+            2 => (m1 + m2) >> 1,
+            3 => (c1_prev + m2) >> 1,
+            5 => m1 >> 1,
+            _ => 0,
+        };
+        let c2 = self.eval_c2(c2_mod, am_atten, use_noise, noise_bit);
+
         self.op1_hist[1] = self.op1_hist[0];
         self.op1_hist[0] = m1;
+        self.op_c1_prev = c1;
 
-        // Slot evaluation order matches OPM pipeline: M1 (0) -> C1 (2) -> M2 (1) -> C2 (3).
-        let (c1, m2, c2, out) = match self.con {
-            0 => {
-                // M1 -> C1 -> M2 -> C2
-                let c1 = self.ops[2].compute_sample(m1 >> 1, am_atten);
-                let m2 = self.ops[1].compute_sample(c1 >> 1, am_atten);
-                let c2 = self.eval_c2(m2 >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c2)
-            }
-            1 => {
-                // (M1 + C1) -> M2 -> C2
-                let c1 = self.ops[2].compute_sample(0, am_atten);
-                let m2 = self.ops[1].compute_sample((m1 + c1) >> 1, am_atten);
-                let c2 = self.eval_c2(m2 >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c2)
-            }
-            2 => {
-                // (M1 + (C1 -> M2)) -> C2
-                let c1 = self.ops[2].compute_sample(0, am_atten);
-                let m2 = self.ops[1].compute_sample(c1 >> 1, am_atten);
-                let c2 = self.eval_c2((m1 + m2) >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c2)
-            }
-            3 => {
-                // ((M1 -> C1) + M2) -> C2
-                let c1 = self.ops[2].compute_sample(m1 >> 1, am_atten);
-                let m2 = self.ops[1].compute_sample(0, am_atten);
-                let c2 = self.eval_c2((c1 + m2) >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c2)
-            }
-            4 => {
-                // (M1 -> C1) + (M2 -> C2)
-                let c1 = self.ops[2].compute_sample(m1 >> 1, am_atten);
-                let m2 = self.ops[1].compute_sample(0, am_atten);
-                let c2 = self.eval_c2(m2 >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c1 + c2)
-            }
-            5 => {
-                // M1 -> (C1 + M2 + C2)
-                let c1 = self.ops[2].compute_sample(m1 >> 1, am_atten);
-                let m2 = self.ops[1].compute_sample(m1 >> 1, am_atten);
-                let c2 = self.eval_c2(m1 >> 1, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c1 + m2 + c2)
-            }
-            6 => {
-                // (M1 -> C1) + M2 + C2
-                let c1 = self.ops[2].compute_sample(m1 >> 1, am_atten);
-                let m2 = self.ops[1].compute_sample(0, am_atten);
-                let c2 = self.eval_c2(0, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, c1 + m2 + c2)
-            }
-            _ => {
-                // M1 + C1 + M2 + C2
-                let c1 = self.ops[2].compute_sample(0, am_atten);
-                let m2 = self.ops[1].compute_sample(0, am_atten);
-                let c2 = self.eval_c2(0, am_atten, use_noise, noise_bit);
-                (c1, m2, c2, m1 + c1 + m2 + c2)
-            }
+        let out = match self.con {
+            0 | 1 | 2 | 3 => c2,
+            4 => c1 + c2,
+            5 | 6 => m2 + c1 + c2,
+            _ => m1 + m2 + c1 + c2,
         };
-        let _ = (c1, m2, c2);
 
         let left = if (self.rl & 0x01) != 0 { out } else { 0 };
         let right = if (self.rl & 0x02) != 0 { out } else { 0 };
@@ -842,23 +894,45 @@ impl Opm {
 
     #[inline]
     fn channel_pm_offset(pms: u8, lfo_pm: i32) -> i32 {
-        match pms {
-            0 => 0,
-            1..=5 => lfo_pm >> (6 - pms),
-            6 => lfo_pm << 1,
-            _ => lfo_pm << 2,
+        if pms == 0 || lfo_pm == 0 {
+            return 0;
         }
+        let lfo = lfo_pm.unsigned_abs().min(127) as i32;
+        let mut top = (lfo >> 4) & 7;
+        if pms != 7 {
+            top >>= 1;
+        }
+        let t = (((top & 6) == 6 && pms == 7) || ((top & 3) == 3 && pms >= 6)) as i32;
+        let mut out = top + ((top >> 2) & 1) + t;
+        out = out * 2 + ((lfo >> 4) & 1);
+        if pms == 7 {
+            out >>= 1;
+        }
+        out &= 15;
+        out = (lfo & 15) + out * 16;
+        let mag = match pms {
+            1 => (out >> 5) & 3,
+            2 => (out >> 4) & 7,
+            3 => (out >> 3) & 15,
+            4 => (out >> 2) & 31,
+            5 => (out >> 1) & 63,
+            6 => (out & 255) << 1,
+            _ => (out & 255) << 2,
+        };
+        if lfo_pm < 0 { -mag } else { mag }
     }
 
     fn step_lfo_and_noise(&mut self) {
-        // 17-bit LFSR noise (taps bit 0 ^ bit 3)
+        // 17-bit LFSR noise (taps bit 0 ^ bit 3), clocked at 125 kHz (2x per 62.5 kHz sample)
         let nfrq = (self.regs[0x0F] & 0x1F) as u32;
         let noise_period = (32 - nfrq).max(1);
-        self.noise_counter += 1;
-        if self.noise_counter >= noise_period {
-            self.noise_counter = 0;
-            let bit = ((self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1) << 16;
-            self.noise_lfsr = (self.noise_lfsr >> 1) | bit;
+        for _ in 0..2 {
+            self.noise_counter += 1;
+            if self.noise_counter >= noise_period {
+                self.noise_counter = 0;
+                let bit = ((self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1) << 16;
+                self.noise_lfsr = (self.noise_lfsr >> 1) | bit;
+            }
         }
 
         // LFO
@@ -873,17 +947,18 @@ impl Opm {
             let shift = (lfrq >> 4) as u32;
             let delta = (16 | (lfrq & 0x0F)) as u32;
             self.lfo_counter += delta << shift;
-            if self.lfo_counter >= 0x40000 {
-                self.lfo_counter -= 0x40000;
-                self.lfo_phase = self.lfo_phase.wrapping_add(1);
+            if self.lfo_counter >= 0x40_0000 {
+                let steps = self.lfo_counter >> 22;
+                self.lfo_counter &= 0x3F_FFFF;
+                self.lfo_phase = self.lfo_phase.wrapping_add(steps as u8);
             }
         }
 
         let wave = self.regs[0x1B] & 0x03;
         let (pm_wave, am_wave): (i32, u32) = match wave {
             0 => {
-                // Sawtooth
-                let pm = ((self.lfo_phase as i8) as i32) * 2;
+                // Sawtooth: PM 0..+127 then -128..-1; AM 255..0
+                let pm = (self.lfo_phase as i8) as i32;
                 let am = (self.lfo_phase ^ 0xFF) as u32;
                 (pm, am)
             }
@@ -893,19 +968,20 @@ impl Opm {
                 (if hi { -128 } else { 127 }, if hi { 0 } else { 255 })
             }
             2 => {
-                // Triangle
+                // Triangle: PM 0..+127..0..-127..0; AM 255..0..255
                 let p = self.lfo_phase;
-                let tri = if (p & 0x80) == 0 {
-                    (p as i32) * 2 - 128
-                } else {
-                    127 - ((p & 0x7F) as i32) * 2
+                let pm = match p >> 6 {
+                    0 => ((p & 0x3F) as i32) * 2,
+                    1 => 127 - ((p & 0x3F) as i32) * 2,
+                    2 => -(((p & 0x3F) as i32) * 2),
+                    _ => -127 + ((p & 0x3F) as i32) * 2,
                 };
                 let am = if (p & 0x80) == 0 {
-                    (p as u32) * 2
+                    255 - (p as u32) * 2
                 } else {
-                    (255 - p as u32) * 2
+                    ((p & 0x7F) as u32) * 2
                 };
-                (tri, am)
+                (pm, am)
             }
             _ => {
                 // Noise
@@ -959,9 +1035,9 @@ impl Opm {
         }
         self.active_mask = new_active;
 
-        // Scale 8-channel sum cleanly into i16 headroom.
-        let left = (left_acc >> 1).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let right = (right_acc >> 1).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        // Clamp 8-channel sum into i16 (matches YM2151 / YM3012 1x DAC range).
+        let left = left_acc.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let right = right_acc.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         (left, right)
     }
 
@@ -1030,9 +1106,10 @@ impl Opm {
                 let ch_idx = (val & 0x07) as usize;
                 let ch = &mut self.channels[ch_idx];
                 let pm = Self::channel_pm_offset(ch.pms, self.lfo_pm);
-                // Bits 3..6 = M1(0), M2(1), C1(2), C2(3)
-                for slot in 0..4 {
-                    if (val & (1 << (3 + slot))) != 0 {
+                // Bits 3..6 = M1(0), C1(2), M2(1), C2(3)
+                const KON_SLOT: [usize; 4] = [0, 2, 1, 3];
+                for (bit, &slot) in KON_SLOT.iter().enumerate() {
+                    if (val & (1 << (3 + bit))) != 0 {
                         ch.ops[slot].key_on(ch.kc, ch.kf, pm);
                     } else {
                         ch.ops[slot].key_off();
@@ -1398,5 +1475,128 @@ mod tests {
             offload_samples.push(synth.next_sample());
         }
         assert_eq!(inline_samples, offload_samples);
+    }
+
+    #[test]
+    fn operator_peak_and_lfo_am_match_nuked_scale() {
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        write_reg(&mut opm, 0x20, 0xC7); // Ch 0 L+R, CON=7
+        write_reg(&mut opm, 0x28, 0x4A); // KC = A4
+        write_reg(&mut opm, 0x40, 0x01); // M1 MUL=1
+        write_reg(&mut opm, 0x60, 0x00); // M1 TL=0
+        write_reg(&mut opm, 0x80, 0x1F); // M1 AR=31 (instant)
+        write_reg(&mut opm, 0x08, 0x08); // Key-on M1
+
+        let mut out = Vec::new();
+        opm.advance(160 * 256);
+        opm.take_samples(&mut out);
+        let peak = out.iter().map(|&(l, _)| l.abs()).max().unwrap();
+        // Nuked-OPM peak operator output: exprom[0] << 2 = 0x7fa << 2 = 8168.
+        assert!((8140..=8168).contains(&peak), "unexpected peak {peak}");
+
+        // LFO max AM attenuation at AMD=127, AMS=3 matches Nuked-OPM (lfo_am_lock=253, x4=1012).
+        write_reg(&mut opm, 0x18, 0xFF);
+        write_reg(&mut opm, 0x19, 127); // AMD=127
+        write_reg(&mut opm, 0x1B, 0x01); // Square LFO
+        opm.lfo_phase = 0;
+        opm.step_lfo_and_noise();
+        assert!((1000..=1016).contains(&opm.lfo_am), "lfo_am={}", opm.lfo_am);
+        assert!(opm.lfo_counter < 0x40_0000, "lfo_counter must not accumulate past 0x40_0000");
+    }
+
+    #[test]
+    fn pitch_update_matches_channel_pm_offset_and_noise_clocks_at_2x() {
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        write_reg(&mut opm, 0x28, 0x4A);
+        write_reg(&mut opm, 0x38, 0x40); // PMS=4
+        write_reg(&mut opm, 0x40, 0x01); // M1 MUL=1
+
+        opm.channels[0].update_pitch(64);
+        let inc_via_update = opm.channels[0].ops[0].phase_inc;
+        let pm = Opm::channel_pm_offset(4, 64);
+        let mut op_ref = opm.channels[0].ops[0].clone();
+        op_ref.update_phase_inc(opm.channels[0].kc, opm.channels[0].kf, pm);
+        assert_eq!(inc_via_update, op_ref.phase_inc);
+
+        // At NFRQ=31 (period=1), 1 sample clocks LFSR twice (state 1 -> 0x10000 -> 0x08000).
+        write_reg(&mut opm, 0x0F, 0x9F);
+        opm.noise_lfsr = 1;
+        opm.noise_counter = 0;
+        opm.step_lfo_and_noise();
+        assert_eq!(opm.noise_lfsr, 0x08000);
+    }
+
+    #[test]
+    fn key_on_bits_map_c1_to_bit4_and_m2_to_bit5() {
+        // YM2151 reg $08: bit3=M1($40), bit4=C1($50), bit5=M2($48), bit6=C2($58).
+        for (bit, slot_reg_off) in [(3u8, 0x00u8), (4, 0x10), (5, 0x08), (6, 0x18)] {
+            let mut opm = Opm::new();
+            opm.set_audio_enabled(true);
+            write_reg(&mut opm, 0x20, 0xC7); // CON=7 (all carriers)
+            write_reg(&mut opm, 0x28, 0x4A);
+            write_reg(&mut opm, 0x40 + slot_reg_off, 0x01); // MUL=1
+            write_reg(&mut opm, 0x60 + slot_reg_off, 0x00); // TL=0
+            write_reg(&mut opm, 0x80 + slot_reg_off, 0x1F); // AR=31
+            write_reg(&mut opm, 0x08, 1 << bit);
+
+            let mut peak = 0i16;
+            for _ in 0..128 {
+                peak = peak.max(opm.next_sample().0.abs());
+            }
+            assert!(
+                (8140..=8168).contains(&peak),
+                "KON bit {bit} (slot reg +0x{slot_reg_off:02X}) peak={peak}"
+            );
+        }
+    }
+
+    #[test]
+    fn con2_pipeline_and_logsin_match_nuked_reference() {
+        // Minimal repro from differential fuzzing (CON=2, KC=0x5E, 1-sample C1->M2 delay + logsinrom).
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        let regs: &[(u8, u8)] = &[
+            (0x20, 0xC2), (0x28, 0x5E), (0x30, 0x00),
+            (0x40, 3), (0x60, 15), (0x80, 31), (0xE0, 15),
+            (0x48, 3), (0x68, 19), (0x88, 31), (0xE8, 15),
+            (0x50, 2), (0x70, 8),  (0x90, 31), (0xF0, 15),
+            (0x58, 3), (0x78, 14), (0x98, 31), (0xF8, 15),
+            (0x08, 0x78),
+        ];
+        for &(r, v) in regs {
+            write_reg(&mut opm, r, v);
+        }
+        let samples: Vec<i16> = (0..6).map(|_| opm.next_sample().1).collect();
+        // Nuked-OPM op_out[5] for C2 on samples 0..6: [81, -2396, 740, 798, 2410, -1658]
+        assert_eq!(samples, vec![81, -2396, 740, 798, 2410, -1658]);
+    }
+
+    #[test]
+    fn lfo_waveforms_and_noise_amplitude_match_nuked() {
+        // Triangle LFO starts at max AM attenuation (~1012 at AMD=127) and 0 PM after reset.
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        write_reg(&mut opm, 0x01, 0x02);
+        write_reg(&mut opm, 0x18, 0x80); // Slow LFO
+        write_reg(&mut opm, 0x19, 0x80 | 127); // PMD=127
+        write_reg(&mut opm, 0x19, 127);        // AMD=127
+        write_reg(&mut opm, 0x1B, 0x02); // Triangle
+        write_reg(&mut opm, 0x01, 0x00);
+        opm.step_lfo_and_noise();
+        assert_eq!(opm.lfo_pm, 0);
+        assert!((1000..=1016).contains(&opm.lfo_am), "tri initial lfo_am={}", opm.lfo_am);
+
+        // Noise Ch 7 C2 linear peak is <= 2046 (Nuked-OPM: ±2044).
+        let mut nopm = Opm::new();
+        nopm.set_audio_enabled(true);
+        write_reg(&mut nopm, 0x0F, 0x9F);
+        write_reg(&mut nopm, 0x27, 0xC7);
+        write_reg(&mut nopm, 0x7F, 0x00);
+        write_reg(&mut nopm, 0x9F, 0x1F);
+        write_reg(&mut nopm, 0x08, 0x47);
+        let peak = (0..64).map(|_| nopm.next_sample().0.abs()).max().unwrap();
+        assert!((2040..=2046).contains(&peak), "noise peak={peak}");
     }
 }
