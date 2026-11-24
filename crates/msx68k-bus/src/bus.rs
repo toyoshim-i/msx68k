@@ -696,6 +696,18 @@ impl X68kBus {
         self.adpcm.set_synth_mode(mode);
     }
 
+    /// Dynamically enables or disables the ADPCM 2nd-order Butterworth low-pass filter.
+    #[inline]
+    pub fn set_adpcm_lpf_enabled(&mut self, enabled: bool) {
+        self.adpcm.set_lpf_enabled(enabled);
+    }
+
+    /// Returns whether the ADPCM low-pass filter is enabled.
+    #[inline]
+    pub const fn adpcm_lpf_enabled(&self) -> bool {
+        self.adpcm.lpf_enabled()
+    }
+
     /// Drains all generated OPM + ADPCM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {

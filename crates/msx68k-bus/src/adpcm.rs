@@ -27,6 +27,62 @@ pub struct AdpcmSampleEvent {
     pub right: i16,
 }
 
+/// 2nd-order Butterworth biquad low-pass filter (`fc = 6,800 Hz`, `fs = 62,500 Hz`, `Q = 1/sqrt(2)`).
+///
+/// Models the X68000 MSM6258V analog active reconstruction filter (`fc ≈ 0.85 * 15.625 kHz / 2`)
+/// using Direct Form II Transposed arithmetic.
+#[derive(Debug, Clone, Copy)]
+pub struct AdpcmLpf {
+    z1: f32,
+    z2: f32,
+}
+
+impl Default for AdpcmLpf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdpcmLpf {
+    // Precomputed for fc = 6,800 Hz, fs = 62,500 Hz, Q = 1 / sqrt(2):
+    // w0 = 2*pi*6800/62500, cos_w0 = 0.77530133, sin_w0 = 0.63159152,
+    // alpha = sin_w0 / sqrt(2) = 0.44660264, a0 = 1 + alpha = 1.44660264.
+    const B0: f32 = 0.077_664_27;
+    const B1: f32 = 0.155_328_54;
+    const B2: f32 = 0.077_664_27;
+    const A1: f32 = -1.071_892_6;
+    const A2: f32 = 0.382_549_67;
+
+    pub const fn new() -> Self {
+        Self { z1: 0.0, z2: 0.0 }
+    }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        self.z1 = 0.0;
+        self.z2 = 0.0;
+    }
+
+    #[inline]
+    pub fn is_settled(&self) -> bool {
+        self.z1 == 0.0 && self.z2 == 0.0
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: i16) -> i16 {
+        if input == 0 && self.z1.abs() < 1e-3 && self.z2.abs() < 1e-3 {
+            self.z1 = 0.0;
+            self.z2 = 0.0;
+            return 0;
+        }
+        let x = input as f32;
+        let y = Self::B0 * x + self.z1;
+        self.z1 = Self::B1 * x - Self::A1 * y + self.z2;
+        self.z2 = Self::B2 * x - Self::A2 * y;
+        y.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+}
+
 /// Oki MSM6258V ADPCM state.
 #[derive(Debug, Clone)]
 pub struct Adpcm {
@@ -48,7 +104,10 @@ pub struct Adpcm {
     /// 62.5 kHz sample-clock tracking for mixing into OPM's 62.5 kHz stream.
     mix_sub: u32,
     sample_clock: u64,
+    current_mono: i16,
     current_lr: (i16, i16),
+    lpf_enabled: bool,
+    lpf: AdpcmLpf,
     audio_enabled: bool,
     synth_mode: OpmSynthMode,
     samples: Vec<(i16, i16)>,
@@ -77,7 +136,10 @@ impl Adpcm {
             sample_sub: 0,
             mix_sub: 0,
             sample_clock: 0,
+            current_mono: 0,
             current_lr: (0, 0),
+            lpf_enabled: true,
+            lpf: AdpcmLpf::new(),
             audio_enabled: false,
             synth_mode: OpmSynthMode::Inline,
             samples: Vec::new(),
@@ -88,9 +150,26 @@ impl Adpcm {
     pub fn reset(&mut self) {
         let audio_enabled = self.audio_enabled;
         let synth_mode = self.synth_mode;
+        let lpf_enabled = self.lpf_enabled;
         *self = Self::new();
         self.audio_enabled = audio_enabled;
         self.synth_mode = synth_mode;
+        self.lpf_enabled = lpf_enabled;
+    }
+
+    /// Dynamically enables or disables the 2nd-order Butterworth ADPCM low-pass filter.
+    #[inline]
+    pub fn set_lpf_enabled(&mut self, enabled: bool) {
+        if self.lpf_enabled != enabled {
+            self.lpf_enabled = enabled;
+            self.lpf.reset();
+        }
+    }
+
+    /// Returns whether the ADPCM low-pass filter is enabled.
+    #[inline]
+    pub const fn lpf_enabled(&self) -> bool {
+        self.lpf_enabled
     }
 
     #[inline]
@@ -143,11 +222,13 @@ impl Adpcm {
     #[inline]
     fn refresh_lr(&mut self) {
         if !self.active {
+            self.current_mono = 0;
             self.current_lr = (0, 0);
             return;
         }
         // Scale 12-bit signed (-2048..2047) by 8 -> -16384..16376 for clean OPM mix headroom.
         let mono = (self.signal << 3) as i16;
+        self.current_mono = mono;
         self.current_lr = (
             if self.pan_left { mono } else { 0 },
             if self.pan_right { mono } else { 0 },
@@ -224,22 +305,36 @@ impl Adpcm {
         self.sample_clock += mix_count as u64;
 
         if self.synth_mode == OpmSynthMode::Inline {
-            self.samples
-                .resize(self.samples.len() + mix_count as usize, self.current_lr);
+            if !self.lpf_enabled {
+                self.samples
+                    .resize(self.samples.len() + mix_count as usize, self.current_lr);
+            } else if self.current_mono == 0 && self.lpf.is_settled() {
+                self.samples
+                    .resize(self.samples.len() + mix_count as usize, (0, 0));
+            } else {
+                self.samples.reserve(mix_count as usize);
+                for _ in 0..mix_count {
+                    let y = self.lpf.process(self.current_mono);
+                    self.samples.push((
+                        if self.pan_left { y } else { 0 },
+                        if self.pan_right { y } else { 0 },
+                    ));
+                }
+            }
         }
     }
 
-    /// Mixes accumulated 62.5 kHz ADPCM samples into `opm_out`, aligning to `opm_out`'s length.
+    /// Mixes accumulated 62.5 kHz ADPCM samples into `opm_out` at a 0.50:0.50 full-scale ratio
+    /// (OPM `>> 1` + ADPCM `signal << 3`), aligning to `opm_out`'s length.
     pub fn mix_into(&mut self, opm_out: &mut [(i16, i16)]) {
-        if self.samples.is_empty() {
-            return;
-        }
         let n = self.samples.len().min(opm_out.len());
         for (dst, &(al, ar)) in opm_out[..n].iter_mut().zip(&self.samples[..n]) {
-            if (al | ar) != 0 {
-                dst.0 = dst.0.saturating_add(al);
-                dst.1 = dst.1.saturating_add(ar);
-            }
+            dst.0 = (dst.0 >> 1).saturating_add(al);
+            dst.1 = (dst.1 >> 1).saturating_add(ar);
+        }
+        for dst in &mut opm_out[n..] {
+            dst.0 >>= 1;
+            dst.1 >>= 1;
         }
         self.samples.drain(..n);
     }
@@ -352,5 +447,56 @@ mod tests {
         adpcm.mix_into(&mut out);
         assert!(out.iter().any(|&(l, _)| l > 0));
         assert!(out.iter().all(|&(_, r)| r == 0));
+    }
+
+    #[test]
+    fn biquad_lpf_preserves_dc_and_attenuates_high_frequency() {
+        // DC gain should converge to 1.0 (10000 -> ~10000).
+        let mut lpf = AdpcmLpf::new();
+        let mut y = 0i16;
+        for _ in 0..256 {
+            y = lpf.process(10_000);
+        }
+        assert!((9_995..=10_005).contains(&y), "DC output={y}");
+
+        // 15.625 kHz square wave (period = 4 samples at 62.5 kHz) should be strongly attenuated
+        // by the 6.8 kHz 2nd-order Butterworth filter (at least -12 dB -> peak < 3500).
+        lpf.reset();
+        let mut peak = 0i16;
+        for i in 0..256 {
+            let x = if (i & 2) == 0 { 10_000 } else { -10_000 };
+            let out = lpf.process(x);
+            if i >= 64 {
+                peak = peak.max(out.abs());
+            }
+        }
+        assert!(peak < 3_500, "15.625 kHz peak={peak} was not attenuated");
+    }
+
+    #[test]
+    fn adpcm_lpf_can_be_toggled_dynamically_and_mixes_at_half_opm() {
+        let mut adpcm = Adpcm::new();
+        adpcm.set_audio_enabled(true);
+        adpcm.set_ppi_port_c(0x08); // 15.625 kHz, L+R
+        adpcm.write_u8(0xE92001, 0x02).unwrap();
+        adpcm.write_u8(0xE92003, 0x77).unwrap();
+
+        // With LPF ON (default), first 62.5 kHz sample after step is smoothed (< raw level).
+        assert!(adpcm.lpf_enabled());
+        adpcm.advance(640); // decodes first nibble and pushes 4 samples
+        let raw_level = adpcm.current_mono;
+        assert!(raw_level > 0);
+        let mut out = vec![(2000i16, 2000i16); 4];
+        adpcm.mix_into(&mut out);
+        // OPM 2000 >> 1 = 1000; filtered ADPCM first sample is smaller than raw_level.
+        assert!(out[0].0 > 1000 && out[0].0 < 1000 + raw_level);
+
+        // Toggle LPF OFF dynamically -> subsequent samples output raw level directly.
+        adpcm.set_lpf_enabled(false);
+        assert!(!adpcm.lpf_enabled());
+        adpcm.advance(160);
+        let mut out_off = vec![(2000i16, 2000i16); 1];
+        adpcm.mix_into(&mut out_off);
+        assert_eq!(out_off[0].0, 1000 + raw_level);
     }
 }

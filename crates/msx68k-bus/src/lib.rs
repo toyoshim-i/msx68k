@@ -51,7 +51,7 @@ pub use host_fs::HostFsBridge;
 pub use mfp::Mfp;
 pub use vmx68k::{VmEvent, VmWindowLayout};
 pub use vram_pages::{DirtyVramPages, VRAM_PAGE_BYTES};
-pub use adpcm::{Adpcm, AdpcmSampleEvent};
+pub use adpcm::{Adpcm, AdpcmLpf, AdpcmSampleEvent};
 pub use opm::{OpmRegEvent, OpmSynthMode};
 pub use peripherals::{Opm, Ppi, Rtc, Scc, SystemPort};
 pub use scsi::{

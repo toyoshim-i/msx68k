@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use msx68k_bus::adpcm::AdpcmSampleEvent;
+use msx68k_bus::adpcm::{AdpcmLpf, AdpcmSampleEvent};
 use msx68k_bus::opm::{Opm, OpmRegEvent, OpmSynthMode, OPM_SAMPLE_RATE};
 
 /// Host audio output sample rate (Hz).
@@ -89,6 +89,7 @@ struct SharedAudio {
     adpcm_events: Mutex<VecDeque<AdpcmSampleEvent>>,
     produced_clock: AtomicU64,
     queued_samples: AtomicUsize,
+    adpcm_lpf_enabled: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -122,6 +123,7 @@ impl AudioOutput {
             })),
             produced_clock: AtomicU64::new(0),
             queued_samples: AtomicUsize::new(0),
+            adpcm_lpf_enabled: AtomicBool::new(true),
             stop: AtomicBool::new(false),
         });
 
@@ -159,6 +161,22 @@ impl AudioOutput {
     #[inline]
     pub fn mode(&self) -> OpmSynthMode {
         self.shared.mode
+    }
+
+    /// Dynamically enables or disables the ADPCM low-pass filter in `Offload` mode.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn set_adpcm_lpf_enabled(&self, enabled: bool) {
+        self.shared
+            .adpcm_lpf_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Returns whether the ADPCM low-pass filter is enabled in `Offload` mode.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn adpcm_lpf_enabled(&self) -> bool {
+        self.shared.adpcm_lpf_enabled.load(Ordering::Relaxed)
     }
 
     /// Returns `true` if host audio output is active.
@@ -246,6 +264,9 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
     synth_opm.set_audio_enabled(true);
     let mut synth_clock: u64 = 0;
     let mut adpcm_lr: (i16, i16) = (0, 0);
+    let mut adpcm_lpf_l = AdpcmLpf::new();
+    let mut adpcm_lpf_r = AdpcmLpf::new();
+    let mut prev_lpf_enabled = shared.adpcm_lpf_enabled.load(Ordering::Relaxed);
 
     while !shared.stop.load(Ordering::Relaxed) {
         match shared.mode {
@@ -302,7 +323,21 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
                         }
                         synth_clock += 1;
                         let (ol, or) = synth_opm.next_sample();
-                        Some((ol.saturating_add(adpcm_lr.0), or.saturating_add(adpcm_lr.1)))
+                        let lpf_on = shared.adpcm_lpf_enabled.load(Ordering::Relaxed);
+                        if lpf_on != prev_lpf_enabled {
+                            prev_lpf_enabled = lpf_on;
+                            adpcm_lpf_l.reset();
+                            adpcm_lpf_r.reset();
+                        }
+                        let (al, ar) = if lpf_on {
+                            (
+                                adpcm_lpf_l.process(adpcm_lr.0),
+                                adpcm_lpf_r.process(adpcm_lr.1),
+                            )
+                        } else {
+                            adpcm_lr
+                        };
+                        Some(((ol >> 1).saturating_add(al), (or >> 1).saturating_add(ar)))
                     },
                     &mut buf,
                 );
