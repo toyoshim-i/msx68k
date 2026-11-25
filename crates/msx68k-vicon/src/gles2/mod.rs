@@ -1808,20 +1808,30 @@ impl Gles2Compositor {
         let is_ext_tvram = !(uniforms.tvram_row_bytes == 128
             && uniforms.tvram_plane_bytes == TVRAM_PLANE_BYTES as u32);
 
-        // Determine if any row actually renders 65536-color byte-split graphics
-        // (when all 4 graphic plane bits are off, e.g. Human68k 768x512 text console with
-        // r0=3, r2=0x20, 65536-color graphics are inactive and the fast/text-only path applies).
-        let any_row_65536 = if let Some(frame) = completed {
-            frame.lines.iter().any(|l| {
-                let m = l.state.registers.mode & 7;
-                let d = l.state.registers.display & 127;
-                (m == 2 || m == 3) && (d & 0x0F) != 0
-            })
-        } else {
-            let m = uniforms.r0_mode & 7;
-            let d = uniforms.r2_display & 127;
-            (m == 2 || m == 3) && (d & 0x0F) != 0
-        };
+        // Determine if any row requires the raw GRBI16 shader (65536-color byte-split graphics,
+        // VICON R2 EXON special priority / half-transparency, mixed-resolution CYNTHIA scaling,
+        // or interlaced scanout with alternating field dimming).
+        // When none are active, the zero-overhead fast/text-only pre-baked RGBA8 path applies.
+        let interlace_field = crate::raster::interlace_field(bus, &uniforms);
+        let any_row_mixed_cynthia = cynthia_enabled
+            && cynthia
+                .bg_rows
+                .iter()
+                .any(|r| r.is_cynthia_active() && r.h_scale() != 0);
+        let any_row_65536 = any_row_mixed_cynthia
+            || interlace_field.is_some()
+            || if let Some(frame) = completed {
+                frame.lines.iter().any(|l| {
+                    let m = l.state.registers.mode & 7;
+                    let d = l.state.registers.display & 127;
+                    ((m == 2 || m == 3) && (d & 0x0F) != 0)
+                        || (l.state.registers.display & 0x1000) != 0
+                })
+            } else {
+                let m = uniforms.r0_mode & 7;
+                let d = uniforms.r2_display & 127;
+                ((m == 2 || m == 3) && (d & 0x0F) != 0) || (uniforms.r2_display & 0x1000) != 0
+            };
 
         // Pass 1 needs per-row `u_row_state` whenever CYNTHIA is enabled, but Pass 2 can still
         // use the zero-row-fetch uniform fast shader if VICON registers + cynthia_active are constant!
@@ -1847,8 +1857,9 @@ impl Gles2Compositor {
             }
         }
 
-        let vicon_has_row_map =
-            completed.is_some_and(|f| f.lines.len() > 1) || cynthia_active_varies;
+        let vicon_has_row_map = completed.is_some_and(|f| f.lines.len() > 1)
+            || cynthia_active_varies
+            || interlace_field.is_some();
         let need_row_state_upload = vicon_has_row_map || cynthia_enabled || any_row_65536 || is_ext_tvram;
         let row_count = if vicon_has_row_map || cynthia_enabled {
             uniforms.height as usize
@@ -1931,6 +1942,7 @@ impl Gles2Compositor {
                             &u,
                             baked_id,
                             bg_row,
+                            false,
                         );
                     }
                 } else {
@@ -1966,6 +1978,7 @@ impl Gles2Compositor {
                             &uniforms,
                             uniform_baked_pal_id,
                             bg_row,
+                            false,
                         );
                     }
                 }
@@ -1992,11 +2005,13 @@ impl Gles2Compositor {
                     let mut u = uniforms;
                     u.apply_raster(cur_state);
                     let bg_row = cynthia.bg_rows.get(y).copied().unwrap_or_default();
+                    let dim_row = interlace_field.is_some_and(|f| ((y & 1) as u8) != f);
                     pack_row_state_entry(
                         &mut self.scratch_row_state[y * 64..(y + 1) * 64],
                         &u,
                         cur_state.palette_id,
                         bg_row,
+                        dim_row,
                     );
                 }
                 raw_pal_count = frame.palettes.len().max(1) as u32;
@@ -2017,11 +2032,13 @@ impl Gles2Compositor {
                 raw_pal_count = 1;
                 for y in 0..row_count {
                     let bg_row = cynthia.bg_rows.get(y).copied().unwrap_or_default();
+                    let dim_row = interlace_field.is_some_and(|f| ((y & 1) as u8) != f);
                     pack_row_state_entry(
                         &mut self.scratch_row_state[y * 64..(y + 1) * 64],
                         &uniforms,
                         0,
                         bg_row,
+                        dim_row,
                     );
                 }
             }
@@ -3038,6 +3055,7 @@ fn pack_row_state_entry(
     u: &ViconUniforms,
     palette_id: u32,
     bg_row: msx68k_bus::cynthia::BgRowState,
+    interlace_dim: bool,
 ) {
     let mut set = |col: usize, rgba: [u8; 4]| {
         dst[col * 4..col * 4 + 4].copy_from_slice(&rgba);
@@ -3078,7 +3096,17 @@ fn pack_row_state_entry(
             if cynthia_active { 255 } else { 0 },
         ],
     );
-    set(6, [gr_rank, tx_rank, sp_rank, 0]);
+    set(
+        6,
+        [
+            gr_rank,
+            tx_rank,
+            sp_rank,
+            ((u.r2_display >> 8) & 0x1F) as u8
+                | ((bg_row.h_scale() & 3) << 5)
+                | (u8::from(interlace_dim) << 7),
+        ],
+    );
     set(
         7,
         [

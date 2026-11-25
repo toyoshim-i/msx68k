@@ -807,10 +807,10 @@ vec4 pal_entry(float col, float pal_v) {
     return texture2D(u_palette, vec2((col + 0.5) / 512.0, pal_v));
 }
 
-vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, float pal_v) {
+vec4 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, float pal_v, float want_sub) {
     if (mode >= 3.5) {
         if (mod(floor(r2 / 16.0), 2.0) < 0.5) {
-            return vec2(0.0);
+            return vec4(0.0);
         }
         vec4 gs0 = row_texel(1.0, y);
         float gs0x = floor(gs0.r * 255.0 + 0.5) * 256.0 + floor(gs0.g * 255.0 + 0.5);
@@ -825,9 +825,9 @@ vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, fl
         else if (slot >= 1.5 && slot < 2.5) { page = slots.z; }
         else if (slot >= 2.5) { page = slots.w; }
         float idx = gv_nibble(page, gx - qx * 512.0, gy - qy * 512.0, 0.0);
-        if (idx < 0.5) { return vec2(0.0); }
+        if (idx < 0.5) { return vec4(0.0); }
         vec4 pe = pal_entry(256.0 + idx, pal_v);
-        return vec2(pe.r, pe.a);
+        return vec4(pe.r, pe.a, 0.0, 0.0);
     }
 
     float en0 = mod(r2, 2.0);
@@ -835,29 +835,63 @@ vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, fl
     float en2 = mod(floor(r2 * 0.25), 2.0);
     float en3 = mod(floor(r2 * 0.125), 2.0);
     if (en0 + en1 + en2 + en3 < 0.5) {
-        return vec2(0.0);
+        return vec4(0.0);
     }
 
     if (mode < 0.5) {
         float idx = 0.0;
-        if (en0 > 0.5) { idx = gv_nibble(slots.x, x, y, 1.0); }
-        if (idx < 0.5 && en1 > 0.5) { idx = gv_nibble(slots.y, x, y, 1.0); }
-        if (idx < 0.5 && en2 > 0.5) { idx = gv_nibble(slots.z, x, y, 1.0); }
-        if (idx < 0.5 && en3 > 0.5) { idx = gv_nibble(slots.w, x, y, 1.0); }
-        if (idx < 0.5) { return vec2(0.0); }
+        float sub_idx = 0.0;
+        if (en0 > 0.5) {
+            float n = gv_nibble(slots.x, x, y, 1.0);
+            if (n > 0.5) { idx = n; }
+        }
+        if (en1 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(slots.y, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (en2 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(slots.z, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (en3 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(slots.w, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (idx < 0.5) { return vec4(0.0); }
         vec4 pe = pal_entry(256.0 + idx, pal_v);
-        return vec2(pe.r, pe.a);
+        vec2 sub = vec2(0.0);
+        if (sub_idx > 0.5) {
+            vec4 se = pal_entry(256.0 + sub_idx, pal_v);
+            sub = vec2(se.r, se.a);
+        }
+        return vec4(pe.r, pe.a, sub.x, sub.y);
     } else if (mode < 1.5) {
         float idx = 0.0;
+        float sub_idx = 0.0;
         if (en0 + en1 > 0.5) {
-            idx = gv_nibble(slots.x, x, y, 1.0) + gv_nibble(slots.y, x, y, 1.0) * 16.0;
+            float c = gv_nibble(slots.x, x, y, 1.0) + gv_nibble(slots.y, x, y, 1.0) * 16.0;
+            if (c > 0.5) { idx = c; }
         }
-        if (idx < 0.5 && en2 + en3 > 0.5) {
-            idx = gv_nibble(slots.z, x, y, 1.0) + gv_nibble(slots.w, x, y, 1.0) * 16.0;
+        if (en2 + en3 > 0.5 && (idx < 0.5 || want_sub > 0.5)) {
+            float c = gv_nibble(slots.z, x, y, 1.0) + gv_nibble(slots.w, x, y, 1.0) * 16.0;
+            if (c > 0.5) {
+                if (idx < 0.5) { idx = c; } else { sub_idx = c; }
+            }
         }
-        if (idx < 0.5) { return vec2(0.0); }
+        if (idx < 0.5) { return vec4(0.0); }
         vec4 pe = pal_entry(256.0 + idx, pal_v);
-        return vec2(pe.r, pe.a);
+        vec2 sub = vec2(0.0);
+        if (sub_idx > 0.5) {
+            vec4 se = pal_entry(256.0 + sub_idx, pal_v);
+            sub = vec2(se.r, se.a);
+        }
+        return vec4(pe.r, pe.a, sub.x, sub.y);
     }
 
     // 65536-color byte-split palette mode
@@ -869,7 +903,23 @@ vec2 sample_graphics_grbi(float x, float y, float mode, float r2, vec4 slots, fl
     vec4 hi_w = pal_entry(257.0 + idx_hi - hi_odd, pal_v);
     float lo_b = mix(lo_w.r, lo_w.a, lo_odd);
     float hi_b = mix(hi_w.r, hi_w.a, hi_odd);
-    return vec2(hi_b, lo_b);
+    return vec4(hi_b, lo_b, 0.0, 0.0);
+}
+
+vec3 decode_grbi_rgb6(vec2 grbi) {
+    vec4 u_hi = texture2D(u_lut, vec2((grbi.x * 255.0 + 0.5) / 256.0, (10.0 + 0.5) / 32.0));
+    vec4 u_lo = texture2D(u_lut, vec2((grbi.y * 255.0 + 0.5) / 256.0, (11.0 + 0.5) / 32.0));
+    float g5 = floor(u_hi.r * 255.0 + 0.5);
+    float r_hi3 = floor(u_hi.g * 255.0 + 0.5);
+    float r_lo2 = floor(u_lo.r * 255.0 + 0.5);
+    float b5 = floor(u_lo.g * 255.0 + 0.5);
+    float ibit = floor(u_lo.b * 255.0 + 0.5);
+    return vec3((r_hi3 * 4.0 + r_lo2) * 2.0 + ibit, g5 * 2.0 + ibit, b5 * 2.0 + ibit);
+}
+
+float grbi_i_bit(vec2 grbi) {
+    float lo_int = floor(grbi.y * 255.0 + 0.5);
+    return lo_int - floor(lo_int * 0.5) * 2.0;
 }
 
 void main() {
@@ -897,6 +947,17 @@ void main() {
     float gr_rank = floor(r6.r * 255.0 + 0.5);
     float tx_rank = floor(r6.g * 255.0 + 0.5);
     float sp_rank = floor(r6.b * 255.0 + 0.5);
+    float r6_a = floor(r6.a * 255.0 + 0.5);
+    float interlace_dim = step(127.5, r6_a);
+    float r6_low = r6_a - interlace_dim * 128.0;
+    float cyn_h_scale = floor(r6_low / 32.0);
+    float r2_hi = r6_low - cyn_h_scale * 32.0;
+    float gt = mod(r2_hi, 2.0);
+    float gg = mod(floor(r2_hi * 0.5), 2.0);
+    float bp = mod(floor(r2_hi * 0.25), 2.0);
+    float hp = mod(floor(r2_hi * 0.125), 2.0);
+    float exon = mod(floor(r2_hi * 0.0625), 2.0);
+    float want_sub = exon * hp * gg;
 
     vec4 r7 = row_texel(7.0, y);
     vec4 slots = floor(r7 * 255.0 + vec4(0.5));
@@ -912,64 +973,118 @@ void main() {
             vec4 te = pal_entry(tx_idx, pal_v);
             tx_grbi = vec2(te.r, te.a);
         }
-        if (u_cynthia_enabled > 0.5 && cynthia_active > 0.5 && x < 512.0 && mod(floor(r2 / 64.0), 2.0) > 0.5) {
-            float code = floor(texture2D(u_cynthia, vec2((x + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
-            if (code > 0.5) {
-                vec4 ce = pal_entry(code, pal_v);
-                bg_grbi = vec2(ce.r, ce.a);
+        if (u_cynthia_enabled > 0.5 && cynthia_active > 0.5 && mod(floor(r2 / 64.0), 2.0) > 0.5) {
+            float cx = x;
+            if (cyn_h_scale > 0.5 && cyn_h_scale < 1.5) {
+                cx = floor(x * 0.5);
+            } else if (cyn_h_scale >= 1.5) {
+                cx = x * 2.0;
+            }
+            if (cx < 512.0) {
+                float code = floor(texture2D(u_cynthia, vec2((cx + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
+                if (code > 0.5) {
+                    vec4 ce = pal_entry(code, pal_v);
+                    bg_grbi = vec2(ce.r, ce.a);
+                }
             }
         }
     }
 
-    vec2 gr_grbi = sample_graphics_grbi(x, y, mode, r2, slots, pal_v);
+    vec4 gr_pair = sample_graphics_grbi(x, y, mode, r2, slots, pal_v, want_sub);
+    vec2 gr_grbi = gr_pair.xy;
+    vec2 gr_sub = gr_pair.zw;
 
     float tx_first = step(tx_rank, sp_rank);
     vec2 front = mix(bg_grbi, tx_grbi, tx_first);
     vec2 back = mix(tx_grbi, bg_grbi, tx_first);
 
-    vec2 c0 = gr_grbi;
-    vec2 c1 = front;
-    vec2 c2 = back;
+    vec2 c0 = gr_grbi; float g0 = 1.0;
+    vec2 c1 = front;   float g1 = 0.0;
+    vec2 c2 = back;    float g2 = 0.0;
     if (gr_rank > 0.5 && gr_rank < 1.5) {
-        c0 = front;
-        c1 = gr_grbi;
-        c2 = back;
+        c0 = front;   g0 = 0.0;
+        c1 = gr_grbi; g1 = 1.0;
+        c2 = back;    g2 = 0.0;
     } else if (gr_rank >= 1.5 && gr_rank < 2.5) {
-        c0 = front;
-        c1 = back;
-        c2 = gr_grbi;
+        c0 = front;   g0 = 0.0;
+        c1 = back;    g1 = 0.0;
+        c2 = gr_grbi; g2 = 1.0;
+    } else if (gr_rank >= 2.5) {
+        c1 = vec2(0.0);
+        c2 = vec2(0.0);
     }
 
-    vec2 final_grbi = c0;
-    if (final_grbi.x + final_grbi.y < 0.001) {
-        final_grbi = c1;
-    }
-    if (final_grbi.x + final_grbi.y < 0.001) {
-        final_grbi = c2;
+    vec2 fg_grbi = vec2(0.0);
+    vec2 bg_blend_grbi = vec2(0.0);
+    float do_blend = 0.0;
+
+    if (exon < 0.5) {
+        fg_grbi = c0;
+        if (fg_grbi.x + fg_grbi.y < 0.001) { fg_grbi = c1; }
+        if (fg_grbi.x + fg_grbi.y < 0.001) { fg_grbi = c2; }
+    } else if (hp < 0.5) {
+        if (gr_grbi.x + gr_grbi.y >= 0.001 && grbi_i_bit(gr_grbi) > 0.5) {
+            fg_grbi = gr_grbi;
+        } else {
+            fg_grbi = c0;
+            if (fg_grbi.x + fg_grbi.y < 0.001) { fg_grbi = c1; }
+            if (fg_grbi.x + fg_grbi.y < 0.001) { fg_grbi = c2; }
+        }
+    } else {
+        vec2 top = vec2(0.0);
+        float top_is_gr = 0.0;
+        vec2 second = vec2(0.0);
+        if (c0.x + c0.y >= 0.001) {
+            top = c0; top_is_gr = g0;
+            second = (c1.x + c1.y >= 0.001) ? c1 : c2;
+        } else if (c1.x + c1.y >= 0.001) {
+            top = c1; top_is_gr = g1;
+            second = c2;
+        } else {
+            top = c2; top_is_gr = g2;
+        }
+        fg_grbi = top;
+        if (top.x + top.y >= 0.001) {
+            float trigger = max(bp, grbi_i_bit(top));
+            if (top_is_gr > 0.5) {
+                if (trigger > 0.5 && gg > 0.5 && gr_sub.x + gr_sub.y >= 0.001) {
+                    bg_blend_grbi = gr_sub;
+                    do_blend = 1.0;
+                } else if (trigger > 0.5 && gt > 0.5) {
+                    bg_blend_grbi = second;
+                    do_blend = 1.0;
+                } else if (trigger > 0.5 && gg > 0.5) {
+                    bg_blend_grbi = vec2(0.0);
+                    do_blend = 1.0;
+                }
+            } else if (trigger > 0.5 && gt > 0.5) {
+                bg_blend_grbi = second;
+                do_blend = 1.0;
+            }
+        }
     }
 
-    if (final_grbi.x + final_grbi.y < 0.001) {
+    if (fg_grbi.x + fg_grbi.y < 0.001) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    vec4 u_hi = texture2D(u_lut, vec2((final_grbi.x * 255.0 + 0.5) / 256.0, (10.0 + 0.5) / 32.0));
-    vec4 u_lo = texture2D(u_lut, vec2((final_grbi.y * 255.0 + 0.5) / 256.0, (11.0 + 0.5) / 32.0));
-
-    float g5 = floor(u_hi.r * 255.0 + 0.5);
-    float r_hi3 = floor(u_hi.g * 255.0 + 0.5);
-    float r_lo2 = floor(u_lo.r * 255.0 + 0.5);
-    float b5 = floor(u_lo.g * 255.0 + 0.5);
-    float ibit = floor(u_lo.b * 255.0 + 0.5);
-
-    float g6_val = g5 * 2.0 + ibit;
-    float r6_val = (r_hi3 * 4.0 + r_lo2) * 2.0 + ibit;
-    float b6_val = b5 * 2.0 + ibit;
+    vec3 rgb6 = decode_grbi_rgb6(fg_grbi);
+    if (do_blend > 0.5) {
+        vec3 bg_rgb6 = (bg_blend_grbi.x + bg_blend_grbi.y >= 0.001) ? decode_grbi_rgb6(bg_blend_grbi) : vec3(0.0);
+        rgb6 = floor((rgb6 + bg_rgb6) * 0.5);
+    }
 
     float lut_v = (c_row + 0.5) / 32.0;
-    float r8_out = texture2D(u_lut, vec2((c_col_base + r6_val + 0.5) / 256.0, lut_v)).r;
-    float g8_out = texture2D(u_lut, vec2((c_col_base + g6_val + 0.5) / 256.0, lut_v)).r;
-    float b8_out = texture2D(u_lut, vec2((c_col_base + b6_val + 0.5) / 256.0, lut_v)).r;
+    float r8_out = texture2D(u_lut, vec2((c_col_base + rgb6.x + 0.5) / 256.0, lut_v)).r;
+    float g8_out = texture2D(u_lut, vec2((c_col_base + rgb6.y + 0.5) / 256.0, lut_v)).r;
+    float b8_out = texture2D(u_lut, vec2((c_col_base + rgb6.z + 0.5) / 256.0, lut_v)).r;
+
+    if (interlace_dim > 0.5) {
+        r8_out = floor(floor(r8_out * 255.0 + 0.5) * 0.75) / 255.0;
+        g8_out = floor(floor(g8_out * 255.0 + 0.5) * 0.75) / 255.0;
+        b8_out = floor(floor(b8_out * 255.0 + 0.5) * 0.75) / 255.0;
+    }
 
     gl_FragColor = vec4(r8_out, g8_out, b8_out, 1.0);
 }

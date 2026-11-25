@@ -1223,7 +1223,10 @@ impl Bus for X68kBus {
                         0x01 => self.sysport.contrast = val & 0x0F,
                         0x03 => self.sysport.tv_ctrl = val,
                         0x05 => self.sysport.image_unit = val,
-                        0x07 => self.sysport.hrl = (val >> 1) & 0x01,
+                        0x07 => {
+                            self.sysport.hrl = (val >> 1) & 0x01;
+                            self.crtc.set_hrl(self.sysport.hrl);
+                        }
                         0x09 => self.sysport.wait_ctrl = val,
                         0x0D => self.sram_write_enabled = val == 0x31,
                         0x0F => self.sysport.power_ctrl = val & 0x0F,

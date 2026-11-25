@@ -41,6 +41,8 @@ pub struct RasterFrame {
     pub palettes: Vec<[u16; 512]>,
     /// Fetched sprite spans, BG row states, and PCG/map block history; empty when blank.
     pub cynthia: CynthiaFrame,
+    /// Active interlace field (`Some(0)` = even, `Some(1)` = odd), or `None` for progressive frames.
+    pub interlace_field: Option<u8>,
     vertical_timing: [u16; 3],
 }
 
@@ -100,6 +102,7 @@ impl RasterCapture {
                 lines: Vec::new(),
                 palettes: Vec::new(),
                 cynthia: CynthiaFrame::empty(),
+                interlace_field: crtc.interlace_field(),
                 vertical_timing: [crtc.regs[4], crtc.regs[6], crtc.regs[7]],
             });
             self.last_palette_id = None;

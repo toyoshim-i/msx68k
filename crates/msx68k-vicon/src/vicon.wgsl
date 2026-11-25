@@ -92,6 +92,20 @@ fn grbi_to_packed_rgba8(grbi: u32, contrast: u32) -> u32 {
     return (r8 & 0xFFu) | ((g8 & 0xFFu) << 8u) | ((b8 & 0xFFu) << 16u) | 0xFF000000u;
 }
 
+fn grbi_blend_to_packed_rgba8(fg: u32, bg: u32, contrast: u32) -> u32 {
+    let i_fg = fg & 1u;
+    let i_bg = bg & 1u;
+    let g6 = (((((fg >> 11u) & 0x1Fu) << 1u) | i_fg) + ((((bg >> 11u) & 0x1Fu) << 1u) | i_bg)) >> 1u;
+    let r6 = (((((fg >> 6u) & 0x1Fu) << 1u) | i_fg) + ((((bg >> 6u) & 0x1Fu) << 1u) | i_bg)) >> 1u;
+    let b6 = (((((fg >> 1u) & 0x1Fu) << 1u) | i_fg) + ((((bg >> 1u) & 0x1Fu) << 1u) | i_bg)) >> 1u;
+
+    let r8 = (((r6 << 2u) | (r6 >> 4u)) * contrast) / 15u;
+    let g8 = (((g6 << 2u) | (g6 >> 4u)) * contrast) / 15u;
+    let b8 = (((b6 << 2u) | (b6 >> 4u)) * contrast) / 15u;
+
+    return (r8 & 0xFFu) | ((g8 & 0xFFu) << 8u) | ((b8 & 0xFFu) << 16u) | 0xFF000000u;
+}
+
 fn resolve_raster_state(y: u32) -> ResolvedState {
     if (params.reserved.x == 0u) {
         return ResolvedState(params, 0u);
@@ -154,18 +168,19 @@ fn graphics_nibble(slot: u32, x: u32, y: u32, scroll: bool, state: ViconUniforms
     return (word >> (page * 4u)) & 15u;
 }
 
-fn graphics_color(x: u32, y: u32, state: ViconUniforms, palette_id: u32) -> u32 {
+fn graphics_colors(x: u32, y: u32, state: ViconUniforms, palette_id: u32, want_sub: bool) -> vec2<u32> {
     if (palette_id == 0xFFFFFFFFu) {
-        return 0u;
+        return vec2<u32>(0u, 0u);
     }
     let mode = state.r0_mode & 7u;
     var index = 0u;
+    var sub_index = 0u;
     if (mode < 4u && (state.r2_display & 15u) == 0u) {
-        return 0u;
+        return vec2<u32>(0u, 0u);
     }
     if (mode >= 4u) {
         if ((state.r2_display & 16u) == 0u) {
-            return 0u;
+            return vec2<u32>(0u, 0u);
         }
         let gx = (x + state.gr_scroll_x[0]) & 1023u;
         let gy = (y + state.gr_scroll_y[0]) & 1023u;
@@ -183,8 +198,15 @@ fn graphics_color(x: u32, y: u32, state: ViconUniforms, palette_id: u32) -> u32 
                 candidate |= graphics_nibble(first + lane, x, y, true, state) << (lane * 4u);
             }
             if (candidate != 0u) {
-                index = candidate;
-                break;
+                if (index == 0u) {
+                    index = candidate;
+                    if (!want_sub || lanes == 4u) {
+                        break;
+                    }
+                } else {
+                    sub_index = candidate;
+                    break;
+                }
             }
         }
     }
@@ -195,9 +217,14 @@ fn graphics_color(x: u32, y: u32, state: ViconUniforms, palette_id: u32) -> u32 
         let hi_word = read_palette_u16(palette_id, 257u + (high & 254u));
         let lo = select(lo_word & 255u, lo_word >> 8u, (low & 1u) == 0u);
         let hi = select((hi_word << 8u) & 0xff00u, hi_word & 0xff00u, (high & 1u) == 0u);
-        return hi | lo;
+        return vec2<u32>(hi | lo, 0u);
     }
-    return read_palette_u16(palette_id, 256u + index);
+    let top = read_palette_u16(palette_id, 256u + index);
+    var sub = 0u;
+    if (sub_index != 0u) {
+        sub = read_palette_u16(palette_id, 256u + sub_index);
+    }
+    return vec2<u32>(top, sub);
 }
 
 fn sample_span_code(span: vec4<u32>, x: u32, y: u32) -> u32 {
@@ -289,16 +316,27 @@ fn sample_bg_plane(row: vec4<u32>, plane: u32, x: u32, table_base: u32) -> u32 {
     return ((tile >> 4u) & 0xF0u) | nibble;
 }
 
+fn load_tile_span_direct(tile_base: u32, idx: u32) -> vec4<u32> {
+    let s_idx = cynthia_meta[cynthia_meta[4u] + tile_base + idx];
+    let s_off = cynthia_meta[5u] + s_idx * 4u;
+    return vec4<u32>(
+        cynthia_meta[s_off],
+        cynthia_meta[s_off + 1u],
+        cynthia_meta[s_off + 2u],
+        cynthia_meta[s_off + 3u],
+    );
+}
+
 fn sample_cynthia_code(
     x: u32,
     y: u32,
     state: ViconUniforms,
-    tile_base: u32,
-    c3: u32,
-    c2: u32,
-    c1: u32,
+    tile_base_in: u32,
+    c3_in: u32,
+    c2_in: u32,
+    c1_in: u32,
 ) -> u32 {
-    if ((params.reserved.y & 1u) == 0u || x >= 512u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) {
+    if ((params.reserved.y & 1u) == 0u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) {
         return 0u;
     }
     let cynthia_h = cynthia_meta[6u];
@@ -317,9 +355,42 @@ fn sample_cynthia_code(
         return 0u;
     }
 
+    let h_scale = (row.y >> 24u) & 3u;
+    var cx = x;
+    if (h_scale == 1u) {
+        cx = x >> 1u;
+    } else if (h_scale == 2u) {
+        cx = x << 1u;
+    }
+    if (cx >= 512u) {
+        return 0u;
+    }
+
+    var tile_base = tile_base_in;
+    var c3 = c3_in;
+    var c2 = c2_in;
+    var c1 = c1_in;
+    let use_wg = h_scale == 0u;
+    if (!use_wg) {
+        let ctx = cx >> 4u;
+        let cty = y >> 4u;
+        if (ctx < 32u && cty < cynthia_meta[7u]) {
+            let meta_off = cynthia_meta[3u] + (cty * 32u + ctx) * 4u;
+            tile_base = cynthia_meta[meta_off];
+            c3 = cynthia_meta[meta_off + 1u];
+            c2 = cynthia_meta[meta_off + 2u];
+            c1 = cynthia_meta[meta_off + 3u];
+        } else {
+            c3 = 0u;
+            c2 = 0u;
+            c1 = 0u;
+        }
+    }
+
     let total = c3 + c2 + c1;
     for (var k = 0u; k < c3; k++) {
-        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
+        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
+        let code = sample_span_code(span, cx, y);
         if (code != 0u) {
             return code;
         }
@@ -328,28 +399,30 @@ fn sample_cynthia_code(
     let bg_valid = (row.x & (1u << 26u)) != 0u;
     let table_base = row.w * cynthia_meta[2u];
     if (bg_valid && (row.x & (1u << 22u)) != 0u) {
-        let code = sample_bg_plane(row, 0u, x, table_base);
+        let code = sample_bg_plane(row, 0u, cx, table_base);
         if (code != 0u) {
             return code;
         }
     }
 
     for (var k = c3; k < c3 + c2; k++) {
-        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
+        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
+        let code = sample_span_code(span, cx, y);
         if (code != 0u) {
             return code;
         }
     }
 
     if (bg_valid && (row.y & (1u << 22u)) != 0u && (row.x & (1u << 23u)) == 0u) {
-        let code = sample_bg_plane(row, 1u, x, table_base);
+        let code = sample_bg_plane(row, 1u, cx, table_base);
         if (code != 0u) {
             return code;
         }
     }
 
     for (var k = c3 + c2; k < total; k++) {
-        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
+        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
+        let code = sample_span_code(span, cx, y);
         if (code != 0u) {
             return code;
         }
@@ -362,6 +435,20 @@ struct CompositeResult {
     rgba: u32,
     clear_for_layer: bool,
 };
+
+fn apply_interlace_dim(rgba: u32, y: u32) -> u32 {
+    if ((params.reserved.y & 2u) == 0u) {
+        return rgba;
+    }
+    let field = (params.reserved.y >> 2u) & 1u;
+    if ((y & 1u) == field) {
+        return rgba;
+    }
+    let r = ((rgba & 0xFFu) * 3u) >> 2u;
+    let g = (((rgba >> 8u) & 0xFFu) * 3u) >> 2u;
+    let b = (((rgba >> 16u) & 0xFFu) * 3u) >> 2u;
+    return r | (g << 8u) | (b << 16u) | (rgba & 0xFF000000u);
+}
 
 fn composite_pixel(
     x: u32,
@@ -401,17 +488,90 @@ fn composite_pixel(
         }
     }
 
-    let gr_color = graphics_color(x, y, state, palette_id);
+    let exon = (state.r2_display & 0x1000u) != 0u;
+    let hp = (state.r2_display & 0x0800u) != 0u;
+    let gg = (state.r2_display & 0x0200u) != 0u;
+    let gr_pair = graphics_colors(x, y, state, palette_id, exon && hp && gg);
+    let gr_color = gr_pair.x;
+    let gr_sub = gr_pair.y;
     let front = select(bg_color, text_color, tx_rank <= sp_rank);
     let back = select(text_color, bg_color, tx_rank <= sp_rank);
-    var colors = vec3<u32>(gr_color, front, back);
-    if (gr_rank == 1u) { colors = vec3<u32>(front, gr_color, back); }
-    if (gr_rank == 2u) { colors = vec3<u32>(front, back, gr_color); }
-    var color = colors.x;
-    if (color == 0u) { color = colors.y; }
-    if (color == 0u) { color = colors.z; }
 
     let text_clear = !text_on || tx_idx == 0u;
     let clear_for_layer = text_clear && gr_color == 0u && bg_color == 0u;
-    return CompositeResult(grbi_to_packed_rgba8(color, state.contrast), clear_for_layer);
+
+    if (!exon) {
+        var colors = vec3<u32>(gr_color, front, back);
+        if (gr_rank == 1u) { colors = vec3<u32>(front, gr_color, back); }
+        if (gr_rank == 2u) { colors = vec3<u32>(front, back, gr_color); }
+        var color = colors.x;
+        if (color == 0u) { color = colors.y; }
+        if (color == 0u) { color = colors.z; }
+        return CompositeResult(apply_interlace_dim(grbi_to_packed_rgba8(color, state.contrast), y), clear_for_layer);
+    }
+
+    if (!hp) {
+        if (gr_color != 0u && (gr_color & 1u) != 0u) {
+            return CompositeResult(apply_interlace_dim(grbi_to_packed_rgba8(gr_color, state.contrast), y), clear_for_layer);
+        }
+        var colors = vec3<u32>(gr_color, front, back);
+        if (gr_rank == 1u) { colors = vec3<u32>(front, gr_color, back); }
+        if (gr_rank == 2u) { colors = vec3<u32>(front, back, gr_color); }
+        var color = colors.x;
+        if (color == 0u) { color = colors.y; }
+        if (color == 0u) { color = colors.z; }
+        return CompositeResult(apply_interlace_dim(grbi_to_packed_rgba8(color, state.contrast), y), clear_for_layer);
+    }
+
+    let bp = (state.r2_display & 0x0400u) != 0u;
+    let gt = (state.r2_display & 0x0100u) != 0u;
+    var l0 = gr_color; var g0 = true;
+    var l1 = front;    var g1 = false;
+    var l2 = back;     var g2 = false;
+    if (gr_rank == 1u) {
+        l0 = front;    g0 = false;
+        l1 = gr_color; g1 = true;
+        l2 = back;     g2 = false;
+    } else if (gr_rank == 2u) {
+        l0 = front;    g0 = false;
+        l1 = back;     g1 = false;
+        l2 = gr_color; g2 = true;
+    } else if (gr_rank == 3u) {
+        l1 = 0u;
+        l2 = 0u;
+    }
+
+    var top = 0u;
+    var top_is_gr = false;
+    var second = 0u;
+    if (l0 != 0u) {
+        top = l0; top_is_gr = g0;
+        second = select(l2, l1, l1 != 0u);
+    } else if (l1 != 0u) {
+        top = l1; top_is_gr = g1;
+        second = l2;
+    } else {
+        top = l2; top_is_gr = g2;
+    }
+
+    if (top == 0u) {
+        return CompositeResult(grbi_to_packed_rgba8(0u, state.contrast), clear_for_layer);
+    }
+    let trigger = bp || ((top & 1u) != 0u);
+    if (top_is_gr) {
+        if (trigger && gg && gr_sub != 0u) {
+            return CompositeResult(apply_interlace_dim(grbi_blend_to_packed_rgba8(top, gr_sub, state.contrast), y), clear_for_layer);
+        }
+        if (trigger && gt) {
+            return CompositeResult(apply_interlace_dim(grbi_blend_to_packed_rgba8(top, second, state.contrast), y), clear_for_layer);
+        }
+        if (trigger && gg) {
+            return CompositeResult(apply_interlace_dim(grbi_blend_to_packed_rgba8(top, 0u, state.contrast), y), clear_for_layer);
+        }
+        return CompositeResult(apply_interlace_dim(grbi_to_packed_rgba8(top, state.contrast), y), clear_for_layer);
+    }
+    if (trigger && gt) {
+        return CompositeResult(apply_interlace_dim(grbi_blend_to_packed_rgba8(top, second, state.contrast), y), clear_for_layer);
+    }
+    return CompositeResult(apply_interlace_dim(grbi_to_packed_rgba8(top, state.contrast), y), clear_for_layer);
 }

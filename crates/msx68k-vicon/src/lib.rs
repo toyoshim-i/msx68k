@@ -1225,14 +1225,15 @@ fn sample_graphics_cpu(
     palette: &[u16; 256],
     x: u32,
     y: u32,
-) -> u16 {
+    want_sub: bool,
+) -> (u16, u16) {
     let enabled = if params.r0_mode & 7 >= 4 {
         params.r2_display & 16
     } else {
         params.r2_display & 15
     };
     if enabled == 0 {
-        return 0;
+        return (0, 0);
     }
     let nibble = |slot: u32, x: u32, y: u32, scroll: bool| -> u16 {
         let page = (params.r1_priority >> (slot * 2)) & 3;
@@ -1254,9 +1255,10 @@ fn sample_graphics_cpu(
     };
     let mode = params.r0_mode & 7;
     let mut index = 0u16;
+    let mut sub_index = 0u16;
     if mode >= 4 {
         if params.r2_display & 16 == 0 {
-            return 0;
+            return (0, 0);
         }
         let gx = (x + params.gr_scroll_x[0]) & 1023;
         let gy = (y + params.gr_scroll_y[0]) & 1023;
@@ -1278,8 +1280,15 @@ fn sample_graphics_cpu(
                 candidate |= nibble((first + lane) as u32, x, y, true) << (lane * 4);
             }
             if candidate != 0 {
-                index = candidate;
-                break;
+                if index == 0 {
+                    index = candidate;
+                    if !want_sub || lanes == 4 {
+                        break;
+                    }
+                } else {
+                    sub_index = candidate;
+                    break;
+                }
             }
         }
     }
@@ -1298,10 +1307,37 @@ fn sample_graphics_cpu(
         } else {
             hi_word << 8
         };
-        hi | lo
+        (hi | lo, 0)
     } else {
-        palette[index as usize]
+        let top = palette[index as usize];
+        let sub = if sub_index != 0 {
+            palette[sub_index as usize]
+        } else {
+            0
+        };
+        (top, sub)
     }
+}
+
+#[inline]
+fn grbi_pair_to_rgba(fg: u16, bg: u16, blend: bool, contrast: u32) -> [u8; 4] {
+    let i_fg = (fg & 1) as u32;
+    let mut g6 = ((((fg >> 11) & 0x1F) as u32) << 1) | i_fg;
+    let mut r6 = ((((fg >> 6) & 0x1F) as u32) << 1) | i_fg;
+    let mut b6 = ((((fg >> 1) & 0x1F) as u32) << 1) | i_fg;
+    if blend {
+        let i_bg = (bg & 1) as u32;
+        let g6_bg = ((((bg >> 11) & 0x1F) as u32) << 1) | i_bg;
+        let r6_bg = ((((bg >> 6) & 0x1F) as u32) << 1) | i_bg;
+        let b6_bg = ((((bg >> 1) & 0x1F) as u32) << 1) | i_bg;
+        g6 = (g6 + g6_bg) >> 1;
+        r6 = (r6 + r6_bg) >> 1;
+        b6 = (b6 + b6_bg) >> 1;
+    }
+    let r8 = (((r6 << 2) | (r6 >> 4)) * contrast / 15) as u8;
+    let g8 = (((g6 << 2) | (g6 >> 4)) * contrast / 15) as u8;
+    let b8 = (((b6 << 2) | (b6 >> 4)) * contrast / 15) as u8;
+    [r8, g8, b8, 0xFF]
 }
 
 /// CPU reference compositor evaluating the shared CYNTHIA and VICON specifications.
@@ -1309,6 +1345,7 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
     let mut params = ViconUniforms::from_bus(bus);
     let frame = raster::completed_frame(bus, &params);
     let cynthia = raster::cynthia_input(bus, &params);
+    let interlace = raster::interlace_field(bus, &params);
     let mut next_line = 0;
     let width = params.width;
     let height = params.height;
@@ -1338,22 +1375,22 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
         let tx_rank = (params.r1_priority >> 10) & 3;
         let sp_rank = (params.r1_priority >> 12) & 3;
         let gr_rank = (params.r1_priority >> 8) & 3;
+        let exon = (params.r2_display & 0x1000) != 0;
+        let hp = (params.r2_display & 0x0800) != 0;
+        let bp = (params.r2_display & 0x0400) != 0;
+        let gg = (params.r2_display & 0x0200) != 0;
+        let gt = (params.r2_display & 0x0100) != 0;
+        let want_gr_sub = exon && hp && gg;
         let cynthia_on = (params.r2_display & 0x40 != 0) && gr_rank != 3;
+        let dim_row = interlace.is_some_and(|field| ((y & 1) as u8) != field);
+        let cynthia_h_scale = if cynthia_on {
+            cynthia.row_h_scale(y)
+        } else {
+            0
+        };
         if cynthia_on {
             cynthia.rasterize_row(y, &mut cynthia_row);
         }
-
-        let grbi_to_rgba = |grbi: u16| -> [u8; 4] {
-            let i_bit = (grbi & 1) as u32;
-            let g6 = ((((grbi >> 11) & 0x1F) as u32) << 1) | i_bit;
-            let r6 = ((((grbi >> 6) & 0x1F) as u32) << 1) | i_bit;
-            let b6 = ((((grbi >> 1) & 0x1F) as u32) << 1) | i_bit;
-
-            let r8 = (((r6 << 2) | (r6 >> 4)) * contrast / 15) as u8;
-            let g8 = (((g6 << 2) | (g6 >> 4)) * contrast / 15) as u8;
-            let b8 = (((b6 << 2) | (b6 >> 4)) * contrast / 15) as u8;
-            [r8, g8, b8, 0xFF]
-        };
 
         for x in 0..width {
             let mut tx_idx = 0usize;
@@ -1379,14 +1416,19 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
                 }
             }
 
-            let gr_color = sample_graphics_cpu(&params, gvram, gr_pal, x, y);
+            let (gr_color, gr_sub) = sample_graphics_cpu(&params, gvram, gr_pal, x, y, want_gr_sub);
             let tx_color = if text_enabled && gr_rank != 3 {
                 tx_pal[tx_idx]
             } else {
                 0
             };
-            let bg_code = if cynthia_on && (x as usize) < cynthia_row.len() {
-                cynthia_row[x as usize]
+            let bg_code = if cynthia_on {
+                let cx = msx68k_bus::bg::map_cynthia_x(x, cynthia_h_scale) as usize;
+                if cx < cynthia_row.len() {
+                    cynthia_row[cx]
+                } else {
+                    0
+                }
             } else {
                 0
             };
@@ -1400,16 +1442,82 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             } else {
                 (bg_color, tx_color)
             };
-            let colors = match gr_rank {
-                0 => [gr_color, front, back],
-                1 => [front, gr_color, back],
-                2 => [front, back, gr_color],
-                _ => [gr_color, 0, 0],
-            };
-            let final_grbi = colors.into_iter().find(|&color| color != 0).unwrap_or(0);
 
+            let (fg_grbi, bg_grbi, do_blend) = if !exon {
+                let colors = match gr_rank {
+                    0 => [gr_color, front, back],
+                    1 => [front, gr_color, back],
+                    2 => [front, back, gr_color],
+                    _ => [gr_color, 0, 0],
+                };
+                let c = colors.into_iter().find(|&color| color != 0).unwrap_or(0);
+                (c, 0, false)
+            } else if !hp {
+                // Special priority: Graphic pixel with I bit == 1 promotes above Text/Sprite.
+                if gr_color != 0 && (gr_color & 1) != 0 {
+                    (gr_color, 0, false)
+                } else {
+                    let colors = match gr_rank {
+                        0 => [gr_color, front, back],
+                        1 => [front, gr_color, back],
+                        2 => [front, back, gr_color],
+                        _ => [gr_color, 0, 0],
+                    };
+                    let c = colors.into_iter().find(|&color| color != 0).unwrap_or(0);
+                    (c, 0, false)
+                }
+            } else {
+                // Half-transparency (translucent) mode.
+                let ordered = match gr_rank {
+                    0 => [(gr_color, true), (front, false), (back, false)],
+                    1 => [(front, false), (gr_color, true), (back, false)],
+                    2 => [(front, false), (back, false), (gr_color, true)],
+                    _ => [(gr_color, true), (0, false), (0, false)],
+                };
+                let mut top = 0u16;
+                let mut top_is_gr = false;
+                let mut second = 0u16;
+                for (c, is_gr) in ordered {
+                    if c != 0 {
+                        if top == 0 {
+                            top = c;
+                            top_is_gr = is_gr;
+                        } else {
+                            second = c;
+                            break;
+                        }
+                    }
+                }
+                if top == 0 {
+                    (0, 0, false)
+                } else {
+                    let trigger = bp || (top & 1) != 0;
+                    if top_is_gr {
+                        if trigger && gg && gr_sub != 0 {
+                            (top, gr_sub, true)
+                        } else if trigger && gt {
+                            (top, second, true)
+                        } else if trigger && gg {
+                            (top, 0, true)
+                        } else {
+                            (top, 0, false)
+                        }
+                    } else if trigger && gt {
+                        (top, second, true)
+                    } else {
+                        (top, 0, false)
+                    }
+                }
+            };
+
+            let mut rgba = grbi_pair_to_rgba(fg_grbi, bg_grbi, do_blend, contrast);
+            if dim_row {
+                rgba[0] = ((rgba[0] as u32 * 3) >> 2) as u8;
+                rgba[1] = ((rgba[1] as u32 * 3) >> 2) as u8;
+                rgba[2] = ((rgba[2] as u32 * 3) >> 2) as u8;
+            }
             let out_off = ((y * width + x) * 4) as usize;
-            rgba8[out_off..out_off + 4].copy_from_slice(&grbi_to_rgba(final_grbi));
+            rgba8[out_off..out_off + 4].copy_from_slice(&rgba);
         }
     }
 

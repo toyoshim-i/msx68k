@@ -39,6 +39,12 @@ pub struct CrtcSyncEvents {
 pub struct Crtc {
     /// CRTC registers `R00`..`R23`.
     pub regs: [u16; 24],
+    /// System Port `$E8E007` bit 1 (`HRL`): selects 69.55199 MHz clock tree for 256/512 high-res modes.
+    hrl: u8,
+    /// Cached 10 MHz cycles per scanline, recomputed on `R00`/`R20`/`HRL` writes.
+    cached_scanline_cycles: u32,
+    /// Cached 10 MHz cycles for the H-Sync pulse, recomputed on `R00`/`R01`/`R20`/`HRL` writes.
+    cached_h_sync_cycles: u32,
     /// Operation port bit 3 (`$E80481` bit 3): Hardware Raster Copy active.
     raster_copy_on: bool,
     /// Operation port bit 1 (`$E80481` bit 1): Graphic Fast Clear standby.
@@ -82,8 +88,11 @@ impl Crtc {
         regs[8] = 27;  // R08: External sync adjust
         regs[9] = 0;   // R09: Raster IRQ line
         regs[20] = 0x0416; // R20: High-res 768x512, 16-color
-        Self {
+        let mut crtc = Self {
             regs,
+            hrl: 0,
+            cached_scanline_cycles: 317,
+            cached_h_sync_cycles: 34,
             raster_copy_on: false,
             fast_clear_standby: false,
             current_raster: 0,
@@ -93,7 +102,71 @@ impl Crtc {
             rint_active: false,
             frame_count: 0,
             exact_width: None,
+        };
+        crtc.recompute_horizontal_timing();
+        crtc
+    }
+
+    /// Updates System Port `$E8E007` bit 1 (`HRL`) and refreshes cached scanline timing.
+    #[inline]
+    pub fn set_hrl(&mut self, hrl: u8) {
+        let next = hrl & 1;
+        if self.hrl != next {
+            self.hrl = next;
+            self.recompute_horizontal_timing();
         }
+    }
+
+    /// Recomputes cached scanline and H-Sync durations (in 10 MHz ticks) from `R00`, `R01`, `R20`, and `HRL`.
+    fn recompute_horizontal_timing(&mut self) {
+        const OSC0_HZ: u64 = 38_863_630;
+        const OSC1_HZ: u64 = 69_551_990;
+
+        let hf = (self.regs[20] & 0x0010) != 0;
+        let hres = self.regs[20] & 0x0003;
+        let dot_clock_hz = if !hf {
+            match hres {
+                0 => OSC0_HZ / 8,
+                1 => OSC0_HZ / 4,
+                _ => OSC0_HZ / 2,
+            }
+        } else {
+            match hres {
+                0 => {
+                    if self.hrl != 0 {
+                        OSC1_HZ / 6
+                    } else {
+                        OSC0_HZ / 4
+                    }
+                }
+                1 => {
+                    if self.hrl != 0 {
+                        OSC1_HZ / 3
+                    } else {
+                        OSC0_HZ / 2
+                    }
+                }
+                _ => OSC1_HZ / 2,
+            }
+        };
+
+        let h_total_chars = ((self.regs[0] & 0x00FF) as u64) + 1;
+        let scanline = if h_total_chars < 8 {
+            if hf { 317 } else { 625 }
+        } else {
+            ((h_total_chars * 8 * 10_000_000) / dot_clock_hz).clamp(64, 4096) as u32
+        };
+
+        let h_sync_chars = ((self.regs[1] & 0x00FF) as u64) + 1;
+        let h_sync = if h_total_chars < 8 {
+            40.min(scanline - 1)
+        } else {
+            ((scanline as u64 * h_sync_chars) / h_total_chars).clamp(1, (scanline - 1) as u64)
+                as u32
+        };
+
+        self.cached_scanline_cycles = scanline;
+        self.cached_h_sync_cycles = h_sync;
     }
 
     /// Resets CRTC state on hardware `RESET`.
@@ -161,6 +234,9 @@ impl Crtc {
             if high_res && v_res == 0 {
                 // 256-line mode on 31.5kHz monitor doubles scanlines
                 (v_lines / 2).max(256)
+            } else if v_res == 2 {
+                // Interlaced mode: each field scans half the total lines (e.g. 256 -> 512)
+                (v_lines * 2).min(4096)
             } else {
                 v_lines
             }
@@ -168,6 +244,22 @@ impl Crtc {
             512
         };
         (width, height)
+    }
+
+    /// Returns `true` when CRTC `R20` selects an interlaced mode (`VRES == 2`).
+    #[inline]
+    pub const fn is_interlaced(&self) -> bool {
+        ((self.regs[20] >> 2) & 0x03) == 2
+    }
+
+    /// Returns the active interlace field (`Some(0)` = even, `Some(1)` = odd), or `None` when progressive.
+    #[inline]
+    pub const fn interlace_field(&self) -> Option<u8> {
+        if self.is_interlaced() {
+            Some((self.frame_count & 1) as u8)
+        } else {
+            None
+        }
     }
 
     /// Returns the current scanline (`0..=R04`).
@@ -266,7 +358,9 @@ impl Crtc {
                 };
                 self.regs[reg_idx] = next & Self::reg_mask(reg_idx);
 
-                if reg_idx == 9 {
+                if matches!(reg_idx, 0 | 1 | 20) {
+                    self.recompute_horizontal_timing();
+                } else if reg_idx == 9 {
                     let irq_line = self.regs[9] & 0x03FF;
                     self.rint_active = self.current_raster == irq_line;
                 } else if reg_idx == 22 && (offset & 1) == 1 && self.raster_copy_on {
@@ -457,15 +551,15 @@ impl Crtc {
 
     pub(crate) fn cycles_to_next_sync(&self) -> u32 {
         let line = self.cycles_to_next_line();
-        if self.cycle_in_raster < 40 {
-            line.min(40 - self.cycle_in_raster)
+        let h_sync = self.cached_h_sync_cycles;
+        if self.cycle_in_raster < h_sync {
+            line.min(h_sync - self.cycle_in_raster)
         } else {
             line
         }
     }
 
     /// Horizontal display begins after the sync and back-porch character periods.
-    /// The line period is still approximated in the 10 MHz peripheral clock.
     fn display_start_cycle(&self) -> u32 {
         let total = (self.regs[0] & 0xfff) as u32 + 1;
         let start = (self.regs[2] & 0xfff) as u32 + 1;
@@ -485,12 +579,9 @@ impl Crtc {
         self.cycle_in_raster == self.display_start_cycle()
     }
 
-    fn scanline_cycles(&self) -> u32 {
-        if self.regs[20] & 0x10 != 0 {
-            317
-        } else {
-            625
-        }
+    #[inline]
+    pub fn scanline_cycles(&self) -> u32 {
+        self.cached_scanline_cycles
     }
 
     /// Advances the CRTC timing state by `cycles_10mhz` (10 MHz clock cycles)
@@ -502,11 +593,8 @@ impl Crtc {
         gvram: &mut Option<Box<[u8]>>,
         dirty: &mut DirtyVramPages,
     ) -> CrtcSyncEvents {
-        // Approximate 10 MHz cycles per scanline:
-        // In 31.5 kHz high-res mode, 1 scanline is ~317 cycles (10_000_000 / 31_500).
-        // In 15.98 kHz low-res mode, 1 scanline is ~625 cycles.
         let scanline_cycles = self.scanline_cycles();
-        let h_sync_cycles: u32 = 40;
+        let h_sync_cycles = self.cached_h_sync_cycles;
 
         self.cycle_in_raster = self.cycle_in_raster.saturating_add(cycles_10mhz);
 
@@ -555,5 +643,36 @@ impl Crtc {
             v_disp_fell,
             rint_active: self.rint_active,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scanline_timing_tracks_r00_r20_and_hrl() {
+        let mut crtc = Crtc::new();
+        // Default 768x512 31.5 kHz: R00=137 -> 1104 dots / 34.775995 MHz = 317 cycles @ 10 MHz.
+        assert_eq!(crtc.scanline_cycles(), 317);
+
+        let mut tvram = None;
+        let mut gvram = None;
+        let mut dirty = DirtyVramPages::default();
+
+        // 512x512 31.5 kHz with HRL=1 (69.55 MHz / 3), R00=91 -> 736 dots -> 317 cycles.
+        crtc.set_hrl(1);
+        crtc.write_u8(0xE80001, 91, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        crtc.write_u8(0xE80029, 0x15, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        assert_eq!(crtc.scanline_cycles(), 317);
+
+        // Doubling R00 roughly doubles scanline period.
+        crtc.write_u8(0xE80001, 183, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        assert_eq!(crtc.scanline_cycles(), 634);
+
+        // 512x256 15.98 kHz (HF=0, HRES=1), R00=75 -> 608 dots / 9.7159 MHz = 625 cycles.
+        crtc.write_u8(0xE80001, 75, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        crtc.write_u8(0xE80029, 0x05, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        assert_eq!(crtc.scanline_cycles(), 625);
     }
 }

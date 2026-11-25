@@ -24,6 +24,22 @@ pub(crate) const CYNTHIA_HEADER_WORDS: usize = 8;
 /// `ViconUniforms::reserved[1]` bit flags.
 #[cfg(feature = "wgpu-backend")]
 pub(crate) const FLAG_CYNTHIA_ENABLED: u32 = 1 << 0;
+#[cfg(feature = "wgpu-backend")]
+pub(crate) const FLAG_INTERLACE_ENABLED: u32 = 1 << 1;
+#[cfg(feature = "wgpu-backend")]
+pub(crate) const FLAG_INTERLACE_ODD_FIELD: u32 = 1 << 2;
+
+/// Returns the active interlace field (`Some(0)` = even, `Some(1)` = odd), or `None` for progressive.
+#[inline]
+pub(crate) fn interlace_field(bus: &X68kBus, params: &ViconUniforms) -> Option<u8> {
+    if let Some(frame) = completed_frame(bus, params) {
+        return frame.interlace_field;
+    }
+    if params.tvram_plane_bytes != TVRAM_PLANE_BYTES as u32 || params.tvram_row_bytes != 128 {
+        return None;
+    }
+    bus.crtc.interlace_field()
+}
 
 impl ViconUniforms {
     pub(crate) fn apply_raster(&mut self, state: &RasterState) {
@@ -120,6 +136,12 @@ fn push_uniform_state(words: &mut Vec<u32>, params: &ViconUniforms, palette_id: 
 #[cfg(feature = "wgpu-backend")]
 pub(crate) fn pack_raster_input(bus: &X68kBus, params: &mut ViconUniforms) -> Vec<u32> {
     params.reserved = [0; 2];
+    if let Some(field) = interlace_field(bus, params) {
+        params.reserved[1] |= FLAG_INTERLACE_ENABLED;
+        if field & 1 != 0 {
+            params.reserved[1] |= FLAG_INTERLACE_ODD_FIELD;
+        }
+    }
     let Some(frame) = completed_frame(bus, params) else {
         if params.r2_display & 0x7f == 0 {
             return Vec::new();

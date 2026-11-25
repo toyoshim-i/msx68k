@@ -148,6 +148,7 @@ fn cynthia_active_span_coalescing_handles_doubler_limit_palette_pcg_and_line_dou
     vm.bus.write_u16(0xe82600, 0x40, true).unwrap(); // VICON sprite/BG ON
     vm.bus.write_u16(0xeb080c, 32, true).unwrap();
     vm.bus.write_u16(0xeb080e, 2, true).unwrap();
+    vm.bus.write_u16(0xeb0810, 0x14, true).unwrap();
     vm.bus.write_u16(0xeb0808, 0x209, true).unwrap(); // Master + BG0 + BG1
 
     // Fill patterns 1..=5
