@@ -416,6 +416,19 @@ impl X68kVm {
         self.bus.crtc_scanline_cycles()
     }
 
+    /// Enables or disables instant (zero-wait) floppy disk transfers.
+    /// Defaults to `false` (realistic 2HD/2DD transfer rate, rotational latency, and seek timing).
+    #[inline]
+    pub fn set_fdc_fast_mode(&mut self, fast: bool) {
+        self.bus.set_fdc_fast_mode(fast);
+    }
+
+    /// Returns whether instant (fast) floppy disk transfer mode is enabled.
+    #[inline]
+    pub const fn fdc_fast_mode(&self) -> bool {
+        self.bus.fdc_fast_mode()
+    }
+
     /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {

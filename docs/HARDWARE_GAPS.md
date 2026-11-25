@@ -11,7 +11,7 @@ See also [GRAPHICS.md](GRAPHICS.md) for the planned graphics roadmap.
 
 - **Mid-Frame TVRAM / GVRAM Write History** (low priority / deferred):
   - Register, palette, and BG/Sprite states are captured per scanline, but TVRAM and GVRAM pixels are read from frame-final memory at render time, so mid-frame VRAM updates and mid-frame Graphic Fast Clear timing are not reproduced.
-  - Note: VICON special priority & half transparency (`R2` `EXON`/`HP`/`BP`/`GG`/`GT`), CRTC dot-clock horizontal timing, mixed-resolution CYNTHIA scaling, and interlaced field alternation (with 75% phosphor persistence dimming on non-scanned lines) are implemented across CPU, Compute, and GLES 2.0 backends.
+  - Note: VICON special priority & half transparency (`R2` `EXON`/`HP`/`BP`/`GG`/`GT`), CRTC dot-clock horizontal timing, and interlaced field alternation (with 75% phosphor persistence dimming on non-scanned lines) are implemented across CPU, Compute, and GLES 2.0 backends.
 
 ---
 
@@ -43,7 +43,7 @@ See also [GRAPHICS.md](GRAPHICS.md) for the planned graphics roadmap.
 
 - **FDC (`uPD72065`, `$E94000`) Commands & Image Formats**:
   - `WRITE ID` / `FORMAT` (`0x0D`), `READ DIAGNOSTIC` (`0x02`), and `SCAN` (`0x11`, `0x19`, `0x1D`) are not handled in `Fdc::execute_command` (`crates/msx68k-bus/src/fdc.rs`) and return `ST0_IC` (Invalid Command).
-  - `crates/msx68k-bus/src/floppy_image.rs` supports Raw (`.XDF`, etc.) and `.DIM` images only; `.D88` (variable sector sizes, CRC/deleted-mark errors, copy-protected tracks) and physical seek/rotational latency are not implemented.
+  - `crates/msx68k-bus/src/floppy_image.rs` supports Raw (`.XDF`, etc.) and `.DIM` images only; `.D88` (variable sector sizes, CRC/deleted-mark errors, copy-protected tracks) is not implemented. (Realistic 2HD/2DD byte transfer rates, rotational latency, and `SPECIFY`-paced seek timing are implemented with an optional `set_fdc_fast_mode` toggle.)
 - **SASI HDC (`$E96000`) & DMAC Channel 1**:
   - Stubbed as `0x00` on read and no-op on write (`crates/msx68k-bus/src/bus.rs`); SASI DMA request source on DMAC Ch1 is unconnected.
 - **Hardware SCSI Controller (`MB89352 SPC`, `$E96020` / `$EA0000`)**:

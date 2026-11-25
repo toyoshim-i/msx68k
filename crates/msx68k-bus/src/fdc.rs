@@ -264,6 +264,40 @@ impl FloppyGeometry {
         128usize << self.sector_size_code
     }
 
+    /// Returns `true` for 2DD (250 kbps, 300 rpm) media, `false` for 2HD (500 kbps, 360 rpm).
+    #[inline]
+    pub const fn is_2dd(&self) -> bool {
+        self.cylinders as usize
+            * self.heads as usize
+            * self.sectors_per_track as usize
+            * self.sector_bytes()
+            <= 737_280
+    }
+
+    /// Hardware byte transfer period in 10 MHz cycles:
+    /// - 2HD (500 kbps MFM = 62.5 KB/s): 160 cycles (16 us)
+    /// - 2DD (250 kbps MFM = 31.25 KB/s): 320 cycles (32 us)
+    #[inline]
+    pub const fn byte_period_10mhz(&self) -> u32 {
+        if self.is_2dd() {
+            320
+        } else {
+            160
+        }
+    }
+
+    /// Full disk rotation period in 10 MHz cycles:
+    /// - 2HD (360 rpm): 166.67 ms (`1_666_667` cycles)
+    /// - 2DD (300 rpm): 200.00 ms (`2_000_000` cycles)
+    #[inline]
+    pub const fn rotation_period_10mhz(&self) -> u32 {
+        if self.is_2dd() {
+            2_000_000
+        } else {
+            1_666_667
+        }
+    }
+
     /// Computes the byte offset of sector `(c, h, r, n)` within the raw disk image.
     pub fn sector_offset(&self, c: u8, h: u8, r: u8, n: u8) -> Option<usize> {
         if c >= self.cylinders || h >= self.heads || n != self.sector_size_code {
@@ -306,6 +340,8 @@ pub struct FloppyDrive {
     pub geometry: FloppyGeometry,
     /// Pending Seek/Recalibrate or Ready-transition interrupt result `(st0, pcn)`.
     pub pending_irq: Option<(u8, u8)>,
+    /// In-flight Seek/Recalibrate timer: `(remaining_cycles_10mhz, result_st0, target_pcn)`.
+    seek_timer: Option<(u32, u8, u8)>,
 }
 
 impl FloppyDrive {
@@ -324,6 +360,7 @@ impl FloppyDrive {
             remote_change: 0,
             geometry: FloppyGeometry::XDF_2HD,
             pending_irq: None,
+            seek_timer: None,
         }
     }
 
@@ -377,6 +414,11 @@ fn command_span(geom: FloppyGeometry, mt: bool, h: u8, r: u8, eot: u8) -> usize 
     sectors * geom.sector_bytes()
 }
 
+/// Inter-sector gap delay (GAP3 + Sync + IDAM + GAP2 + DAM, ~96 bytes @ 2HD).
+const INTER_SECTOR_GAP_BYTES: u32 = 96;
+/// Head settling time after a physical cylinder step (15 ms @ 10 MHz).
+const HEAD_SETTLE_CYCLES_10MHZ: u32 = 150_000;
+
 /// Execution-phase data stays in the controller until data-register accesses
 /// consume it. The controller requests DMA; it never writes guest memory itself.
 #[derive(Debug, Clone)]
@@ -388,6 +430,9 @@ struct FdcTransfer {
     write: bool,
     first: usize,
     sector_bytes: usize,
+    byte_period: u32,
+    drq_ready: bool,
+    wait_cycles: u32,
     data: Vec<u8>,
     position: usize,
 }
@@ -399,6 +444,13 @@ pub struct Fdc {
     pub drives: [FloppyDrive; 4],
     /// Enforced Ready signal from OPM `CT2` (YM2151 register `$1B` bit 6).
     pub enforced_ready: bool,
+    /// When `true`, skips physical seek, rotational latency, and byte transfer pacing.
+    /// Defaults to `false` (realistic 2HD/2DD hardware timing).
+    fast_mode: bool,
+    /// Step Rate Time nibble from `SPECIFY` (`0..=15`; step period = `(16 - srt)` ms).
+    step_rate_nibble: u8,
+    /// Free-running spindle rotation phase in 10 MHz cycles.
+    rotation_cycles: u32,
     /// Drive status selector written to `$E94005` (`bits 3..0`).
     drive_ctrl_select: u8,
     /// Command buffer during C-Phase.
@@ -433,6 +485,9 @@ impl Fdc {
                 FloppyDrive::new(false),
             ],
             enforced_ready: false,
+            fast_mode: false,
+            step_rate_nibble: 0x0D, // Default 3 ms/cyl (standard X68000 2HD SPECIFY)
+            rotation_cycles: 0,
             drive_ctrl_select: 0,
             cmd_buf: [0; 10],
             cmd_len: 0,
@@ -446,6 +501,58 @@ impl Fdc {
         }
     }
 
+    /// Enables or disables instant (zero-wait) floppy transfers.
+    /// When `false` (default), models 2HD/2DD byte transfer rates, rotational latency, and seek times.
+    #[inline]
+    pub fn set_fast_mode(&mut self, fast: bool) {
+        self.fast_mode = fast;
+        if fast {
+            if let Some(t) = self.transfer.as_mut() {
+                t.wait_cycles = 0;
+                t.drq_ready = true;
+            }
+        }
+    }
+
+    /// Returns whether instant (fast) floppy transfer mode is enabled.
+    #[inline]
+    pub const fn fast_mode(&self) -> bool {
+        self.fast_mode
+    }
+
+    /// Advances FDC spindle rotation, in-flight seek timers, and byte-transfer DRQ pacing.
+    pub fn advance(&mut self, cycles_10mhz: u32, ioi: &mut IoInterruptController) {
+        self.rotation_cycles = self.rotation_cycles.wrapping_add(cycles_10mhz);
+
+        let mut seek_completed = false;
+        for drv in &mut self.drives {
+            if let Some((rem, st0, pcn)) = drv.seek_timer {
+                if cycles_10mhz >= rem {
+                    drv.seek_timer = None;
+                    drv.pcn = pcn;
+                    drv.pending_irq = Some((st0, pcn));
+                    seek_completed = true;
+                } else {
+                    drv.seek_timer = Some((rem - cycles_10mhz, st0, pcn));
+                }
+            }
+        }
+        if seek_completed {
+            self.update_fdc_irq(ioi);
+        }
+
+        if let Some(t) = self.transfer.as_mut() {
+            if !t.drq_ready {
+                if self.fast_mode || cycles_10mhz >= t.wait_cycles {
+                    t.wait_cycles = 0;
+                    t.drq_ready = true;
+                } else {
+                    t.wait_cycles -= cycles_10mhz;
+                }
+            }
+        }
+    }
+
     pub fn reset(&mut self, ioi: &mut IoInterruptController) {
         self.transfer = None;
         self.cmd_len = 0;
@@ -454,6 +561,7 @@ impl Fdc {
         self.res_pos = 0;
         for drv in &mut self.drives {
             drv.pending_irq = None;
+            drv.seek_timer = None;
         }
         ioi.set_fdc_signal(false);
     }
@@ -608,6 +716,7 @@ impl Fdc {
         match op {
             0x03 => {
                 // SPECIFY (SRT/HUT, HLT/ND) — no result phase
+                self.step_rate_nibble = (self.cmd_buf[1] >> 4) & 0x0F;
             }
             0x04 => {
                 // SENSE DEVICE STATUS
@@ -629,14 +738,23 @@ impl Fdc {
             0x07 => {
                 // RECALIBRATE
                 let us = (self.cmd_buf[1] & 0x03) as usize;
+                let step_cycles = (16u32 - self.step_rate_nibble as u32) * 10_000;
+                let fast = self.fast_mode;
                 let drv = &mut self.drives[us];
-                if !drv.connected {
-                    drv.pending_irq = Some((ST0_AT | ST0_SE | ST0_EC | (us as u8), 0));
+                let (st0, target_pcn, steps) = if !drv.connected {
+                    (ST0_AT | ST0_SE | ST0_EC | (us as u8), 0, 0)
                 } else if drv.is_ready() || self.enforced_ready || drv.is_inserted() {
-                    drv.pcn = 0;
-                    drv.pending_irq = Some((ST0_SE | (us as u8), 0));
+                    (ST0_SE | (us as u8), 0, drv.pcn as u32)
                 } else {
-                    drv.pending_irq = Some((ST0_AT | ST0_SE | ST0_NR | (us as u8), drv.pcn));
+                    (ST0_AT | ST0_SE | ST0_NR | (us as u8), drv.pcn, 0)
+                };
+                if fast || steps == 0 {
+                    drv.pcn = target_pcn;
+                    drv.seek_timer = None;
+                    drv.pending_irq = Some((st0, target_pcn));
+                } else {
+                    let delay = steps.saturating_mul(step_cycles).saturating_add(HEAD_SETTLE_CYCLES_10MHZ);
+                    drv.seek_timer = Some((delay, st0, target_pcn));
                 }
                 self.update_fdc_irq(ioi);
             }
@@ -645,15 +763,27 @@ impl Fdc {
                 let us = (self.cmd_buf[1] & 0x03) as usize;
                 let hd = (self.cmd_buf[1] >> 2) & 0x01;
                 let ncn = self.cmd_buf[2];
+                let step_cycles = (16u32 - self.step_rate_nibble as u32) * 10_000;
+                let fast = self.fast_mode;
                 let drv = &mut self.drives[us];
-                if !drv.connected {
-                    drv.pending_irq = Some((ST0_AT | ST0_SE | ST0_EC | (hd << 2) | (us as u8), 0));
+                let (st0, target_pcn, steps) = if !drv.connected {
+                    (ST0_AT | ST0_SE | ST0_EC | (hd << 2) | (us as u8), 0, 0)
                 } else if drv.is_ready() || self.enforced_ready || drv.is_inserted() {
-                    drv.pcn = ncn;
-                    drv.pending_irq = Some((ST0_SE | (hd << 2) | (us as u8), drv.pcn));
+                    (
+                        ST0_SE | (hd << 2) | (us as u8),
+                        ncn,
+                        drv.pcn.abs_diff(ncn) as u32,
+                    )
                 } else {
-                    drv.pending_irq =
-                        Some((ST0_AT | ST0_SE | ST0_NR | (hd << 2) | (us as u8), drv.pcn));
+                    (ST0_AT | ST0_SE | ST0_NR | (hd << 2) | (us as u8), drv.pcn, 0)
+                };
+                if fast || steps == 0 {
+                    drv.pcn = target_pcn;
+                    drv.seek_timer = None;
+                    drv.pending_irq = Some((st0, target_pcn));
+                } else {
+                    let delay = steps.saturating_mul(step_cycles).saturating_add(HEAD_SETTLE_CYCLES_10MHZ);
+                    drv.seek_timer = Some((delay, st0, target_pcn));
                 }
                 self.update_fdc_irq(ioi);
             }
@@ -753,6 +883,23 @@ impl Fdc {
                 self.res_len = 0;
                 self.res_pos = 0;
                 ioi.set_fdc_signal(false);
+                let byte_period = geom.byte_period_10mhz();
+                let initial_wait = if self.fast_mode {
+                    0
+                } else {
+                    let rot_period = geom.rotation_period_10mhz();
+                    let cur_phase = self.rotation_cycles % rot_period;
+                    let sector_idx = chrn[2].saturating_sub(geom.first_sector_id) as u32;
+                    let target_phase =
+                        (sector_idx * (rot_period / (geom.sectors_per_track as u32).max(1)))
+                            % rot_period;
+                    let rot_wait = if target_phase >= cur_phase {
+                        target_phase - cur_phase
+                    } else {
+                        rot_period - cur_phase + target_phase
+                    };
+                    rot_wait.max(byte_period)
+                };
                 self.transfer = Some(FdcTransfer {
                     unit,
                     chrn,
@@ -761,6 +908,9 @@ impl Fdc {
                     write,
                     first: first.unwrap(),
                     sector_bytes: geom.sector_bytes(),
+                    byte_period,
+                    drq_ready: initial_wait == 0,
+                    wait_cycles: initial_wait,
                     data,
                     position: 0,
                 });
@@ -785,12 +935,14 @@ impl Fdc {
     }
 
     pub(crate) fn dma_request(&self) -> bool {
-        self.transfer.is_some()
+        self.transfer.as_ref().is_some_and(|t| t.drq_ready)
     }
 
     fn progress_transfer(&mut self, ioi: &mut IoInterruptController) {
+        let fast_mode = self.fast_mode;
         let transfer = self.transfer.as_mut().unwrap();
-        if transfer.position % transfer.sector_bytes == 0 {
+        let crossed_sector = transfer.position % transfer.sector_bytes == 0;
+        if crossed_sector {
             if transfer.chrn[2] < transfer.eot {
                 transfer.chrn[2] += 1;
             } else if transfer.mt && transfer.chrn[1] & 1 == 0 {
@@ -806,6 +958,14 @@ impl Fdc {
         }
         if transfer.position == transfer.data.len() {
             self.terminal_count(ioi);
+        } else if !fast_mode {
+            let gap = if crossed_sector {
+                INTER_SECTOR_GAP_BYTES * transfer.byte_period
+            } else {
+                0
+            };
+            transfer.wait_cycles = transfer.byte_period + gap;
+            transfer.drq_ready = false;
         }
     }
 
@@ -857,6 +1017,11 @@ impl Fdc {
                 }
                 if busy {
                     msr |= MSR_CB;
+                }
+                for (u, drv) in self.drives.iter().enumerate() {
+                    if drv.seek_timer.is_some() {
+                        msr |= 1u8 << u;
+                    }
                 }
                 Ok(msr)
             }

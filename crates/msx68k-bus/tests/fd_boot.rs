@@ -101,15 +101,27 @@ fn read_sector_dma(destination: u32) {
         vm.bus.write_u8(0x00E9_4003, b, true).unwrap();
     }
 
-    // A command starts the execution phase; data is transferred at DMA events.
+    // A command starts the execution phase; data is transferred at realistic 2HD byte rate
+    // (160 cycles/byte @ 10 MHz = 62.5 KB/s).
     assert_eq!(vm.bus.dmac.channels[0].mtc, 1024);
     assert_eq!(vm.bus.read_u8(destination, true).unwrap(), 0);
-    for _ in 0..2048 {
-        vm.bus.advance_peripherals(4);
+    let mut elapsed_cycles = 0u32;
+    for _ in 0..4096 {
+        vm.bus.advance_peripherals(160);
+        elapsed_cycles += 160;
         if !vm.bus.dmac.channels[0].is_active() {
             break;
         }
     }
+    assert!(
+        !vm.bus.dmac.channels[0].is_active(),
+        "DMA did not complete within {elapsed_cycles} cycles"
+    );
+    // 1024 bytes at 160 cycles/byte must take at least ~160k cycles (~16 ms) in realistic mode.
+    assert!(
+        elapsed_cycles >= 1024 * 160,
+        "expected realistic 2HD pacing (>= 163840 cycles), took {elapsed_cycles}"
+    );
 
     // Verify 7 result bytes in R-Phase (ST0=0, ST1=0, ST2=0, C=1, H=0, R=1, N=3)
     let mut results = [0u8; 7];
@@ -167,12 +179,12 @@ fn test_expert_iplrom_and_human68k_fd_boot() {
     vm.reset().unwrap();
     assert_eq!(vm.cpu_state.pc, 0x00FF_0010);
 
-    // Run up to 6,000,000 instructions in chunks of 20,000 and trace boot milestones
+    // Run up to 12,000,000 instructions in chunks of 20,000 (enough for realistic 2HD FD boot)
     let mut boot_sector_loaded = false;
     let mut human_sys_loaded = false;
     let mut tvram_written = false;
 
-    for chunk in 0..300 {
+    for chunk in 0..600 {
         vm.run_steps(20_000);
 
         // Check if FD boot sector (loaded at $0000_2000 by IPLROM) has been read into RAM
@@ -259,8 +271,11 @@ fn fdc_dma_write_commits_only_bytes_before_terminal_count() {
         &vm.bus.fdc.drives[0].image.as_ref().unwrap()[..4],
         &[0x55; 4]
     );
-    for _ in 0..10 {
-        vm.bus.advance_peripherals(4);
+    for _ in 0..20 {
+        vm.bus.advance_peripherals(160);
+        if !vm.bus.dmac.channels[0].is_active() {
+            break;
+        }
     }
     assert_eq!(
         &vm.bus.fdc.drives[0].image.as_ref().unwrap()[..4],

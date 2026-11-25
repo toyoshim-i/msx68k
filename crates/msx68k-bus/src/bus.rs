@@ -685,7 +685,9 @@ impl X68kBus {
             self.opm.advance(step);
             self.adpcm.advance(step);
             self.midi.advance(step);
+            self.fdc.advance(step, &mut self.ioi);
             self.refresh_adpcm_dma_request();
+            self.refresh_fdc_dma_request();
             self.mfp.set_opm_irq(self.opm.irq_active());
             self.mfp.advance(step);
             cycles_10mhz -= step;
@@ -734,6 +736,20 @@ impl X68kBus {
     #[inline]
     pub fn crtc_scanline_cycles(&self) -> u32 {
         self.crtc.scanline_cycles()
+    }
+
+    /// Enables or disables instant (zero-wait) floppy disk transfers.
+    /// Defaults to `false` (realistic 2HD/2DD transfer rate, rotational latency, and seek timing).
+    #[inline]
+    pub fn set_fdc_fast_mode(&mut self, fast: bool) {
+        self.fdc.set_fast_mode(fast);
+        self.refresh_fdc_dma_request();
+    }
+
+    /// Returns whether instant (fast) floppy disk transfer mode is enabled.
+    #[inline]
+    pub const fn fdc_fast_mode(&self) -> bool {
+        self.fdc.fast_mode()
     }
 
     /// Drains all generated OPM + ADPCM stereo PCM samples (at 62,500 Hz) into `out`.
