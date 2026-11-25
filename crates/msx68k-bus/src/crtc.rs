@@ -131,16 +131,19 @@ impl Crtc {
                 _ => OSC0_HZ / 2,
             }
         } else {
+            // System Port $E8E007 bit 1 (HRL):
+            //   0 (default): normal 31.5 kHz 69.55 MHz clock tree (/6 for 256, /3 for 512, /2 for 768)
+            //   1: alternate 38.86 MHz clock tree (/4 for 256, /2 for 512)
             match hres {
                 0 => {
-                    if self.hrl != 0 {
+                    if self.hrl == 0 {
                         OSC1_HZ / 6
                     } else {
                         OSC0_HZ / 4
                     }
                 }
                 1 => {
-                    if self.hrl != 0 {
+                    if self.hrl == 0 {
                         OSC1_HZ / 3
                     } else {
                         OSC0_HZ / 2
@@ -660,14 +663,19 @@ mod tests {
         let mut gvram = None;
         let mut dirty = DirtyVramPages::default();
 
-        // 512x512 31.5 kHz with HRL=1 (69.55 MHz / 3), R00=91 -> 736 dots -> 317 cycles.
-        crtc.set_hrl(1);
+        // 512x512 31.5 kHz with HRL=0 (default 69.55 MHz / 3), R00=91 -> 736 dots -> 317 cycles.
+        crtc.set_hrl(0);
         crtc.write_u8(0xE80001, 91, &mut tvram, &mut gvram, &mut dirty).unwrap();
         crtc.write_u8(0xE80029, 0x15, &mut tvram, &mut gvram, &mut dirty).unwrap();
         assert_eq!(crtc.scanline_cycles(), 317);
 
+        // 256x256 31.5 kHz with HRL=0 (default 69.55 MHz / 6), R00=45 -> 368 dots -> 317 cycles.
+        crtc.write_u8(0xE80001, 45, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        crtc.write_u8(0xE80029, 0x14, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        assert_eq!(crtc.scanline_cycles(), 317);
+
         // Doubling R00 roughly doubles scanline period.
-        crtc.write_u8(0xE80001, 183, &mut tvram, &mut gvram, &mut dirty).unwrap();
+        crtc.write_u8(0xE80001, 91, &mut tvram, &mut gvram, &mut dirty).unwrap();
         assert_eq!(crtc.scanline_cycles(), 634);
 
         // 512x256 15.98 kHz (HF=0, HRES=1), R00=75 -> 608 dots / 9.7159 MHz = 625 cycles.
