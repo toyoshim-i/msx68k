@@ -264,6 +264,7 @@ struct AppArgs {
     /// Host directories mounted as file-level remote drives via `--remote-drive`.
     remote_drives: Vec<PathBuf>,
     opm_synth_mode: OpmSynthMode,
+    crt_whine: bool,
 }
 
 impl Default for AppArgs {
@@ -306,6 +307,10 @@ impl Default for AppArgs {
                 Some("offload") => OpmSynthMode::Offload,
                 _ => OpmSynthMode::Inline,
             },
+            crt_whine: matches!(
+                std::env::var("MSX68K_CRT_WHINE").ok().as_deref(),
+                Some("1" | "true" | "on")
+            ),
         }
     }
 }
@@ -427,6 +432,9 @@ impl AppArgs {
                         };
                     }
                 }
+                "--crt-whine" => {
+                    cfg.crt_whine = true;
+                }
                 "--help" | "-h" => {
                     println!(
                         "msx68k — Sharp X68000 / SX-Window Hybrid Execution Environment\n\n\
@@ -446,6 +454,7 @@ impl AppArgs {
                            --resolution <WxH>   Initial screen resolution (e.g. 768x512, 1024x768, 1024x1024, native)\n  \
                            --fullscreen, -f     Start in host native fullscreen 1:1 mode\n  \
                            --opm-thread <mode>  YM2151 synth thread: inline | offload (default: inline)\n  \
+                           --crt-whine          Mix a subtle ~15.98 kHz CRT flyback whine in 15 kHz video modes\n  \
                            --gdb <port>         Serve the GDB remote protocol on 127.0.0.1:<port>\n\n\
                          Hotkeys:\n  \
                            F1: 10MHz | F2: 16MHz | F3: 24MHz | F4: Burst | F5: Cycle Resolution | F12: Reset"
@@ -753,6 +762,7 @@ impl Msx68kApp {
         let guest_ipl = std::fs::read(DEFAULT_IPL_PATH).unwrap_or_else(|_| ipl.clone());
         let vsync = args.vsync;
         let audio = audio::AudioOutput::open(args.opm_synth_mode);
+        audio.set_crt_whine_enabled(args.crt_whine);
         vm.set_opm_synth_mode(args.opm_synth_mode);
         vm.set_audio_enabled(audio.is_active());
         Self {
@@ -1392,6 +1402,8 @@ impl Msx68kApp {
             _ => self.vm.run_frame(budget),
         }
         if self.audio.is_active() {
+            self.audio
+                .set_crt_scanline_cycles(self.vm.bus.crtc.scanline_cycles());
             match self.audio.mode() {
                 OpmSynthMode::Inline => {
                     self.vm.take_audio_samples(&mut self.audio_scratch);

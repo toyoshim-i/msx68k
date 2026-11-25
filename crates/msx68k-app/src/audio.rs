@@ -4,8 +4,9 @@
 //! so the pitch is strictly constant and never stretched or compressed.
 
 use std::collections::VecDeque;
+use std::f32::consts::TAU;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -82,6 +83,66 @@ impl Resampler {
     }
 }
 
+/// Subtle CRT flyback horizontal-deflection whine synthesizer (optional novelty effect).
+///
+/// Reproduces the ~15.98 kHz high-pitched whine heard from 15 kHz CRT monitors while staying
+/// silent in 31.5 kHz / 24.8 kHz modes (above the human hearing threshold and 48 kHz Nyquist).
+struct CrtWhineSynth {
+    phase_h: f32,
+    phase_v: f32,
+    env: f32,
+}
+
+impl CrtWhineSynth {
+    /// Peak amplitude in i16 units (~-38 dB full scale) so the whine is subtle and nostalgic.
+    const TARGET_AMP: f32 = 420.0;
+    /// Maximum horizontal frequency (Hz) synthesized before muting to avoid Nyquist aliasing.
+    const MAX_AUDIBLE_HZ: f32 = 20_000.0;
+
+    const fn new() -> Self {
+        Self {
+            phase_h: 0.0,
+            phase_v: 0.0,
+            env: 0.0,
+        }
+    }
+
+    fn mix_into(&mut self, enabled: bool, scanline_cycles_10mhz: u32, out: &mut [i16]) {
+        let h_freq_hz = if scanline_cycles_10mhz > 0 {
+            10_000_000.0 / (scanline_cycles_10mhz as f32)
+        } else {
+            0.0
+        };
+        let audible = enabled && h_freq_hz >= 4_000.0 && h_freq_hz <= Self::MAX_AUDIBLE_HZ;
+        let target = if audible { Self::TARGET_AMP } else { 0.0 };
+
+        if target == 0.0 && self.env < 0.5 {
+            self.env = 0.0;
+            return;
+        }
+
+        let inc_h = TAU * h_freq_hz.min(Self::MAX_AUDIBLE_HZ) / (HOST_SAMPLE_RATE as f32);
+        let inc_v = TAU * 60.0 / (HOST_SAMPLE_RATE as f32);
+
+        for frame in out.chunks_exact_mut(2) {
+            self.env += (target - self.env) * 0.002;
+            let am = 1.0 + 0.06 * self.phase_v.sin();
+            let s = (self.phase_h.sin() * self.env * am).round() as i32;
+            frame[0] = (frame[0] as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            frame[1] = (frame[1] as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+            self.phase_h += inc_h;
+            if self.phase_h >= TAU {
+                self.phase_h -= TAU;
+            }
+            self.phase_v += inc_v;
+            if self.phase_v >= TAU {
+                self.phase_v -= TAU;
+            }
+        }
+    }
+}
+
 struct SharedAudio {
     mode: OpmSynthMode,
     queue: Mutex<VecDeque<(i16, i16)>>,
@@ -90,6 +151,8 @@ struct SharedAudio {
     produced_clock: AtomicU64,
     queued_samples: AtomicUsize,
     adpcm_lpf_enabled: AtomicBool,
+    crt_whine_enabled: AtomicBool,
+    crt_scanline_cycles: AtomicU32,
     stop: AtomicBool,
 }
 
@@ -124,6 +187,8 @@ impl AudioOutput {
             produced_clock: AtomicU64::new(0),
             queued_samples: AtomicUsize::new(0),
             adpcm_lpf_enabled: AtomicBool::new(true),
+            crt_whine_enabled: AtomicBool::new(false),
+            crt_scanline_cycles: AtomicU32::new(317),
             stop: AtomicBool::new(false),
         });
 
@@ -177,6 +242,22 @@ impl AudioOutput {
     #[inline]
     pub fn adpcm_lpf_enabled(&self) -> bool {
         self.shared.adpcm_lpf_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Enables or disables the optional CRT horizontal-scanline flyback whine effect.
+    #[inline]
+    pub fn set_crt_whine_enabled(&self, enabled: bool) {
+        self.shared
+            .crt_whine_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Updates the current CRTC scanline period (in 10 MHz cycles) for the CRT whine synth.
+    #[inline]
+    pub fn set_crt_scanline_cycles(&self, cycles_10mhz: u32) {
+        self.shared
+            .crt_scanline_cycles
+            .store(cycles_10mhz, Ordering::Relaxed);
     }
 
     /// Returns `true` if host audio output is active.
@@ -267,6 +348,7 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
     let mut adpcm_lpf_l = AdpcmLpf::new();
     let mut adpcm_lpf_r = AdpcmLpf::new();
     let mut prev_lpf_enabled = shared.adpcm_lpf_enabled.load(Ordering::Relaxed);
+    let mut crt_whine = CrtWhineSynth::new();
 
     while !shared.stop.load(Ordering::Relaxed) {
         match shared.mode {
@@ -347,6 +429,11 @@ fn audio_worker(stream: PulseSimpleStream, shared: Arc<SharedAudio>) {
                 );
             }
         }
+        crt_whine.mix_into(
+            shared.crt_whine_enabled.load(Ordering::Relaxed),
+            shared.crt_scanline_cycles.load(Ordering::Relaxed),
+            &mut buf,
+        );
         if !stream.write(&buf) {
             break;
         }
@@ -527,5 +614,30 @@ mod tests {
         resampler.fill_chunk(&mut queue, &mut out);
         assert_eq!(out[out.len() - 2], 0);
         assert_eq!(out[out.len() - 1], 0);
+    }
+
+    #[test]
+    fn crt_whine_emits_subtle_15khz_tone_and_mutes_in_31khz_or_disabled() {
+        let mut synth = CrtWhineSynth::new();
+        let mut buf = vec![0i16; HOST_SAMPLE_RATE as usize / 10 * 2]; // 100 ms
+
+        // Disabled -> completely untouched.
+        synth.mix_into(false, 625, &mut buf);
+        assert!(buf.iter().all(|&s| s == 0));
+
+        // 15.98 kHz mode (625 cycles @ 10 MHz = 16 kHz): subtle audible whine.
+        synth.mix_into(true, 625, &mut buf);
+        let peak = buf.iter().map(|&s| s.unsigned_abs()).max().unwrap();
+        assert!(
+            (200..=500).contains(&peak),
+            "expected subtle peak in 200..=500, got {peak}"
+        );
+
+        // 31.5 kHz mode (317 cycles @ 10 MHz = 31.5 kHz): fades cleanly to silence.
+        for _ in 0..10 {
+            buf.fill(0);
+            synth.mix_into(true, 317, &mut buf);
+        }
+        assert!(buf.iter().all(|&s| s == 0));
     }
 }
