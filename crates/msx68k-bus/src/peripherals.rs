@@ -7,7 +7,128 @@
 //! - SCC (`Z8530`, `$E98000`–`$E99FFF`)
 //! - PPI (`i8255`, `$E9A000`–`$E9BFFF`)
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use msx68k_cpu::BusFault;
+
+/// Broken-down calendar date/time for RP5C15 RTC registers.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct RtcDateTime {
+    year: i32, // full year, e.g. 2026
+    month: u8, // 1..=12
+    day: u8,   // 1..=31
+    wday: u8,  // 0 = Sunday .. 6 = Saturday
+    hour: u8,  // 0..=23
+    min: u8,   // 0..=59
+    sec: u8,   // 0..=59
+}
+
+impl RtcDateTime {
+    fn from_unix_secs_utc(secs: i64) -> Self {
+        let days = secs.div_euclid(86_400);
+        let sod = secs.rem_euclid(86_400) as u32;
+        let hour = (sod / 3_600) as u8;
+        let min = ((sod % 3_600) / 60) as u8;
+        let sec = (sod % 60) as u8;
+        let wday = (days + 4).rem_euclid(7) as u8; // 1970-01-01 was Thursday (4)
+
+        // Howard Hinnant's civil-from-days algorithm
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097) as u64;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = (yoe as i64) + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+        let year = (y + i64::from(m <= 2)) as i32;
+
+        Self {
+            year,
+            month: m,
+            day: d,
+            wday,
+            hour,
+            min,
+            sec,
+        }
+    }
+
+    fn now_local() -> Self {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::{c_char, c_int, c_long};
+            #[repr(C)]
+            struct Tm {
+                tm_sec: c_int,
+                tm_min: c_int,
+                tm_hour: c_int,
+                tm_mday: c_int,
+                tm_mon: c_int,
+                tm_year: c_int,
+                tm_wday: c_int,
+                tm_yday: c_int,
+                tm_isdst: c_int,
+                _gmtoff: c_long,
+                _zone: *const c_char,
+                _pad: [usize; 4],
+            }
+            extern "C" {
+                fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+            }
+            let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
+            let ptr = unsafe { localtime_r(&secs, tm.as_mut_ptr()) };
+            if !ptr.is_null() {
+                let tm = unsafe { tm.assume_init() };
+                return Self {
+                    year: tm.tm_year + 1900,
+                    month: (tm.tm_mon + 1).clamp(1, 12) as u8,
+                    day: tm.tm_mday.clamp(1, 31) as u8,
+                    wday: tm.tm_wday.rem_euclid(7) as u8,
+                    hour: tm.tm_hour.clamp(0, 23) as u8,
+                    min: tm.tm_min.clamp(0, 59) as u8,
+                    sec: tm.tm_sec.clamp(0, 59) as u8,
+                };
+            }
+        }
+
+        Self::from_unix_secs_utc(secs)
+    }
+
+    fn to_rp5c15_bank0(self, hour24: bool) -> ([u8; 13], u8) {
+        let yr = (self.year.saturating_sub(1980).max(0) % 100) as u8;
+        let leap = (self.year.rem_euclid(4)) as u8;
+        let (h1, h10) = if hour24 {
+            (self.hour % 10, self.hour / 10)
+        } else {
+            let pm = u8::from(self.hour >= 12) << 1;
+            let h12 = self.hour % 12;
+            (h12 % 10, pm | (h12 / 10))
+        };
+        let bank0 = [
+            self.sec % 10,   // 0x0: 1-second
+            self.sec / 10,   // 0x1: 10-second
+            self.min % 10,   // 0x2: 1-minute
+            self.min / 10,   // 0x3: 10-minute
+            h1,              // 0x4: 1-hour
+            h10,             // 0x5: 10-hour (bit 1 = AM/PM in 12h mode)
+            self.wday,       // 0x6: Day of week (0 = Sunday)
+            self.day % 10,   // 0x7: 1-day
+            self.day / 10,   // 0x8: 10-day
+            self.month % 10, // 0x9: 1-month
+            self.month / 10, // 0xA: 10-month
+            yr % 10,         // 0xB: 1-year (offset from 1980)
+            yr / 10,         // 0xC: 10-year
+        ];
+        (bank0, leap)
+    }
+}
 
 /// Ricoh RP5C15 Real-Time Clock (`$E8A001`–`$E8A01F` odd addresses).
 #[derive(Debug, Clone)]
@@ -18,6 +139,9 @@ pub struct Rtc {
     mode: u8,
     /// Test register (`0x0E`).
     test: u8,
+    /// When `true` (default), Bank 0 reads reflect the host's current local wall-clock time.
+    /// Cleared if the guest explicitly writes Bank 0 time registers.
+    host_sync: bool,
 }
 
 impl Default for Rtc {
@@ -28,30 +152,23 @@ impl Default for Rtc {
 
 impl Rtc {
     pub fn new() -> Self {
-        // Default time: 2026-11-08 (Year 46 from 1980) 12:00:00 Sunday
-        let bank0 = [
-            0, // 0x0: 1-second
-            0, // 0x1: 10-second
-            0, // 0x2: 1-minute
-            0, // 0x3: 10-minute
-            2, // 0x4: 1-hour
-            1, // 0x5: 10-hour (12:00)
-            0, // 0x6: Day of week (0 = Sunday)
-            8, // 0x7: 1-day
-            0, // 0x8: 10-day (08)
-            1, // 0x9: 1-month
-            1, // 0xA: 10-month (11)
-            6, // 0xB: 1-year
-            4, // 0xC: 10-year (46 -> 1980 + 46 = 2026)
-        ];
+        let now = RtcDateTime::now_local();
+        let (bank0, leap) = now.to_rp5c15_bank0(true);
         let mut bank1 = [0u8; 13];
         bank1[0x0A] = 0x01; // 24-hour mode
-        bank1[0x0B] = 0x02; // Leap year counter (2026 % 4 == 2)
+        bank1[0x0B] = leap; // Leap year counter (year % 4)
         Self {
             banks: [bank0, bank1],
             mode: 0x08,
             test: 0x00,
+            host_sync: true,
         }
+    }
+
+    /// Re-enables or disables live host wall-clock synchronization for Bank 0 reads.
+    #[inline]
+    pub fn set_host_sync(&mut self, enabled: bool) {
+        self.host_sync = enabled;
     }
 
     pub fn read_u8(&self, addr: u32) -> Result<u8, BusFault> {
@@ -66,7 +183,19 @@ impl Rtc {
         let val = match reg {
             0x00..=0x0C => {
                 let bank = (self.mode & 0x01) as usize;
-                self.banks[bank][reg] & 0x0F
+                if self.host_sync {
+                    let hour24 = (self.banks[1][0x0A] & 0x01) != 0;
+                    let (bank0, leap) = RtcDateTime::now_local().to_rp5c15_bank0(hour24);
+                    if bank == 0 {
+                        bank0[reg] & 0x0F
+                    } else if reg == 0x0B {
+                        leap & 0x0F
+                    } else {
+                        self.banks[1][reg] & 0x0F
+                    }
+                } else {
+                    self.banks[bank][reg] & 0x0F
+                }
             }
             0x0D => self.mode & 0x0F,
             0x0E => self.test & 0x0F,
@@ -89,6 +218,13 @@ impl Rtc {
         match reg {
             0x00..=0x0C => {
                 let bank = (self.mode & 0x01) as usize;
+                if bank == 0 && self.host_sync {
+                    let hour24 = (self.banks[1][0x0A] & 0x01) != 0;
+                    let (bank0, leap) = RtcDateTime::now_local().to_rp5c15_bank0(hour24);
+                    self.banks[0] = bank0;
+                    self.banks[1][0x0B] = leap;
+                    self.host_sync = false;
+                }
                 self.banks[bank][reg] = nibble;
             }
             0x0D => self.mode = nibble,
@@ -446,5 +582,48 @@ impl SystemPort {
             0x0F => 0xF0 | (self.power_ctrl & 0x0F),
             _ => 0xFF,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rtc_utc_conversion_and_bcd_encoding() {
+        // 2026-11-25 12:34:56 UTC (Wednesday = 3)
+        // Days from 1970-01-01 to 2026-11-25: 20782
+        let dt = RtcDateTime::from_unix_secs_utc(20_782 * 86_400 + 12 * 3_600 + 34 * 60 + 56);
+        assert_eq!(
+            dt,
+            RtcDateTime {
+                year: 2026,
+                month: 11,
+                day: 25,
+                wday: 3,
+                hour: 12,
+                min: 34,
+                sec: 56,
+            }
+        );
+        let (bank0, leap) = dt.to_rp5c15_bank0(true);
+        assert_eq!(leap, 2); // 2026 % 4 == 2
+        assert_eq!(bank0, [6, 5, 4, 3, 2, 1, 3, 5, 2, 1, 1, 6, 4]);
+    }
+
+    #[test]
+    fn rtc_reads_live_host_time_and_allows_guest_override() {
+        let mut rtc = Rtc::new();
+        let sec_lo = rtc.read_u8(0xE8A001).unwrap() & 0x0F;
+        let sec_hi = rtc.read_u8(0xE8A003).unwrap() & 0x0F;
+        let year_lo = rtc.read_u8(0xE8A017).unwrap() & 0x0F;
+        let year_hi = rtc.read_u8(0xE8A019).unwrap() & 0x0F;
+        assert!(sec_hi * 10 + sec_lo < 60);
+        // Host year must be >= 2020 (offset >= 40 from 1980)
+        assert!(year_hi * 10 + year_lo >= 40);
+
+        // Writing Bank 0 detaches host sync and preserves written nibbles.
+        rtc.write_u8(0xE8A001, 0x07).unwrap();
+        assert_eq!(rtc.read_u8(0xE8A001).unwrap(), 0xF7);
     }
 }
