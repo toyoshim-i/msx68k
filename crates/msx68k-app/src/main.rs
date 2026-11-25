@@ -763,6 +763,7 @@ impl Msx68kApp {
         let vsync = args.vsync;
         let audio = audio::AudioOutput::open(args.opm_synth_mode);
         audio.set_crt_whine_enabled(args.crt_whine);
+        vm.set_crt_whine_enabled(args.crt_whine);
         vm.set_opm_synth_mode(args.opm_synth_mode);
         vm.set_audio_enabled(audio.is_active());
         Self {

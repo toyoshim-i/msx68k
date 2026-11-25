@@ -397,6 +397,25 @@ impl X68kVm {
         self.bus.adpcm_lpf_enabled()
     }
 
+    /// Enables or disables the optional ~15.98 kHz CRT flyback whine mixed into audio output.
+    #[inline]
+    pub fn set_crt_whine_enabled(&mut self, enabled: bool) {
+        self.bus.set_crt_whine_enabled(enabled);
+    }
+
+    /// Returns whether the optional CRT flyback whine effect is enabled.
+    #[inline]
+    pub const fn crt_whine_enabled(&self) -> bool {
+        self.bus.crt_whine_enabled()
+    }
+
+    /// Returns the current CRTC horizontal scanline period in 10 MHz peripheral cycles
+    /// (for embedders driving [`crate::adpcm::CrtWhineSynth`] on an offloaded audio thread).
+    #[inline]
+    pub fn crtc_scanline_cycles(&self) -> u32 {
+        self.bus.crtc_scanline_cycles()
+    }
+
     /// Drains all generated OPM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {

@@ -4,9 +4,11 @@
 //! are exact integer sub-multiples (`16, 12, 8, 6, 4`) of OPM's `62,500 Hz` sample rate (`160`
 //! 10 MHz cycles/sample), so ADPCM mixes cleanly into the same `62,500 Hz` stereo stream.
 
+use std::f32::consts::TAU;
+
 use msx68k_cpu::BusFault;
 
-use crate::opm::{OpmSynthMode, CYCLES_PER_SAMPLE_10MHZ};
+use crate::opm::{OpmSynthMode, CYCLES_PER_SAMPLE_10MHZ, OPM_SAMPLE_RATE};
 
 const STEP_SIZE_TABLE: [i32; 49] = [
     16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
@@ -80,6 +82,121 @@ impl AdpcmLpf {
         self.z1 = Self::B1 * x - Self::A1 * y + self.z2;
         self.z2 = Self::B2 * x - Self::A2 * y;
         y.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+}
+
+/// Optional CRT flyback horizontal-deflection whine synthesizer.
+///
+/// Reproduces the ~15.98 kHz high-pitched whine heard from 15 kHz CRT monitors while staying
+/// silent in 31.5 kHz / 24.8 kHz modes (above the human hearing threshold and Nyquist limit).
+/// Can run either inline inside `X68kBus::take_audio_samples()` at 62,500 Hz or on a host audio
+/// worker thread at any host output sample rate (e.g. 48,000 Hz) in `Offload` mode.
+#[derive(Debug, Clone, Copy)]
+pub struct CrtWhineSynth {
+    sample_rate_hz: f32,
+    phase_h: f32,
+    phase_v: f32,
+    env: f32,
+}
+
+impl Default for CrtWhineSynth {
+    fn default() -> Self {
+        Self::new(OPM_SAMPLE_RATE)
+    }
+}
+
+impl CrtWhineSynth {
+    /// Peak amplitude in `i16` units (~-38 dB full scale) so the whine is subtle and nostalgic.
+    pub const TARGET_AMP: f32 = 420.0;
+    /// Maximum horizontal frequency (Hz) synthesized before muting to avoid Nyquist aliasing.
+    pub const MAX_AUDIBLE_HZ: f32 = 20_000.0;
+
+    /// Creates a new CRT whine synthesizer targeting `sample_rate_hz` (e.g. `62_500` or `48_000`).
+    pub const fn new(sample_rate_hz: u32) -> Self {
+        Self {
+            sample_rate_hz: sample_rate_hz as f32,
+            phase_h: 0.0,
+            phase_v: 0.0,
+            env: 0.0,
+        }
+    }
+
+    /// Resets oscillator phases and fade envelope.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.phase_h = 0.0;
+        self.phase_v = 0.0;
+        self.env = 0.0;
+    }
+
+    #[inline]
+    fn step_params(&mut self, enabled: bool, scanline_cycles_10mhz: u32) -> Option<(f32, f32, f32)> {
+        let h_freq_hz = if scanline_cycles_10mhz > 0 {
+            10_000_000.0 / (scanline_cycles_10mhz as f32)
+        } else {
+            0.0
+        };
+        let nyquist_cap = (self.sample_rate_hz * 0.45).min(Self::MAX_AUDIBLE_HZ);
+        let audible = enabled && h_freq_hz >= 4_000.0 && h_freq_hz <= nyquist_cap;
+        let target = if audible { Self::TARGET_AMP } else { 0.0 };
+
+        if target == 0.0 && self.env < 0.5 {
+            self.env = 0.0;
+            return None;
+        }
+        let inc_h = TAU * h_freq_hz.min(nyquist_cap) / self.sample_rate_hz;
+        let inc_v = TAU * 60.0 / self.sample_rate_hz;
+        Some((target, inc_h, inc_v))
+    }
+
+    #[inline]
+    fn next_sample(&mut self, target: f32, inc_h: f32, inc_v: f32) -> i32 {
+        self.env += (target - self.env) * 0.002;
+        let am = 1.0 + 0.06 * self.phase_v.sin();
+        let s = (self.phase_h.sin() * self.env * am).round() as i32;
+        self.phase_h += inc_h;
+        if self.phase_h >= TAU {
+            self.phase_h -= TAU;
+        }
+        self.phase_v += inc_v;
+        if self.phase_v >= TAU {
+            self.phase_v -= TAU;
+        }
+        s
+    }
+
+    /// Mixes CRT flyback whine into `(left, right)` stereo PCM pairs (e.g. 62.5 kHz inline output).
+    pub fn mix_into_stereo_pairs(
+        &mut self,
+        enabled: bool,
+        scanline_cycles_10mhz: u32,
+        out: &mut [(i16, i16)],
+    ) {
+        let Some((target, inc_h, inc_v)) = self.step_params(enabled, scanline_cycles_10mhz) else {
+            return;
+        };
+        for dst in out {
+            let s = self.next_sample(target, inc_h, inc_v);
+            dst.0 = (dst.0 as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            dst.1 = (dst.1 as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
+    }
+
+    /// Mixes CRT flyback whine into interleaved `[L, R, L, R, ...]` stereo PCM samples.
+    pub fn mix_into_interleaved(
+        &mut self,
+        enabled: bool,
+        scanline_cycles_10mhz: u32,
+        out: &mut [i16],
+    ) {
+        let Some((target, inc_h, inc_v)) = self.step_params(enabled, scanline_cycles_10mhz) else {
+            return;
+        };
+        for frame in out.chunks_exact_mut(2) {
+            let s = self.next_sample(target, inc_h, inc_v);
+            frame[0] = (frame[0] as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            frame[1] = (frame[1] as i32 + s).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
     }
 }
 

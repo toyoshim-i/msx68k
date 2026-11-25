@@ -146,6 +146,9 @@ pub struct X68kBus {
     pub opm: Opm,
     /// MSM6258V ADPCM Voice Synthesizer (`$E92000`–`$E93FFF`).
     pub adpcm: crate::adpcm::Adpcm,
+    /// Optional 15 kHz CRT horizontal-deflection flyback whine synthesizer (off by default).
+    crt_whine_enabled: bool,
+    crt_whine: crate::adpcm::CrtWhineSynth,
     /// uPD72065 Floppy Disk Controller & 4-Drive FDD (`$E94000`–`$E95FFF`).
     pub fdc: Fdc,
     /// Z8530 Serial Communications Controller (`$E98000`–`$E99FFF`).
@@ -266,6 +269,8 @@ impl X68kBus {
             sysport: SystemPort::new(),
             opm: Opm::new(),
             adpcm: crate::adpcm::Adpcm::new(),
+            crt_whine_enabled: false,
+            crt_whine: crate::adpcm::CrtWhineSynth::default(),
             fdc: Fdc::new(),
             scc: Scc::new(),
             ppi: Ppi::new(),
@@ -713,12 +718,35 @@ impl X68kBus {
         self.adpcm.lpf_enabled()
     }
 
+    /// Enables or disables the optional ~15.98 kHz CRT flyback whine mixed into inline audio.
+    #[inline]
+    pub fn set_crt_whine_enabled(&mut self, enabled: bool) {
+        self.crt_whine_enabled = enabled;
+    }
+
+    /// Returns whether the optional CRT flyback whine effect is enabled.
+    #[inline]
+    pub const fn crt_whine_enabled(&self) -> bool {
+        self.crt_whine_enabled
+    }
+
+    /// Returns the current CRTC horizontal scanline period in 10 MHz peripheral cycles.
+    #[inline]
+    pub fn crtc_scanline_cycles(&self) -> u32 {
+        self.crtc.scanline_cycles()
+    }
+
     /// Drains all generated OPM + ADPCM stereo PCM samples (at 62,500 Hz) into `out`.
     #[inline]
     pub fn take_audio_samples(&mut self, out: &mut Vec<(i16, i16)>) {
         let start = out.len();
         self.opm.take_samples(out);
         self.adpcm.mix_into(&mut out[start..]);
+        self.crt_whine.mix_into_stereo_pairs(
+            self.crt_whine_enabled,
+            self.crtc.scanline_cycles(),
+            &mut out[start..],
+        );
     }
 
     /// Drains timestamped OPM register write events and returns the current 62,500 Hz sample clock.
