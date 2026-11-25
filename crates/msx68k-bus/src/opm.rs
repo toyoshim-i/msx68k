@@ -643,6 +643,7 @@ pub struct Opm {
     eg_counter: u32,
     lfo_counter: u32,
     lfo_phase: u8,
+    lfo_noise_val: u8,
     lfo_pm: i32,
     prev_lfo_pm: i32,
     lfo_am: u16,
@@ -679,12 +680,13 @@ impl Opm {
             eg_counter: 0,
             lfo_counter: 0,
             lfo_phase: 0,
+            lfo_noise_val: 0,
             lfo_pm: 0,
             prev_lfo_pm: 0,
             lfo_am: 0,
             pmd: 0,
             amd: 0,
-            noise_lfsr: 1,
+            noise_lfsr: 0x1_54A3,
             noise_counter: 0,
             channels: [
                 Channel::new(),
@@ -769,6 +771,7 @@ impl Opm {
             }
         }
         if self.active_mask == 0 {
+            self.advance_idle_counters(1);
             return (0, 0);
         }
         self.step_sample()
@@ -863,6 +866,7 @@ impl Opm {
 
         self.sample_clock += sample_count as u64;
         if self.active_mask == 0 {
+            self.advance_idle_counters(sample_count as u64);
             self.samples.resize(self.samples.len() + sample_count as usize, (0, 0));
             return;
         }
@@ -873,6 +877,7 @@ impl Opm {
             if self.active_mask == 0 {
                 let remaining = (sample_count as usize) - 1 - i;
                 if remaining > 0 {
+                    self.advance_idle_counters(remaining as u64);
                     self.samples.resize(self.samples.len() + remaining, (0, 0));
                 }
                 break;
@@ -922,38 +927,42 @@ impl Opm {
         if lfo_pm < 0 { -mag } else { mag }
     }
 
-    fn step_lfo_and_noise(&mut self) {
-        // 17-bit LFSR noise (taps bit 0 ^ bit 3), clocked at 125 kHz (2x per 62.5 kHz sample)
-        let nfrq = (self.regs[0x0F] & 0x1F) as u32;
-        let noise_period = (32 - nfrq).max(1);
-        for _ in 0..2 {
-            self.noise_counter += 1;
-            if self.noise_counter >= noise_period {
-                self.noise_counter = 0;
-                let bit = ((self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1) << 16;
-                self.noise_lfsr = (self.noise_lfsr >> 1) | bit;
-            }
-        }
+    #[inline]
+    fn advance_idle_counters(&mut self, samples: u64) {
+        let total_eg = (self.eg_div as u64) + samples;
+        self.eg_counter = self.eg_counter.wrapping_add((total_eg / 3) as u32);
+        self.eg_div = (total_eg % 3) as u8;
 
-        // LFO
         if (self.regs[0x01] & 0x02) != 0 {
             self.lfo_phase = 0;
             self.lfo_counter = 0;
+            self.lfo_noise_val = 0;
             self.lfo_pm = 0;
             self.lfo_am = 0;
+            self.prev_lfo_pm = 0;
             return;
-        } else {
-            let lfrq = self.regs[0x18];
-            let shift = (lfrq >> 4) as u32;
-            let delta = (16 | (lfrq & 0x0F)) as u32;
-            self.lfo_counter += delta << shift;
-            if self.lfo_counter >= 0x40_0000 {
-                let steps = self.lfo_counter >> 22;
-                self.lfo_counter &= 0x3F_FFFF;
-                self.lfo_phase = self.lfo_phase.wrapping_add(steps as u8);
-            }
         }
 
+        let lfrq = self.regs[0x18];
+        let shift = (lfrq >> 4) as u32;
+        let delta = (16 | (lfrq & 0x0F)) as u64;
+        let total_lfo = (self.lfo_counter as u64) + (delta << shift) * samples;
+        let steps = total_lfo >> 22;
+        self.lfo_counter = (total_lfo & 0x3F_FFFF) as u32;
+        if steps > 0 {
+            self.lfo_phase = self.lfo_phase.wrapping_add(steps as u8);
+            for _ in 0..steps.min(64) {
+                let bit = ((self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1) << 16;
+                self.noise_lfsr = (self.noise_lfsr >> 1) | bit;
+            }
+            self.lfo_noise_val = (self.noise_lfsr & 0xFF) as u8;
+            self.update_lfo_outputs();
+            self.prev_lfo_pm = self.lfo_pm;
+        }
+    }
+
+    #[inline]
+    fn update_lfo_outputs(&mut self) {
         let wave = self.regs[0x1B] & 0x03;
         let (pm_wave, am_wave): (i32, u32) = match wave {
             0 => {
@@ -984,14 +993,58 @@ impl Opm {
                 (pm, am)
             }
             _ => {
-                // Noise
-                let n = (self.noise_lfsr & 0xFF) as u32;
-                (((n as i8) as i32), n)
+                // Noise (Sample & Hold): updated on LFO clock ticks, held between ticks.
+                let n = self.lfo_noise_val;
+                let pm = if (n & 0x80) == 0 {
+                    (n & 0x7F) as i32
+                } else {
+                    -((n & 0x7F) as i32)
+                };
+                let am = (n ^ 0xFF) as u32;
+                (pm, am)
             }
         };
 
         self.lfo_pm = (pm_wave * self.pmd) >> 7;
         self.lfo_am = ((am_wave * (self.amd as u32)) >> 5) as u16;
+    }
+
+    fn step_lfo_and_noise(&mut self) {
+        // 17-bit LFSR noise (taps bit 0 ^ bit 3), clocked at 125 kHz (2x per 62.5 kHz sample)
+        let nfrq = (self.regs[0x0F] & 0x1F) as u32;
+        let noise_period = (32 - nfrq).max(1);
+        for _ in 0..2 {
+            self.noise_counter += 1;
+            if self.noise_counter >= noise_period {
+                self.noise_counter = 0;
+                let bit = ((self.noise_lfsr ^ (self.noise_lfsr >> 3)) & 1) << 16;
+                self.noise_lfsr = (self.noise_lfsr >> 1) | bit;
+            }
+        }
+
+        // LFO
+        if (self.regs[0x01] & 0x02) != 0 {
+            self.lfo_phase = 0;
+            self.lfo_counter = 0;
+            self.lfo_noise_val = 0;
+            self.lfo_pm = 0;
+            self.lfo_am = 0;
+            return;
+        } else {
+            let lfrq = self.regs[0x18];
+            let shift = (lfrq >> 4) as u32;
+            let delta = (16 | (lfrq & 0x0F)) as u32;
+            self.lfo_counter += delta << shift;
+            if self.lfo_counter >= 0x40_0000 {
+                let steps = self.lfo_counter >> 22;
+                self.lfo_counter &= 0x3F_FFFF;
+                self.lfo_phase = self.lfo_phase.wrapping_add(steps as u8);
+                // Sample & hold noise LFSR only on LFO clock ticks (matches YM2151 wave 3).
+                self.lfo_noise_val = (self.noise_lfsr & 0xFF) as u8;
+            }
+        }
+
+        self.update_lfo_outputs();
     }
 
     fn step_sample(&mut self) -> (i16, i16) {
@@ -1100,6 +1153,9 @@ impl Opm {
                 if (val & 0x02) != 0 {
                     self.lfo_phase = 0;
                     self.lfo_counter = 0;
+                    self.lfo_noise_val = 0;
+                    self.lfo_pm = 0;
+                    self.lfo_am = 0;
                 }
             }
             0x08 => {
@@ -1598,5 +1654,66 @@ mod tests {
         write_reg(&mut nopm, 0x08, 0x47);
         let peak = (0..64).map(|_| nopm.next_sample().0.abs()).max().unwrap();
         assert!((2040..=2046).contains(&peak), "noise peak={peak}");
+
+        // LFO wave 3 (Noise) must sample-and-hold on LFO clock ticks, not change every 62.5 kHz sample.
+        let mut lopm = Opm::new();
+        lopm.set_audio_enabled(true);
+        write_reg(&mut lopm, 0x01, 0x02);
+        write_reg(&mut lopm, 0x18, 0xC6); // ~46.5 samples per LFO tick (used by Cho Ren Sha 68k)
+        write_reg(&mut lopm, 0x19, 0xFF); // PMD=127
+        write_reg(&mut lopm, 0x19, 127);  // AMD=127
+        write_reg(&mut lopm, 0x1B, 0x03); // Noise LFO
+        write_reg(&mut lopm, 0x01, 0x00);
+        lopm.step_lfo_and_noise();
+        let initial_pm = lopm.lfo_pm;
+        let initial_am = lopm.lfo_am;
+        // For the next 30 samples (< 46.5), noise LFO output must stay held constant.
+        for _ in 0..30 {
+            lopm.step_lfo_and_noise();
+            assert_eq!(lopm.lfo_pm, initial_pm);
+            assert_eq!(lopm.lfo_am, initial_am);
+        }
+        // After crossing the LFO tick (~47 samples), noise LFO updates.
+        let mut changed = false;
+        for _ in 0..100 {
+            lopm.step_lfo_and_noise();
+            if lopm.lfo_pm != initial_pm || lopm.lfo_am != initial_am {
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "wave 3 noise LFO should update on LFO clock ticks");
+    }
+
+    #[test]
+    fn idle_silence_advances_free_running_lfo_and_eg_counters() {
+        let mut opm = Opm::new();
+        opm.set_audio_enabled(true);
+        write_reg(&mut opm, 0x18, 0xF0); // 1 LFO step every 8 samples
+        write_reg(&mut opm, 0x19, 0x80 | 127);
+        write_reg(&mut opm, 0x1B, 0x02); // Triangle
+        assert_eq!(opm.active_mask, 0);
+
+        // Advance 256 samples while completely silent -> LFO should advance 32 steps (256 / 8).
+        opm.advance(160 * 256);
+        assert_eq!(opm.lfo_phase, 32);
+        assert_eq!(opm.eg_counter, 256 / 3);
+        assert_eq!(opm.eg_div, (256 % 3) as u8);
+        assert!(opm.lfo_pm > 0, "lfo_pm should be updated on idle catch-up");
+
+        // Verify per-sample next_sample() matches bulk advance() identically.
+        let mut single = Opm::new();
+        single.set_audio_enabled(true);
+        write_reg(&mut single, 0x18, 0xF0);
+        write_reg(&mut single, 0x19, 0x80 | 127);
+        write_reg(&mut single, 0x1B, 0x02);
+        for _ in 0..256 {
+            assert_eq!(single.next_sample(), (0, 0));
+        }
+        assert_eq!(single.lfo_phase, opm.lfo_phase);
+        assert_eq!(single.lfo_counter, opm.lfo_counter);
+        assert_eq!(single.lfo_pm, opm.lfo_pm);
+        assert_eq!(single.eg_counter, opm.eg_counter);
+        assert_eq!(single.eg_div, opm.eg_div);
     }
 }
