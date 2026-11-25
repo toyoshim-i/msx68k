@@ -21,7 +21,12 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
 3. Implemented GPU-evaluated BG/PCG and sprite composition via active-span
    coalescing (`CynthiaFrame`): 8-dot BG0/BG1, 16-dot BG0, 128 sprite
    attributes, a 32-sprite scanline limit, and 128-byte PCG/map block versioning.
-4. Special priority, half transparency, interlace and precise boundary timing.
+4. Implemented VICON `R2` special priority (`EXON`, `HP=0`) and 50% half transparency
+   (`HP=1`, `GG`/`GT`/`BP`), CRTC dot-clock horizontal timing (`R00`/`R01`/`R20`/`HRL`),
+   mixed-resolution 256/512 CYNTHIA scaling, and interlaced scanout (`R20` `VRES=2`) with
+   alternating even/odd field 75% phosphor-persistence dimming across CPU, Compute, and GLES 2.0.
+   Remaining work: precise mode-specific fetch boundary timing and (low-priority) mid-frame VRAM
+   write history.
 
 ## Physical GVRAM and CPU views
 
@@ -72,8 +77,8 @@ display start. Writes after address fetch cannot move that row, while palette
 and control writes during the back porch can still affect it. CPU register
 readback remains immediate. Repeated writes before a sample use the last value.
 
-Horizontal display start uses `(R2 + 1) / (R0 + 1)` of the approximate
-317/625-cycle line period. Peripheral advancement stops at this edge as well as
+Horizontal display start uses `(R2 + 1) / (R0 + 1)` of the dot-clock-derived
+line period (`R00`, `R20`, and System Port `HRL`). Peripheral advancement stops at this edge as well as
 sync and line edges. These are separate sampling stages, not a claim of exact
 hardware fetch latency. CPU writes retain instruction-level timing; bus-cycle
 write timestamps and per-pixel changes are not represented.
@@ -113,8 +118,8 @@ Tile entries select a pattern, a 16-color palette block, and independent flips.
 PCG stores packed 4-bit pixels; 16-dot patterns contain four 8-dot quadrants.
 Scroll wraps in the 512-dot or 1024-dot virtual map. BG start registers align
 its coordinates with the CRTC display origin. The visible BG line is limited to
-512 pixels. Mixed-resolution scaling, interlace and reserved modes are not yet
-validated.
+512 pixels in CYNTHIA coordinate space. Mixed-resolution 256/512 scaling and
+interlaced field alternation are implemented; reserved modes remain unvalidated.
 
 At horizontal display start, scanout captures the next physical raster's BG
 control, scroll, origin, and 128-byte PCG/tilemap block references into an
@@ -220,14 +225,11 @@ prompt, and save their flags in the setup's optional `V68G` resource. See
 ## Next implementation steps
 
 1. Validate address-fetch and display-sampling positions for each screen mode,
-   including doubled lines and writes on either side of each edge. Keep the
-   current timing approximation explicit until measured timing is available.
-2. Validate mixed-resolution coordinate scaling and interlace, including sprite
-   selection at viewport edges and pipeline behavior during geometry changes.
-3. Add text/graphics VRAM write history where rendering from final memory would
-   lose already fetched data. Keep CPU bus waits independent of pipeline latency.
-4. Extend final composition with special priority and half transparency, then
-   complete interlace and mode-specific boundary behavior.
+   including doubled lines and writes on either side of each edge.
+2. Validate pipeline behavior during mid-frame geometry changes and reserved
+   resolution combinations.
+3. (Low priority) Add text/graphics VRAM write history if a workload depends on
+   mid-frame VRAM overwrites or mid-frame Graphic Fast Clear timing.
 
 ## Fetch timing refinement
 
@@ -265,8 +267,8 @@ vertical blank and the next frame. These are regression tests of the current
 approximation, not evidence of exact hardware latency.
 
 Validate writes immediately before and after each hardware-backed fetch point,
-checking which output row changes. Text/graphics VRAM write history, precise
-interlace and special effects remain outside the current scope.
+checking which output row changes. Text/graphics VRAM write history and exact
+per-mode fetch-cycle latencies remain outside the current scope.
 
 ```sh
 cargo test -p msx68k-bus --test gvram --test vram_pages --test bg --test sprite --test raster -- --test-threads=1

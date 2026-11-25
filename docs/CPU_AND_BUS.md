@@ -223,7 +223,7 @@ Approximations:
 - The manual's register example times `SUBA.L` with the `SUBA.W` row; the table values are used.
 - Burst fills (`IBE`, `DBE`) are not modelled.
 - DMA runs at instruction boundaries. Each operand uses the mapped bus with independent MFC/DFC/BFC permissions; RAM, VRAM, ROM, and MMIO retain their usual side effects and bus errors. CPU execution pauses for charged DMA time, while peripherals keep advancing. The DMA clock is 10 MHz (68000) or 12.5 MHz (68030), independent of CPU speed. The timing coefficients still need validation against real hardware.
-- Maximum-speed auto requests hold the CPU through completion; limited auto requests leave GCR-controlled gaps; external requests wait for the device. FDC channel 0 supplies requests as bytes are consumed. ADPCM/SASI request sources are still unconnected. No CPU pipeline or cycle-by-cycle bus arbitration is modeled.
+- Maximum-speed auto requests hold the CPU through completion; limited auto requests leave GCR-controlled gaps; external requests wait for the device. FDC channel 0 and ADPCM channel 3 supply requests as bytes are consumed; SASI channel 1 remains unconnected. No CPU pipeline or cycle-by-cycle bus arbitration is modeled.
 - With no scheduled DMA work, the instruction path tests one cached deadline sentinel and continues directly to the existing peripheral advancement. It does not scan channels or update a DMA clock. Halted channels and external channels awaiting requests use this same path.
 - The X68030 wait states and port widths still need validation against real hardware.
 
