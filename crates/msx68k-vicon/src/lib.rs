@@ -1383,11 +1383,6 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
         let want_gr_sub = exon && hp && gg;
         let cynthia_on = (params.r2_display & 0x40 != 0) && gr_rank != 3;
         let dim_row = interlace.is_some_and(|field| ((y & 1) as u8) != field);
-        let cynthia_h_scale = if cynthia_on {
-            cynthia.row_h_scale(y)
-        } else {
-            0
-        };
         if cynthia_on {
             cynthia.rasterize_row(y, &mut cynthia_row);
         }
@@ -1422,13 +1417,8 @@ pub fn render_bus_frame_cpu(bus: &X68kBus) -> RenderedFrame {
             } else {
                 0
             };
-            let bg_code = if cynthia_on {
-                let cx = msx68k_bus::bg::map_cynthia_x(x, cynthia_h_scale) as usize;
-                if cx < cynthia_row.len() {
-                    cynthia_row[cx]
-                } else {
-                    0
-                }
+            let bg_code = if cynthia_on && (x as usize) < cynthia_row.len() {
+                cynthia_row[x as usize]
             } else {
                 0
             };

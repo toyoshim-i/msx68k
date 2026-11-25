@@ -316,27 +316,16 @@ fn sample_bg_plane(row: vec4<u32>, plane: u32, x: u32, table_base: u32) -> u32 {
     return ((tile >> 4u) & 0xF0u) | nibble;
 }
 
-fn load_tile_span_direct(tile_base: u32, idx: u32) -> vec4<u32> {
-    let s_idx = cynthia_meta[cynthia_meta[4u] + tile_base + idx];
-    let s_off = cynthia_meta[5u] + s_idx * 4u;
-    return vec4<u32>(
-        cynthia_meta[s_off],
-        cynthia_meta[s_off + 1u],
-        cynthia_meta[s_off + 2u],
-        cynthia_meta[s_off + 3u],
-    );
-}
-
 fn sample_cynthia_code(
     x: u32,
     y: u32,
     state: ViconUniforms,
-    tile_base_in: u32,
-    c3_in: u32,
-    c2_in: u32,
-    c1_in: u32,
+    tile_base: u32,
+    c3: u32,
+    c2: u32,
+    c1: u32,
 ) -> u32 {
-    if ((params.reserved.y & 1u) == 0u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) {
+    if ((params.reserved.y & 1u) == 0u || x >= 512u || ((state.r1_priority >> 8u) & 3u) == 3u || (state.r2_display & 64u) == 0u) {
         return 0u;
     }
     let cynthia_h = cynthia_meta[6u];
@@ -355,42 +344,9 @@ fn sample_cynthia_code(
         return 0u;
     }
 
-    let h_scale = (row.y >> 24u) & 3u;
-    var cx = x;
-    if (h_scale == 1u) {
-        cx = x >> 1u;
-    } else if (h_scale == 2u) {
-        cx = x << 1u;
-    }
-    if (cx >= 512u) {
-        return 0u;
-    }
-
-    var tile_base = tile_base_in;
-    var c3 = c3_in;
-    var c2 = c2_in;
-    var c1 = c1_in;
-    let use_wg = h_scale == 0u;
-    if (!use_wg) {
-        let ctx = cx >> 4u;
-        let cty = y >> 4u;
-        if (ctx < 32u && cty < cynthia_meta[7u]) {
-            let meta_off = cynthia_meta[3u] + (cty * 32u + ctx) * 4u;
-            tile_base = cynthia_meta[meta_off];
-            c3 = cynthia_meta[meta_off + 1u];
-            c2 = cynthia_meta[meta_off + 2u];
-            c1 = cynthia_meta[meta_off + 3u];
-        } else {
-            c3 = 0u;
-            c2 = 0u;
-            c1 = 0u;
-        }
-    }
-
     let total = c3 + c2 + c1;
     for (var k = 0u; k < c3; k++) {
-        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
-        let code = sample_span_code(span, cx, y);
+        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
         if (code != 0u) {
             return code;
         }
@@ -399,30 +355,28 @@ fn sample_cynthia_code(
     let bg_valid = (row.x & (1u << 26u)) != 0u;
     let table_base = row.w * cynthia_meta[2u];
     if (bg_valid && (row.x & (1u << 22u)) != 0u) {
-        let code = sample_bg_plane(row, 0u, cx, table_base);
+        let code = sample_bg_plane(row, 0u, x, table_base);
         if (code != 0u) {
             return code;
         }
     }
 
     for (var k = c3; k < c3 + c2; k++) {
-        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
-        let code = sample_span_code(span, cx, y);
+        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
         if (code != 0u) {
             return code;
         }
     }
 
     if (bg_valid && (row.y & (1u << 22u)) != 0u && (row.x & (1u << 23u)) == 0u) {
-        let code = sample_bg_plane(row, 1u, cx, table_base);
+        let code = sample_bg_plane(row, 1u, x, table_base);
         if (code != 0u) {
             return code;
         }
     }
 
     for (var k = c3 + c2; k < total; k++) {
-        let span = select(load_tile_span_direct(tile_base, k), load_tile_span(tile_base, k, total), use_wg);
-        let code = sample_span_code(span, cx, y);
+        let code = sample_span_code(load_tile_span(tile_base, k, total), x, y);
         if (code != 0u) {
             return code;
         }

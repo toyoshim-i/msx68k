@@ -1809,17 +1809,11 @@ impl Gles2Compositor {
             && uniforms.tvram_plane_bytes == TVRAM_PLANE_BYTES as u32);
 
         // Determine if any row requires the raw GRBI16 shader (65536-color byte-split graphics,
-        // VICON R2 EXON special priority / half-transparency, mixed-resolution CYNTHIA scaling,
-        // or interlaced scanout with alternating field dimming).
+        // VICON R2 EXON special priority / half-transparency, or interlaced scanout with
+        // alternating field dimming).
         // When none are active, the zero-overhead fast/text-only pre-baked RGBA8 path applies.
         let interlace_field = crate::raster::interlace_field(bus, &uniforms);
-        let any_row_mixed_cynthia = cynthia_enabled
-            && cynthia
-                .bg_rows
-                .iter()
-                .any(|r| r.is_cynthia_active() && r.h_scale() != 0);
-        let any_row_65536 = any_row_mixed_cynthia
-            || interlace_field.is_some()
+        let any_row_65536 = interlace_field.is_some()
             || if let Some(frame) = completed {
                 frame.lines.iter().any(|l| {
                     let m = l.state.registers.mode & 7;
@@ -3102,9 +3096,7 @@ fn pack_row_state_entry(
             gr_rank,
             tx_rank,
             sp_rank,
-            ((u.r2_display >> 8) & 0x1F) as u8
-                | ((bg_row.h_scale() & 3) << 5)
-                | (u8::from(interlace_dim) << 7),
+            ((u.r2_display >> 8) & 0x1F) as u8 | (u8::from(interlace_dim) << 7),
         ],
     );
     set(

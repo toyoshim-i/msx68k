@@ -949,9 +949,7 @@ void main() {
     float sp_rank = floor(r6.b * 255.0 + 0.5);
     float r6_a = floor(r6.a * 255.0 + 0.5);
     float interlace_dim = step(127.5, r6_a);
-    float r6_low = r6_a - interlace_dim * 128.0;
-    float cyn_h_scale = floor(r6_low / 32.0);
-    float r2_hi = r6_low - cyn_h_scale * 32.0;
+    float r2_hi = r6_a - interlace_dim * 128.0;
     float gt = mod(r2_hi, 2.0);
     float gg = mod(floor(r2_hi * 0.5), 2.0);
     float bp = mod(floor(r2_hi * 0.25), 2.0);
@@ -973,19 +971,11 @@ void main() {
             vec4 te = pal_entry(tx_idx, pal_v);
             tx_grbi = vec2(te.r, te.a);
         }
-        if (u_cynthia_enabled > 0.5 && cynthia_active > 0.5 && mod(floor(r2 / 64.0), 2.0) > 0.5) {
-            float cx = x;
-            if (cyn_h_scale > 0.5 && cyn_h_scale < 1.5) {
-                cx = floor(x * 0.5);
-            } else if (cyn_h_scale >= 1.5) {
-                cx = x * 2.0;
-            }
-            if (cx < 512.0) {
-                float code = floor(texture2D(u_cynthia, vec2((cx + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
-                if (code > 0.5) {
-                    vec4 ce = pal_entry(code, pal_v);
-                    bg_grbi = vec2(ce.r, ce.a);
-                }
+        if (u_cynthia_enabled > 0.5 && cynthia_active > 0.5 && x < 512.0 && mod(floor(r2 / 64.0), 2.0) > 0.5) {
+            float code = floor(texture2D(u_cynthia, vec2((x + 0.5) / 512.0, (y + 0.5) * u_cynthia_inv_h)).r * 255.0 + 0.5);
+            if (code > 0.5) {
+                vec4 ce = pal_entry(code, pal_v);
+                bg_grbi = vec2(ce.r, ce.a);
             }
         }
     }

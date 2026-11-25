@@ -112,63 +112,14 @@ impl BgLine {
     }
 }
 
-/// CYNTHIA-to-CRTC horizontal resolution scale code (`BgRowState::h_scale`):
-/// - `0`: 1:1 (default)
-/// - `1`: 2x horizontal stretch (CRTC 512-dot + CYNTHIA 256-dot, `cx = x >> 1`)
-/// - `2`: 0.5x horizontal shrink (CRTC 256-dot + CYNTHIA 512-dot, `cx = x << 1`)
-pub const CYNTHIA_HSCALE_1_1: u8 = 0;
-pub const CYNTHIA_HSCALE_1_2: u8 = 1;
-pub const CYNTHIA_HSCALE_2_1: u8 = 2;
-
-/// Computes the CYNTHIA horizontal scale code from CRTC `R20` and CYNTHIA `$EB0810`.
-#[inline]
-pub fn h_scale(crtc: &Crtc, ram: &[u8]) -> u8 {
-    let crtc_hres = crtc.regs[20] & 3;
-    let sp_hres = word(ram, 0x810) & 3;
-    match (crtc_hres, sp_hres) {
-        (1, 0) => CYNTHIA_HSCALE_1_2,
-        (0, 1) => CYNTHIA_HSCALE_2_1,
-        _ => CYNTHIA_HSCALE_1_1,
-    }
-}
-
-/// Maps a CRTC screen X coordinate into CYNTHIA coordinate space.
-#[inline]
-pub const fn map_cynthia_x(x: u32, h_scale: u8) -> u32 {
-    match h_scale {
-        CYNTHIA_HSCALE_1_2 => x >> 1,
-        CYNTHIA_HSCALE_2_1 => x << 1,
-        _ => x,
-    }
-}
-
 /// Common sprite/BG coordinate origin and supported resolution gate.
 pub(crate) fn origin(crtc: &Crtc, ram: &[u8], y: u32) -> Option<(i32, i32)> {
-    let sp_res = word(ram, 0x810);
-    if sp_res & 0x0a != 0 {
+    if word(ram, 0x810) & 0x0a != 0 {
         return None;
     }
-    let scale = h_scale(crtc, ram);
-    let crtc_h_start = ((crtc.regs[2] & 0xfff) as i32 + 4) * 8;
-    let crtc_h_start_sp = match scale {
-        CYNTHIA_HSCALE_1_2 => crtc_h_start >> 1,
-        CYNTHIA_HSCALE_2_1 => crtc_h_start << 1,
-        _ => crtc_h_start,
-    };
-    let x = (word(ram, 0x80c) & 63) as i32 * 8 - crtc_h_start_sp;
-
-    let raw_y = y as i64 + (word(ram, 0x80e) & 255) as i64 - (crtc.regs[6] & 0xfff) as i64;
-    let crtc_hres = crtc.regs[20] & 3;
-    let crtc_vres = (crtc.regs[20] >> 2) & 3;
-    let sp_vres = (sp_res >> 2) & 3;
-    let sy = if crtc_hres <= 1 && crtc_vres >= 1 && sp_vres == 0 {
-        raw_y >> 1
-    } else if crtc_hres <= 1 && crtc_vres == 0 && sp_vres == 1 {
-        raw_y << 1
-    } else {
-        raw_y
-    };
-    (0..1024).contains(&sy).then_some((x, sy as i32))
+    let x = ((word(ram, 0x80c) & 63) as i32 - (crtc.regs[2] & 0xfff) as i32 - 4) * 8;
+    let y = y as i64 + (word(ram, 0x80e) & 255) as i64 - (crtc.regs[6] & 0xfff) as i64;
+    (0..1024).contains(&y).then_some((x, y as i32))
 }
 
 pub(crate) fn pattern_pixel(ram: &[u8], pattern: usize, x: usize, y: usize, large: bool) -> u8 {

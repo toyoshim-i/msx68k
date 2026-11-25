@@ -23,8 +23,8 @@ and threading, and [TESTING](TESTING.md) for the test workflow.
    attributes, a 32-sprite scanline limit, and 128-byte PCG/map block versioning.
 4. Implemented VICON `R2` special priority (`EXON`, `HP=0`) and 50% half transparency
    (`HP=1`, `GG`/`GT`/`BP`), CRTC dot-clock horizontal timing (`R00`/`R01`/`R20`/`HRL`),
-   mixed-resolution 256/512 CYNTHIA scaling, and interlaced scanout (`R20` `VRES=2`) with
-   alternating even/odd field 75% phosphor-persistence dimming across CPU, Compute, and GLES 2.0.
+   and interlaced scanout (`R20` `VRES=2`) with alternating even/odd field 75%
+   phosphor-persistence dimming across CPU, Compute, and GLES 2.0.
    Remaining work: precise mode-specific fetch boundary timing and (low-priority) mid-frame VRAM
    write history.
 
@@ -118,8 +118,8 @@ Tile entries select a pattern, a 16-color palette block, and independent flips.
 PCG stores packed 4-bit pixels; 16-dot patterns contain four 8-dot quadrants.
 Scroll wraps in the 512-dot or 1024-dot virtual map. BG start registers align
 its coordinates with the CRTC display origin. The visible BG line is limited to
-512 pixels in CYNTHIA coordinate space. Mixed-resolution 256/512 scaling and
-interlaced field alternation are implemented; reserved modes remain unvalidated.
+512 pixels in CYNTHIA coordinate space. Interlaced field alternation is
+implemented; reserved modes remain unvalidated.
 
 At horizontal display start, scanout captures the next physical raster's BG
 control, scroll, origin, and 128-byte PCG/tilemap block references into an

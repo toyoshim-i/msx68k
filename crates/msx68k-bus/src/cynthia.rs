@@ -4,7 +4,7 @@
 //! coalesced 16-pixel-wide sprite spans (`16×h`) using incremental 128-bit scanline sets.
 
 use crate::{
-    bg::{h_scale, map_cynthia_x, origin, word, BG_WIDTH},
+    bg::{origin, word, BG_WIDTH},
     sprite::{SpriteOptions, SPRITES_PER_LINE},
     Crtc,
 };
@@ -136,7 +136,7 @@ pub struct BgRowState {
     /// `bg0_sx (0..10) | bg0_sy (10..20) | bg0_map_sel (20) | bg0_bank (21) | bg0_en (22)
     ///  | large_tiles (23) | master_en (24) | full_pattern_mem (25) | bg_valid (26) | row_valid (27)`
     pub word0: u32,
-    /// `bg1_sx (0..10) | bg1_sy (10..20) | bg1_map_sel (20) | bg1_bank (21) | bg1_en (22) | vicon_sp_en (23) | h_scale (24..26)`
+    /// `bg1_sx (0..10) | bg1_sy (10..20) | bg1_map_sel (20) | bg1_bank (21) | bg1_en (22) | vicon_sp_en (23)`
     pub word1: u32,
     /// `(origin_x as i16 as u16 as u32) | ((source_y as u16 as u32) << 16)`
     pub word2: u32,
@@ -163,12 +163,6 @@ impl BgRowState {
     #[inline]
     pub const fn vicon_sp_en(self) -> bool {
         (self.word1 >> 23) & 1 != 0
-    }
-
-    /// Horizontal resolution scale code (`0` = 1:1, `1` = 2x stretch, `2` = 0.5x shrink).
-    #[inline]
-    pub const fn h_scale(self) -> u8 {
-        ((self.word1 >> 24) & 3) as u8
     }
 
     #[inline]
@@ -373,14 +367,6 @@ impl CynthiaFrame {
 
     /// Rasterizes an entire `512`-pixel CYNTHIA scanline into `out` (`0` = transparent).
     ///
-    /// Returns the horizontal scale code (`0` = 1:1, `1` = 2x, `2` = 0.5x) for output row `y`.
-    #[inline]
-    pub fn row_h_scale(&self, y: u32) -> u8 {
-        self.bg_rows
-            .get(y as usize)
-            .map_or(0, |row| row.h_scale())
-    }
-
     /// Bit-identical to calling [`Self::sample_code`] for `x in 0..512`, in `O(spans + 512)`.
     pub fn rasterize_row(&self, y: u32, out: &mut [u8; BG_WIDTH]) {
         out.fill(0);
@@ -1062,7 +1048,6 @@ impl CynthiaBuilder {
             let bg1_map_sel = ((control >> 4) & 1) as u32;
             let bg1_bank = ((control >> 5) & 1) as u32;
 
-            let scale = h_scale(crtc, ram) as u32;
             row.word0 = bg0_sx
                 | (bg0_sy << 10)
                 | (bg0_map_sel << 20)
@@ -1070,8 +1055,7 @@ impl CynthiaBuilder {
                 | ((large as u32) << 23)
                 | ((full_pattern_memory as u32) << 25)
                 | (1 << 26); // bg_valid
-            row.word1 =
-                bg1_sx | (bg1_sy << 10) | (bg1_map_sel << 20) | (bg1_bank << 21) | (scale << 24);
+            row.word1 = bg1_sx | (bg1_sy << 10) | (bg1_map_sel << 20) | (bg1_bank << 21);
             row.word2 = (origin_x as i16 as u16 as u32) | (((source_y as i16 as u16) as u32) << 16);
             row.word3 = self.current_bg_table_id;
         }
@@ -1099,8 +1083,7 @@ impl CynthiaBuilder {
             self.sprite_ring[1] = None;
             return;
         };
-        let scale = h_scale(crtc, ram);
-        let viewport_w = map_cynthia_x(crtc.active_resolution().0, scale).min(BG_WIDTH as u32) as i32;
+        let viewport_w = crtc.active_resolution().0.min(BG_WIDTH as u32) as i32;
         tracker.sync_dirty(ram, origin_x, viewport_w);
 
         let mut cand = tracker.candidates_for(source_y);
