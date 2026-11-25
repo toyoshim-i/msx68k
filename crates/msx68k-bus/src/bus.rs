@@ -685,9 +685,10 @@ impl X68kBus {
             self.opm.advance(step);
             self.adpcm.advance(step);
             self.midi.advance(step);
-            self.fdc.advance(step, &mut self.ioi);
+            if self.fdc.advance(step, &mut self.ioi) {
+                self.refresh_fdc_dma_request();
+            }
             self.refresh_adpcm_dma_request();
-            self.refresh_fdc_dma_request();
             self.mfp.set_opm_irq(self.opm.irq_active());
             self.mfp.advance(step);
             cycles_10mhz -= step;

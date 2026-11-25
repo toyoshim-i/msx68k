@@ -520,10 +520,25 @@ impl Fdc {
         self.fast_mode
     }
 
-    /// Advances FDC spindle rotation, in-flight seek timers, and byte-transfer DRQ pacing.
-    pub fn advance(&mut self, cycles_10mhz: u32, ioi: &mut IoInterruptController) {
-        self.rotation_cycles = self.rotation_cycles.wrapping_add(cycles_10mhz);
+    /// Returns `true` when the FDC has an active transfer or in-flight seek timer.
+    #[inline]
+    pub fn has_pending_work(&self) -> bool {
+        self.transfer.is_some() || self.drives.iter().any(|d| d.seek_timer.is_some())
+    }
 
+    /// Advances FDC spindle rotation, in-flight seek timers, and byte-transfer DRQ pacing.
+    /// Returns `true` if DMA request state may have changed.
+    #[inline]
+    pub fn advance(&mut self, cycles_10mhz: u32, ioi: &mut IoInterruptController) -> bool {
+        self.rotation_cycles = self.rotation_cycles.wrapping_add(cycles_10mhz);
+        if !self.has_pending_work() {
+            return false;
+        }
+        self.advance_active(cycles_10mhz, ioi)
+    }
+
+    #[cold]
+    fn advance_active(&mut self, cycles_10mhz: u32, ioi: &mut IoInterruptController) -> bool {
         let mut seek_completed = false;
         for drv in &mut self.drives {
             if let Some((rem, st0, pcn)) = drv.seek_timer {
@@ -541,16 +556,19 @@ impl Fdc {
             self.update_fdc_irq(ioi);
         }
 
+        let mut drq_changed = false;
         if let Some(t) = self.transfer.as_mut() {
             if !t.drq_ready {
                 if self.fast_mode || cycles_10mhz >= t.wait_cycles {
                     t.wait_cycles = 0;
                     t.drq_ready = true;
+                    drq_changed = true;
                 } else {
                     t.wait_cycles -= cycles_10mhz;
                 }
             }
         }
+        drq_changed
     }
 
     pub fn reset(&mut self, ioi: &mut IoInterruptController) {
