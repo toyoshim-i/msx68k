@@ -120,6 +120,7 @@ pub struct Gles2Compositor {
     vfu_u_gr_scroll01: GLint,
     vfu_u_gr_scroll23: GLint,
     vfu_u_y_flip: GLint,
+    vfu_u_exon_flags: GLint,
 
     // Uniform locations: VICON_FAST_RASTER
     vfr_u_tvram: GLint,
@@ -448,6 +449,7 @@ impl Gles2Compositor {
         let vfu_u_gr_scroll01 = uniform_loc(gl, prog_vicon_fast_u, "u_gr_scroll01");
         let vfu_u_gr_scroll23 = uniform_loc(gl, prog_vicon_fast_u, "u_gr_scroll23");
         let vfu_u_y_flip = uniform_loc(gl, prog_vicon_fast_u, "u_y_flip");
+        let vfu_u_exon_flags = uniform_loc(gl, prog_vicon_fast_u, "u_exon_flags");
 
         let vfr_u_tvram = uniform_loc(gl, prog_vicon_fast_r, "u_tvram");
         let vfr_u_gvram = uniform_loc(gl, prog_vicon_fast_r, "u_gvram");
@@ -519,6 +521,7 @@ impl Gles2Compositor {
             vfu_u_gr_scroll01,
             vfu_u_gr_scroll23,
             vfu_u_y_flip,
+            vfu_u_exon_flags,
 
             vfr_u_tvram,
             vfr_u_gvram,
@@ -1808,24 +1811,28 @@ impl Gles2Compositor {
         let is_ext_tvram = !(uniforms.tvram_row_bytes == 128
             && uniforms.tvram_plane_bytes == TVRAM_PLANE_BYTES as u32);
 
-        // Determine if any row requires the raw GRBI16 shader (65536-color byte-split graphics,
-        // VICON R2 EXON special priority / half-transparency, or interlaced scanout with
-        // alternating field dimming).
-        // When none are active, the zero-overhead fast/text-only pre-baked RGBA8 path applies.
+        // Determine if any row requires the raw GRBI16 shader:
+        // - 65536-color byte-split graphics (when graphic planes are enabled), OR
+        // - half-transparency (EXON=1, HP=1) with non-full contrast (< 15), where 6-bit channels
+        //   cannot be recovered losslessly from contrast-scaled pre-baked RGBA8.
+        // Special priority (EXON=1, HP=0), full-contrast half-transparency, and interlace all run
+        // on the fast pre-baked RGBA8 shaders (zero u_lut fetches).
         let interlace_field = crate::raster::interlace_field(bus, &uniforms);
-        let any_row_65536 = interlace_field.is_some()
-            || if let Some(frame) = completed {
-                frame.lines.iter().any(|l| {
-                    let m = l.state.registers.mode & 7;
-                    let d = l.state.registers.display & 127;
-                    ((m == 2 || m == 3) && (d & 0x0F) != 0)
-                        || (l.state.registers.display & 0x1000) != 0
-                })
-            } else {
-                let m = uniforms.r0_mode & 7;
-                let d = uniforms.r2_display & 127;
-                ((m == 2 || m == 3) && (d & 0x0F) != 0) || (uniforms.r2_display & 0x1000) != 0
-            };
+        let any_row_65536 = if let Some(frame) = completed {
+            frame.lines.iter().any(|l| {
+                let m = l.state.registers.mode & 7;
+                let d = l.state.registers.display & 127;
+                let half_dim_contrast = (l.state.registers.display & 0x1800) == 0x1800
+                    && (l.state.registers.contrast & 15) != 15;
+                ((m == 2 || m == 3) && (d & 0x0F) != 0) || half_dim_contrast
+            })
+        } else {
+            let m = uniforms.r0_mode & 7;
+            let d = uniforms.r2_display & 127;
+            let half_dim_contrast =
+                (uniforms.r2_display & 0x1800) == 0x1800 && (uniforms.contrast & 15) != 15;
+            ((m == 2 || m == 3) && (d & 0x0F) != 0) || half_dim_contrast
+        };
 
         // Pass 1 needs per-row `u_row_state` whenever CYNTHIA is enabled, but Pass 2 can still
         // use the zero-row-fetch uniform fast shader if VICON registers + cynthia_active are constant!
@@ -1931,12 +1938,13 @@ impl Gles2Compositor {
                             uniform_baked_pal_id = baked_id;
                         }
                         let bg_row = cynthia.bg_rows.get(y).copied().unwrap_or_default();
+                        let dim_row = interlace_field.is_some_and(|f| ((y & 1) as u8) != f);
                         pack_row_state_entry(
                             &mut self.scratch_row_state[y * 64..(y + 1) * 64],
                             &u,
                             baked_id,
                             bg_row,
-                            false,
+                            dim_row,
                         );
                     }
                 } else {
@@ -1967,12 +1975,13 @@ impl Gles2Compositor {
                     self.scratch_row_state.resize(row_count * 64, 0);
                     for y in 0..row_count {
                         let bg_row = cynthia.bg_rows.get(y).copied().unwrap_or_default();
+                        let dim_row = interlace_field.is_some_and(|f| ((y & 1) as u8) != f);
                         pack_row_state_entry(
                             &mut self.scratch_row_state[y * 64..(y + 1) * 64],
                             &uniforms,
                             uniform_baked_pal_id,
                             bg_row,
-                            false,
+                            dim_row,
                         );
                     }
                 }
@@ -2225,7 +2234,8 @@ impl Gles2Compositor {
             && !is_blank_uniform
             && tx_en
             && !cyn_active
-            && !gr_effectively_active;
+            && !gr_effectively_active
+            && (uniform_row.r2_display & 0x1000) == 0;
 
         let pal0_rgba = if !any_row_65536 && uniform_baked_pal_id != u32::MAX {
             let off = uniform_baked_pal_id as usize * 512 * 4;
@@ -2435,6 +2445,10 @@ impl Gles2Compositor {
                     (uniform_row.gr_scroll_y[3] & 511) as f32,
                 );
                 (gl.glUniform2f)(self.vfu_u_y_flip, y_flip.0, y_flip.1);
+                (gl.glUniform1f)(
+                    self.vfu_u_exon_flags,
+                    ((uniform_row.r2_display >> 8) & 0x1F) as f32,
+                );
 
                 (gl.glBindBuffer)(GL_ARRAY_BUFFER, self.vbo_quad);
                 (gl.glEnableVertexAttribArray)(0);
@@ -3032,7 +3046,9 @@ fn push_palette_baked_rgba(out: &mut Vec<u8>, pal: &[u16; 512], contrast: u8) {
             let r8 = (((r6 << 2) | (r6 >> 4)) * c / 15) as u8;
             let g8 = (((g6 << 2) | (g6 >> 4)) * c / 15) as u8;
             let b8 = (((b6 << 2) | (b6 >> 4)) * c / 15) as u8;
-            out.extend_from_slice(&[r8, g8, b8, 255]);
+            // Alpha encodes both opacity (>0) and GRBI I-bit: 128 = opaque I=0, 255 = opaque I=1.
+            let alpha = if i_bit != 0 { 255u8 } else { 128u8 };
+            out.extend_from_slice(&[r8, g8, b8, alpha]);
         }
     }
 }

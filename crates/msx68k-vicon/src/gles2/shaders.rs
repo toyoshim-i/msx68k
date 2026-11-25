@@ -262,6 +262,15 @@ uniform vec2 u_tx_scroll;   // tx_sx, tx_sy
 uniform vec4 u_gr_scroll01; // gs0x, gs0y, gs1x, gs1y
 uniform vec4 u_gr_scroll23; // gs2x, gs2y, gs3x, gs3y
 uniform vec2 u_y_flip;      // (0, 1) normal; (height - 1, -1) y-flipped
+uniform float u_exon_flags; // (r2_display >> 8) & 0x1F: bit0=GT, bit1=GG, bit2=BP, bit3=HP, bit4=EXON
+
+vec3 blend_rgba6(vec3 fg_rgb, vec3 bg_rgb) {
+    vec3 f6 = floor(floor(fg_rgb * 255.0 + 0.5) * 0.25);
+    vec3 b6 = floor(floor(bg_rgb * 255.0 + 0.5) * 0.25);
+    vec3 m6 = floor((f6 + b6) * 0.5);
+    vec3 m8 = m6 * 4.0 + floor(m6 * 0.0625);
+    return m8 / 255.0;
+}
 
 float bit_scale(float bit_pos) {
     float s = 1.0;
@@ -405,6 +414,61 @@ vec4 sample_graphics(float x, float y) {
     return vec4(0.0);
 }
 
+vec4 sample_graphics_pair(float x, float y, float want_sub, out vec4 gr_sub) {
+    gr_sub = vec4(0.0);
+    if (u_r0_mode >= 3.5) {
+        return sample_graphics(x, y);
+    }
+    if (u_gr_en.x + u_gr_en.y + u_gr_en.z + u_gr_en.w < 0.5) {
+        return vec4(0.0);
+    }
+    if (u_r0_mode < 0.5) {
+        float idx = 0.0;
+        float sub_idx = 0.0;
+        if (u_gr_en.x > 0.5) {
+            float n = gv_nibble(u_slots.x, x, y, 1.0);
+            if (n > 0.5) { idx = n; }
+        }
+        if (u_gr_en.y > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(u_slots.y, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (u_gr_en.z > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(u_slots.z, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (u_gr_en.w > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble(u_slots.w, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (idx < 0.5) { return vec4(0.0); }
+        if (sub_idx > 0.5) { gr_sub = pal_rgba(256.0 + sub_idx); }
+        return pal_rgba(256.0 + idx);
+    }
+    // 256-color mode
+    float idx = 0.0;
+    float sub_idx = 0.0;
+    if (u_gr_en.x + u_gr_en.y > 0.5) {
+        float c = gv_nibble(u_slots.x, x, y, 1.0) + gv_nibble(u_slots.y, x, y, 1.0) * 16.0;
+        if (c > 0.5) { idx = c; }
+    }
+    if (u_gr_en.z + u_gr_en.w > 0.5 && (idx < 0.5 || want_sub > 0.5)) {
+        float c = gv_nibble(u_slots.z, x, y, 1.0) + gv_nibble(u_slots.w, x, y, 1.0) * 16.0;
+        if (c > 0.5) {
+            if (idx < 0.5) { idx = c; } else { sub_idx = c; }
+        }
+    }
+    if (idx < 0.5) { return vec4(0.0); }
+    if (sub_idx > 0.5) { gr_sub = pal_rgba(256.0 + sub_idx); }
+    return pal_rgba(256.0 + idx);
+}
+
 vec4 eval_ts(float is_text, float x, float y) {
     if (is_text > 0.5) {
         return sample_text(x, y);
@@ -417,39 +481,133 @@ void main() {
     float y = u_y_flip.x + floor(gl_FragCoord.y) * u_y_flip.y;
 
     float gr_rank = u_ranks.x;
-    if (gr_rank >= 2.5) {
-        vec4 gc = sample_graphics(x, y);
-        gl_FragColor = vec4(gc.rgb * step(0.5, gc.a), 1.0);
+    if (u_exon_flags < 15.5) {
+        if (gr_rank >= 2.5) {
+            vec4 gc = sample_graphics(x, y);
+            gl_FragColor = vec4(gc.rgb * step(0.25, gc.a), 1.0);
+            return;
+        }
+
+        float tx_first = step(u_ranks.y, u_ranks.z);
+        vec4 col = vec4(0.0);
+
+        if (gr_rank < 0.5) {
+            col = sample_graphics(x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = eval_ts(tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = eval_ts(1.0 - tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        } else if (gr_rank < 1.5) {
+            col = eval_ts(tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = sample_graphics(x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = eval_ts(1.0 - tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        } else {
+            col = eval_ts(tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = eval_ts(1.0 - tx_first, x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+            col = sample_graphics(x, y);
+            if (col.a > 0.25) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+        }
+
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    float tx_first = step(u_ranks.y, u_ranks.z);
-    vec4 col = vec4(0.0);
+    // EXON enabled: special priority (HP=0) or half-transparency (HP=1, contrast=15)
+    float gt = mod(u_exon_flags, 2.0);
+    float gg = mod(floor(u_exon_flags * 0.5), 2.0);
+    float bp = mod(floor(u_exon_flags * 0.25), 2.0);
+    float hp = mod(floor(u_exon_flags * 0.125), 2.0);
 
-    if (gr_rank < 0.5) {
-        col = sample_graphics(x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-    } else if (gr_rank < 1.5) {
-        col = eval_ts(tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = sample_graphics(x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-    } else {
-        col = eval_ts(tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = sample_graphics(x, y);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    vec4 gr_sub = vec4(0.0);
+    vec4 gr = sample_graphics_pair(x, y, hp * gg, gr_sub);
+    if (hp < 0.5 && gr.a > 0.75) {
+        gl_FragColor = vec4(gr.rgb, 1.0);
+        return;
     }
 
-    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 tx = vec4(0.0);
+    vec4 sp = vec4(0.0);
+    if (gr_rank < 2.5) {
+        tx = sample_text(x, y);
+        sp = sample_cynthia(x, y);
+    }
+    float tx_first = step(u_ranks.y, u_ranks.z);
+    vec4 front = mix(sp, tx, tx_first);
+    vec4 back = mix(tx, sp, tx_first);
+
+    vec4 c0 = gr;    float g0 = 1.0;
+    vec4 c1 = front; float g1 = 0.0;
+    vec4 c2 = back;  float g2 = 0.0;
+    if (gr_rank > 0.5 && gr_rank < 1.5) {
+        c0 = front; g0 = 0.0;
+        c1 = gr;    g1 = 1.0;
+        c2 = back;  g2 = 0.0;
+    } else if (gr_rank >= 1.5 && gr_rank < 2.5) {
+        c0 = front; g0 = 0.0;
+        c1 = back;  g1 = 0.0;
+        c2 = gr;    g2 = 1.0;
+    } else if (gr_rank >= 2.5) {
+        c1 = vec4(0.0);
+        c2 = vec4(0.0);
+    }
+
+    if (hp < 0.5) {
+        vec4 fg = c0;
+        if (fg.a < 0.25) { fg = c1; }
+        if (fg.a < 0.25) { fg = c2; }
+        gl_FragColor = vec4(fg.rgb * step(0.25, fg.a), 1.0);
+        return;
+    }
+
+    vec4 top = vec4(0.0);
+    float top_is_gr = 0.0;
+    vec4 second = vec4(0.0);
+    if (c0.a > 0.25) {
+        top = c0; top_is_gr = g0;
+        second = (c1.a > 0.25) ? c1 : c2;
+    } else if (c1.a > 0.25) {
+        top = c1; top_is_gr = g1;
+        second = c2;
+    } else {
+        top = c2; top_is_gr = g2;
+    }
+
+    if (top.a < 0.25) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    vec4 bg_blend = vec4(0.0);
+    float do_blend = 0.0;
+    float trigger = max(bp, step(0.75, top.a));
+    if (top_is_gr > 0.5) {
+        if (trigger > 0.5 && gg > 0.5 && gr_sub.a > 0.25) {
+            bg_blend = gr_sub;
+            do_blend = 1.0;
+        } else if (trigger > 0.5 && gt > 0.5) {
+            bg_blend = second;
+            do_blend = 1.0;
+        } else if (trigger > 0.5 && gg > 0.5) {
+            bg_blend = vec4(0.0);
+            do_blend = 1.0;
+        }
+    } else if (trigger > 0.5 && gt > 0.5) {
+        bg_blend = second;
+        do_blend = 1.0;
+    }
+
+    if (do_blend > 0.5) {
+        vec3 bg_rgb = (bg_blend.a > 0.25) ? bg_blend.rgb : vec3(0.0);
+        gl_FragColor = vec4(blend_rgba6(top.rgb, bg_rgb), 1.0);
+    } else {
+        gl_FragColor = vec4(top.rgb, 1.0);
+    }
 }
 "#;
 
@@ -495,6 +653,21 @@ float bit_scale(float bit_pos) {
 
 vec4 pal_rgba(float col, float pal_v) {
     return texture2D(u_palette, vec2((col + 0.5) / 512.0, pal_v));
+}
+
+vec3 blend_rgba6(vec3 fg_rgb, vec3 bg_rgb) {
+    vec3 f6 = floor(floor(fg_rgb * 255.0 + 0.5) * 0.25);
+    vec3 b6 = floor(floor(bg_rgb * 255.0 + 0.5) * 0.25);
+    vec3 m6 = floor((f6 + b6) * 0.5);
+    vec3 m8 = m6 * 4.0 + floor(m6 * 0.0625);
+    return m8 / 255.0;
+}
+
+vec4 apply_interlace(vec3 rgb, float interlace_dim) {
+    if (interlace_dim > 0.5) {
+        rgb = floor(floor(rgb * 255.0 + 0.5) * 0.75) / 255.0;
+    }
+    return vec4(rgb, 1.0);
 }
 
 vec4 sample_text(float x, float y, float r2, float pal_v) {
@@ -640,6 +813,68 @@ vec4 sample_graphics(float x, float y, float mode, float r2, float pal_v) {
     return vec4(0.0);
 }
 
+vec4 sample_graphics_pair(float x, float y, float mode, float r2, float pal_v, float want_sub, out vec4 gr_sub) {
+    gr_sub = vec4(0.0);
+    if (mode >= 3.5) {
+        return sample_graphics(x, y, mode, r2, pal_v);
+    }
+
+    float en0 = mod(r2, 2.0);
+    float en1 = mod(floor(r2 * 0.5), 2.0);
+    float en2 = mod(floor(r2 * 0.25), 2.0);
+    float en3 = mod(floor(r2 * 0.125), 2.0);
+    if (en0 + en1 + en2 + en3 < 0.5) {
+        return vec4(0.0);
+    }
+
+    vec4 slots = floor(row_texel(7.0, y) * 255.0 + vec4(0.5));
+    if (mode < 0.5) {
+        float idx = 0.0;
+        float sub_idx = 0.0;
+        if (en0 > 0.5) {
+            float n = gv_nibble_row(slots.x, x, y, 1.0);
+            if (n > 0.5) { idx = n; }
+        }
+        if (en1 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble_row(slots.y, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (en2 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble_row(slots.z, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (en3 > 0.5 && (idx < 0.5 || (want_sub > 0.5 && sub_idx < 0.5))) {
+            float n = gv_nibble_row(slots.w, x, y, 1.0);
+            if (n > 0.5) {
+                if (idx < 0.5) { idx = n; } else { sub_idx = n; }
+            }
+        }
+        if (idx < 0.5) { return vec4(0.0); }
+        if (sub_idx > 0.5) { gr_sub = pal_rgba(256.0 + sub_idx, pal_v); }
+        return pal_rgba(256.0 + idx, pal_v);
+    }
+
+    float idx = 0.0;
+    float sub_idx = 0.0;
+    if (en0 + en1 > 0.5) {
+        float c = gv_nibble_row(slots.x, x, y, 1.0) + gv_nibble_row(slots.y, x, y, 1.0) * 16.0;
+        if (c > 0.5) { idx = c; }
+    }
+    if (en2 + en3 > 0.5 && (idx < 0.5 || want_sub > 0.5)) {
+        float c = gv_nibble_row(slots.z, x, y, 1.0) + gv_nibble_row(slots.w, x, y, 1.0) * 16.0;
+        if (c > 0.5) {
+            if (idx < 0.5) { idx = c; } else { sub_idx = c; }
+        }
+    }
+    if (idx < 0.5) { return vec4(0.0); }
+    if (sub_idx > 0.5) { gr_sub = pal_rgba(256.0 + sub_idx, pal_v); }
+    return pal_rgba(256.0 + idx, pal_v);
+}
+
 vec4 eval_ts(float is_text, float x, float y, float r2, float cyn_act, float pal_v) {
     if (is_text > 0.5) {
         return sample_text(x, y, r2, pal_v);
@@ -667,41 +902,142 @@ void main() {
 
     vec4 r6 = row_texel(6.0, y);
     float gr_rank = floor(r6.r * 255.0 + 0.5);
-    if (gr_rank >= 2.5) {
-        vec4 gc = sample_graphics(x, y, mode, r2, pal_v);
-        gl_FragColor = vec4(gc.rgb * step(0.5, gc.a), 1.0);
+    float r6_a = floor(r6.a * 255.0 + 0.5);
+    float interlace_dim = step(127.5, r6_a);
+    float r2_hi = r6_a - interlace_dim * 128.0;
+    float exon = mod(floor(r2_hi * 0.0625), 2.0);
+
+    if (exon < 0.5) {
+        if (gr_rank >= 2.5) {
+            vec4 gc = sample_graphics(x, y, mode, r2, pal_v);
+            gl_FragColor = apply_interlace(gc.rgb * step(0.25, gc.a), interlace_dim);
+            return;
+        }
+
+        float tx_rank = floor(r6.g * 255.0 + 0.5);
+        float sp_rank = floor(r6.b * 255.0 + 0.5);
+        float tx_first = step(tx_rank, sp_rank);
+        vec4 col = vec4(0.0);
+
+        if (gr_rank < 0.5) {
+            col = sample_graphics(x, y, mode, r2, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+        } else if (gr_rank < 1.5) {
+            col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = sample_graphics(x, y, mode, r2, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+        } else {
+            col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+            col = sample_graphics(x, y, mode, r2, pal_v);
+            if (col.a > 0.25) { gl_FragColor = apply_interlace(col.rgb, interlace_dim); return; }
+        }
+
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
+    // EXON enabled: special priority (HP=0) or half-transparency (HP=1, contrast=15)
+    float gt = mod(r2_hi, 2.0);
+    float gg = mod(floor(r2_hi * 0.5), 2.0);
+    float bp = mod(floor(r2_hi * 0.25), 2.0);
+    float hp = mod(floor(r2_hi * 0.125), 2.0);
+
+    vec4 gr_sub = vec4(0.0);
+    vec4 gr = sample_graphics_pair(x, y, mode, r2, pal_v, hp * gg, gr_sub);
+    if (hp < 0.5 && gr.a > 0.75) {
+        gl_FragColor = apply_interlace(gr.rgb, interlace_dim);
+        return;
+    }
+
+    vec4 tx = vec4(0.0);
+    vec4 sp = vec4(0.0);
+    if (gr_rank < 2.5) {
+        tx = sample_text(x, y, r2, pal_v);
+        sp = sample_cynthia(x, y, r2, cynthia_active, pal_v);
+    }
     float tx_rank = floor(r6.g * 255.0 + 0.5);
     float sp_rank = floor(r6.b * 255.0 + 0.5);
     float tx_first = step(tx_rank, sp_rank);
-    vec4 col = vec4(0.0);
+    vec4 front = mix(sp, tx, tx_first);
+    vec4 back = mix(tx, sp, tx_first);
 
-    if (gr_rank < 0.5) {
-        col = sample_graphics(x, y, mode, r2, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-    } else if (gr_rank < 1.5) {
-        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = sample_graphics(x, y, mode, r2, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-    } else {
-        col = eval_ts(tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = eval_ts(1.0 - tx_first, x, y, r2, cynthia_active, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
-        col = sample_graphics(x, y, mode, r2, pal_v);
-        if (col.a > 0.5) { gl_FragColor = vec4(col.rgb, 1.0); return; }
+    vec4 c0 = gr;    float g0 = 1.0;
+    vec4 c1 = front; float g1 = 0.0;
+    vec4 c2 = back;  float g2 = 0.0;
+    if (gr_rank > 0.5 && gr_rank < 1.5) {
+        c0 = front; g0 = 0.0;
+        c1 = gr;    g1 = 1.0;
+        c2 = back;  g2 = 0.0;
+    } else if (gr_rank >= 1.5 && gr_rank < 2.5) {
+        c0 = front; g0 = 0.0;
+        c1 = back;  g1 = 0.0;
+        c2 = gr;    g2 = 1.0;
+    } else if (gr_rank >= 2.5) {
+        c1 = vec4(0.0);
+        c2 = vec4(0.0);
     }
 
-    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    if (hp < 0.5) {
+        vec4 fg = c0;
+        if (fg.a < 0.25) { fg = c1; }
+        if (fg.a < 0.25) { fg = c2; }
+        gl_FragColor = apply_interlace(fg.rgb * step(0.25, fg.a), interlace_dim);
+        return;
+    }
+
+    vec4 top = vec4(0.0);
+    float top_is_gr = 0.0;
+    vec4 second = vec4(0.0);
+    if (c0.a > 0.25) {
+        top = c0; top_is_gr = g0;
+        second = (c1.a > 0.25) ? c1 : c2;
+    } else if (c1.a > 0.25) {
+        top = c1; top_is_gr = g1;
+        second = c2;
+    } else {
+        top = c2; top_is_gr = g2;
+    }
+
+    if (top.a < 0.25) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    vec4 bg_blend = vec4(0.0);
+    float do_blend = 0.0;
+    float trigger = max(bp, step(0.75, top.a));
+    if (top_is_gr > 0.5) {
+        if (trigger > 0.5 && gg > 0.5 && gr_sub.a > 0.25) {
+            bg_blend = gr_sub;
+            do_blend = 1.0;
+        } else if (trigger > 0.5 && gt > 0.5) {
+            bg_blend = second;
+            do_blend = 1.0;
+        } else if (trigger > 0.5 && gg > 0.5) {
+            bg_blend = vec4(0.0);
+            do_blend = 1.0;
+        }
+    } else if (trigger > 0.5 && gt > 0.5) {
+        bg_blend = second;
+        do_blend = 1.0;
+    }
+
+    if (do_blend > 0.5) {
+        vec3 bg_rgb = (bg_blend.a > 0.25) ? bg_blend.rgb : vec3(0.0);
+        gl_FragColor = apply_interlace(blend_rgba6(top.rgb, bg_rgb), interlace_dim);
+    } else {
+        gl_FragColor = apply_interlace(top.rgb, interlace_dim);
+    }
 }
 "#;
 
